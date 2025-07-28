@@ -1,9 +1,11 @@
-import Papa from 'papaparse';
-import jsonic from 'jsonic';
 import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import mysql from 'mysql2/promise';
 import { MedicalDatabaseLangChainApp } from '../../index';
+
+import Papa from 'papaparse';
+// @ts-ignore
+import jsonic from 'jsonic';
 
 type Step = { observation?: unknown };
 type AgentResult = {
@@ -11,143 +13,130 @@ type AgentResult = {
     text?: unknown;
     result?: unknown;
     intermediateSteps?: Step[];
+    [key: string]: unknown;
 };
 
-export function convertToJsonArray(
-    agentResult: AgentResult,
-    originalQuery: string
-): Array<Record<string, unknown>> {
-    let agentOutput =
-        (agentResult?.output as string) ||
-        (agentResult?.text as string) ||
-        (agentResult?.result as string) ||
-        (agentResult as unknown as string) ||
-        '';
+/**
+ * Parse patient data from numbered list format
+ */
+function parsePatientData(str: string): Array<Record<string, unknown>> {
+    const results: Array<Record<string, unknown>> = [];
 
-    // Try intermediateSteps for JSON
-    if (Array.isArray(agentResult?.intermediateSteps)) {
-        for (const step of agentResult.intermediateSteps) {
-            if (typeof step.observation === 'string') {
-                try {
-                    const arr = JSON.parse(step.observation);
-                    if (Array.isArray(arr)) return arr;
-                } catch { }
-                try {
-                    const arr = jsonic(step.observation);
-                    if (Array.isArray(arr)) return arr;
-                } catch { }
+    // Pattern: "1. John Doe - Paracetamol, 500mg"
+    const lines = str.split('\n').filter(line => line.trim());
+
+    for (const line of lines) {
+        const match = line.match(/^(\d+)\.\s*(.+?)\s*-\s*(.+?),\s*(\d+mg)$/);
+        if (match) {
+            results.push({
+                index: parseInt(match[1]),
+                patient: match[2].trim(),
+                medication: match[3].trim(),
+                dosage: match[4].trim()
+            });
+        }
+    }
+
+    return results;
+}
+
+/**
+ * Try to parse any string as structured data
+ */
+function tryParseStructured(str: string): Array<Record<string, unknown>> | null {
+    if (!str || typeof str !== 'string') return null;
+
+    // Try patient data first
+    const patientData = parsePatientData(str);
+    if (patientData.length > 0) return patientData;
+
+    // Try JSON
+    try {
+        const parsed = JSON.parse(str);
+        if (Array.isArray(parsed)) return parsed;
+        if (typeof parsed === 'object' && parsed != null) return [parsed];
+    } catch { }
+
+    return null;
+}
+
+/**
+ * Recursively search for and parse data fields
+ */
+function findAndParseDataFields(obj: any): Array<Record<string, unknown>> {
+    let results: Array<Record<string, unknown>> = [];
+
+    if (Array.isArray(obj)) {
+        // Process each item in array
+        for (const item of obj) {
+            results = results.concat(findAndParseDataFields(item));
+        }
+    } else if (obj && typeof obj === 'object') {
+        // Check if this object has a 'data' field that's a string
+        if (typeof obj.data === 'string') {
+            console.log('🔍 Found data field:', obj.data.substring(0, 100) + '...');
+            const parsed = tryParseStructured(obj.data);
+            if (parsed && parsed.length > 0) {
+                console.log('✅ Successfully parsed data field into', parsed.length, 'records');
+                results = results.concat(parsed);
+                return results; // Return early since we found what we're looking for
+            }
+        }
+
+        // Recursively search other properties
+        for (const [key, value] of Object.entries(obj)) {
+            if (key !== 'data') { // Skip data field since we already processed it
+                results = results.concat(findAndParseDataFields(value));
             }
         }
     }
 
-    // Try parsing as JSON
-    try {
-        const arr = JSON.parse(agentOutput);
-        if (Array.isArray(arr)) return arr;
-        if (typeof arr === 'object') return [arr];
-    } catch { }
-    // Try forgiving JSON parser
-    try {
-        const arr = jsonic(agentOutput);
-        if (Array.isArray(arr)) return arr;
-        if (typeof arr === 'object') return [arr];
-    } catch { }
+    return results;
+}
 
-    // Try CSV or TSV (comma or tab separated)
-    const csvParse = (txt: string, delimiter = ',') =>
-        Papa.parse<Record<string, unknown>>(txt, { header: true, delimiter }).data;
+/**
+ * Main conversion function
+ */
+export function convertToJsonArray(
+    agentResult: AgentResult,
+    originalQuery: string
+): Array<Record<string, unknown>> {
+    console.log('🚀 convertToJsonArray called with:', JSON.stringify(agentResult, null, 2));
 
-    // If it has two or more commas in the first line, treat as CSV
-    if ((agentOutput.match(/,/g) || []).length > 1) {
-        const csvArr = csvParse(agentOutput, ',');
-        if (csvArr.length && Object.keys(csvArr[0]).length > 1) return csvArr;
-    }
-    // If it has tabs, treat as TSV
-    if ((agentOutput.match(/\t/g) || []).length > 1) {
-        const tsvArr = csvParse(agentOutput, '\t');
-        if (tsvArr.length && Object.keys(tsvArr[0]).length > 1) return tsvArr;
+    // Search for and parse any data fields
+    const parsedData = findAndParseDataFields(agentResult);
+
+    if (parsedData.length > 0) {
+        console.log('✅ Found and parsed', parsedData.length, 'records');
+        return parsedData;
     }
 
-    // Try markdown table (e.g. | Name | Age | ... |)
-    const mdTableMatch = agentOutput.match(/^\|.*\|\s*$/gm);
-    if (mdTableMatch && mdTableMatch.length > 1) {
-        // Remove pipes and trim lines
-        const rows = agentOutput
-            .trim()
-            .split('\n')
-            .filter(line => /^\|.*\|\s*$/.test(line))
-            .map(line =>
-                line
-                    .replace(/^\||\|$/g, '')
-                    .split('|')
-                    .map(x => x.trim())
-            );
-        if (rows.length > 1) {
-            const [header, ...body] = rows;
-            return body.map(r =>
-                Object.fromEntries(header.map((h, i) => [h, r[i] ?? null]))
-            );
-        }
-    }
+    console.log('⚠️ No parseable data found, returning fallback');
 
-    // Try extracting key-value pairs from lines (like "Key: Value, Key2: Value2")
-    const lines = agentOutput.split('\n').map(l => l.trim()).filter(Boolean);
-    const kvLineArr: Array<Record<string, unknown>> = [];
-    for (const line of lines) {
-        // Match key: value pairs in the line
-        const regex = /([\w\s\-\.]+):\s*([^,]+)(?:,|$)/g;
-        let match: RegExpExecArray | null;
-        let rec: Record<string, unknown> = {};
-        let found = false;
-        while ((match = regex.exec(line))) {
-            rec[match[1].trim()] = match[2].trim();
-            found = true;
-        }
-        if (found) kvLineArr.push(rec);
-    }
-    if (kvLineArr.length > 0) return kvLineArr;
-
-    // Try splitting delimited lines with consistent counts, use first line as header if possible
-    if (lines.length > 1 && lines.every(line => line.split(',').length === lines[0].split(',').length)) {
-        const columns = lines[0].split(',').map(h => h.trim());
-        const dataLines = lines.slice(1);
-        // Check if columns looks like headers (all words, not numbers)
-        const isHeader = columns.every(h => isNaN(Number(h)));
-        if (isHeader) {
-            return dataLines.map(line => {
-                const parts = line.split(',').map(s => s.trim());
-                return Object.fromEntries(columns.map((h, i) => [h, parts[i] ?? null]));
-            });
-        } else {
-            // No header: just return as arrays
-            return lines.map(line => {
-                const parts = line.split(',').map(s => s.trim());
-                return Object.fromEntries(parts.map((v, i) => [`col${i + 1}`, v]));
-            });
-        }
-    }
-
-    // Final fallback: Wrap whole response as one record
+    // Fallback: Wrap whole response as one record
     return [
         {
-            response: agentOutput,
+            response: 'No structured data found',
             query: originalQuery,
             source: 'dynamic_sql_agent',
-            timestamp: new Date().toISOString()
-        }
+            timestamp: new Date().toISOString(),
+        },
     ];
 }
 
 export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router {
     const router = Router();
 
-    // Query medical database with natural language
+    // Query medical database with natural language - ENHANCED WITH PERFORMANCE OPTIMIZATIONS
+    // Query medical database with natural language - ENHANCED WITH PERFORMANCE OPTIMIZATIONS
     router.post('/query',
         [
             body('query').isString().isLength({ min: 1, max: 500 }).withMessage('Query must be 1-500 characters'),
             body('context').optional().isString().isLength({ max: 1000 }).withMessage('Context must be less than 1000 characters')
         ],
         async (req: Request, res: Response) => {
+            const startTime = performance.now();
+
             try {
                 const errors = validationResult(req);
                 if (!errors.isEmpty()) {
@@ -159,72 +148,209 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
 
                 const { query, context = 'Medical database query' } = req.body;
 
-                // Use LangChain SQL Agent to process the query dynamically
-                let result;
-                try {
-                    const sqlAgent = langchainApp.getSqlAgent();
+                console.log(`🚀 Processing smart query: "${query}"`);
 
-                    if (sqlAgent) {
-                        console.log(`Processing dynamic query: "${query}"`);
+                // PERFORMANCE OPTIMIZATION 1: Parallel execution of independent operations
+                const sqlAgent = langchainApp.getSqlAgent();
 
-                        // Let SQL agent process any query dynamically
-                        const agentResult = await sqlAgent.call({ input: query });
-                        console.log('Agent result:', agentResult);
-
-                        // Convert the agent response to JSON array format
-                        const jsonArray = convertToJsonArray(agentResult, query);
-
-                        result = {
-                            type: 'medical_query',
-                            data: jsonArray,
-                            query_processed: query,
-                            source: 'dynamic_sql_agent',
-                            record_count: jsonArray.length,
-                            timestamp: new Date().toISOString()
-                        };
-
-                        console.log(`Returning ${jsonArray.length} records as JSON array`);
-                    } else {
-                        // Fallback if SQL agent not available
-                        result = {
-                            type: 'medical_query',
-                            data: [{
-                                error: 'SQL Agent not available',
-                                query_attempted: query,
-                                status: 'service_unavailable'
-                            }],
-                            source: 'fallback',
-                            timestamp: new Date().toISOString()
-                        };
-                    }
-                } catch (error) {
-                    console.error('Query processing error:', error);
-                    result = {
-                        type: 'medical_query',
-                        data: [{
-                            error: (error as Error).message,
-                            query_attempted: query,
-                            status: 'processing_failed'
-                        }],
-                        source: 'error_handler',
+                if (!sqlAgent) {
+                    return res.status(503).json({
+                        error: 'Enhanced SQL Agent not available',
+                        message: 'Service temporarily unavailable',
                         timestamp: new Date().toISOString()
-                    };
+                    });
                 }
+
+                // PERFORMANCE OPTIMIZATION 2: Use Promise.allSettled for parallel processing
+                const [queryInsightsResult, smartQueryResult] = await Promise.allSettled([
+                    langchainApp.getQueryInsights(query),
+                    langchainApp.executeSmartQuery(query, context)
+                ]);
+
+                // Extract results with error handling
+                const queryInsights = queryInsightsResult.status === 'fulfilled'
+                    ? queryInsightsResult.value
+                    : { analysis_available: false, error: 'Insights analysis failed' };
+
+                const smartResult = smartQueryResult.status === 'fulfilled'
+                    ? smartQueryResult.value
+                    : { type: 'error', data: [{ error: 'Query execution failed' }], source: 'error' };
+
+                console.log('📊 Query insights:', queryInsights);
+                console.log('🧠 Smart query result:', smartResult);
+
+                // ALWAYS use convertToJsonArray to handle nested data parsing
+                const jsonArray: Array<Record<string, unknown>> = convertToJsonArray(smartResult, query);
+
+                // PERFORMANCE OPTIMIZATION 5: Pre-compute response structure
+                const processingTime = performance.now() - startTime;
+
+                const result = {
+                    type: 'enhanced_medical_query',
+                    data: jsonArray,
+                    query_processed: query,
+                    intelligence: {
+                        query_type: smartResult.type,
+                        insights: queryInsights.analysis_available ? queryInsights.intent : null,
+                        recommendations: queryInsights.analysis_available ? queryInsights.recommendations : [],
+                        processing_method: smartResult.source || 'unknown',
+                        syntax_validated: smartResult.metadata?.syntax_validated || false,
+                        execution_attempts: smartResult.metadata?.execution_attempts || 1,
+                        fallback_used: smartResult.metadata?.fallback_used || false
+                    },
+                    performance: {
+                        record_count: jsonArray.length,
+                        estimated_speed: queryInsights.analysis_available ?
+                            queryInsights.intent?.estimated_performance : 'unknown',
+                        complexity: queryInsights.analysis_available ?
+                            queryInsights.intent?.complexity : 'unknown',
+                        actual_processing_time: `${processingTime.toFixed(2)}ms`,
+                        optimization_level: smartResult.type === 'professional_query' ? 'maximum' : 'standard'
+                    },
+                    source: 'enhanced_langchain_agent',
+                    timestamp: new Date().toISOString()
+                };
+
+                console.log(`✅ Enhanced query completed: ${jsonArray.length} records, ${result.intelligence.processing_method} processing, ${processingTime.toFixed(2)}ms`);
+
+                // PERFORMANCE OPTIMIZATION 6: Set appropriate cache headers
+                res.set({
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'X-Processing-Time': `${processingTime.toFixed(2)}ms`,
+                    'X-Record-Count': jsonArray.length.toString(),
+                    'X-Query-Type': smartResult.type
+                });
 
                 const response = {
                     query: query,
                     context: context,
                     result: result,
                     metadata: {
-                        processing_time: '< 1s',
-                        source: 'langchain_medical_assistant'
+                        processing_time: `${processingTime.toFixed(2)}ms`,
+                        source: 'langchain_medical_assistant',
+                        timestamp: new Date().toISOString()
                     }
                 };
 
                 res.json(response);
+
             } catch (error) {
+                const processingTime = performance.now() - startTime;
+                console.error('❌ Enhanced query processing error:', error);
+
                 res.status(500).json({
                     error: 'Query processing failed',
+                    message: (error as Error).message,
+                    processing_time: `${processingTime.toFixed(2)}ms`,
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+    );
+
+    // ========== ENHANCED QUERY INTELLIGENCE ENDPOINTS ==========
+
+    // Get database intelligence and schema insights
+    router.get('/intelligence', async (req: Request, res: Response) => {
+        try {
+            const intelligence = langchainApp.getDatabaseIntelligence();
+
+            if (!intelligence) {
+                return res.json({
+                    intelligence_available: false,
+                    message: 'Database intelligence not initialized yet',
+                    note: 'Intelligence builds after successful database connection',
+                    timestamp: new Date().toISOString()
+                });
+            }
+
+            res.json({
+                intelligence_available: true,
+                database_intelligence: {
+                    tables: intelligence.tables.map(table => ({
+                        name: table.name,
+                        purpose: table.semanticContext,
+                        column_count: table.columns.length,
+                        relationship_count: table.relationships.length,
+                        key_columns: table.columns.filter(col => col.key).map(col => ({ name: col.name, type: col.key }))
+                    })),
+                    join_patterns: intelligence.commonJoinPaths.map(path => ({
+                        tables: path.tables,
+                        complexity: path.tables.length > 2 ? 'complex' : 'simple'
+                    })),
+                    query_patterns: intelligence.queryPatterns.map(pattern => ({
+                        pattern: pattern.pattern,
+                        usage_frequency: `${(pattern.frequency * 100).toFixed(0)}%`,
+                        performance_score: `${(pattern.performance * 100).toFixed(0)}%`
+                    }))
+                },
+                capabilities: {
+                    intent_analysis: true,
+                    query_planning: true,
+                    query_optimization: true,
+                    schema_intelligence: true,
+                    performance_prediction: true
+                },
+                recommendations: [
+                    'Use specific table and column names for best results',
+                    'Include time constraints for better performance on large datasets',
+                    'Specify patient identifiers when querying personal health information',
+                    'Use aggregate functions (COUNT, AVG, SUM) for statistical queries'
+                ],
+                timestamp: new Date().toISOString()
+            });
+        } catch (error) {
+            res.status(500).json({
+                error: 'Failed to retrieve database intelligence',
+                message: (error as Error).message,
+                timestamp: new Date().toISOString()
+            });
+        }
+    });
+
+    // Analyze query intent before execution
+    router.post('/analyze',
+        [
+            body('query').isString().isLength({ min: 1, max: 500 }).withMessage('Query must be 1-500 characters')
+        ],
+        async (req: Request, res: Response) => {
+            try {
+                const errors = validationResult(req);
+                if (!errors.isEmpty()) {
+                    return res.status(400).json({
+                        error: 'Validation failed',
+                        details: errors.array()
+                    });
+                }
+
+                const { query } = req.body;
+
+                console.log(`🔍 Analyzing query intent: "${query}"`);
+
+                const insights = await langchainApp.getQueryInsights(query);
+
+                res.json({
+                    query: query,
+                    analysis: insights,
+                    suggestions: {
+                        query_improvement: insights.analysis_available ?
+                            `Your query appears to be a ${insights.intent.type} operation with ${insights.intent.complexity} complexity` :
+                            'Analysis not available',
+                        performance_tips: insights.analysis_available ? insights.recommendations : [],
+                        estimated_execution: insights.analysis_available ?
+                            `Expected ${insights.intent.estimated_performance} performance` : 'Unknown'
+                    },
+                    next_steps: [
+                        'Review the analysis and suggestions above',
+                        'Make any recommended adjustments to your query',
+                        'Execute the query using the /query endpoint',
+                        'Check the results and performance metrics'
+                    ],
+                    timestamp: new Date().toISOString()
+                });
+            } catch (error) {
+                res.status(500).json({
+                    error: 'Query analysis failed',
                     message: (error as Error).message,
                     timestamp: new Date().toISOString()
                 });
