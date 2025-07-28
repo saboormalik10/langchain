@@ -10,6 +10,7 @@ import { memoryRoutes } from './routes/memory';
 import { promptRoutes } from './routes/prompts';
 import { parserRoutes } from './routes/parsers';
 import { healthRoutes } from './routes/health';
+import { jsonRoutes } from './routes/json';
 
 class MedicalLangChainAPI {
   private app: express.Application;
@@ -57,6 +58,7 @@ class MedicalLangChainAPI {
     // Pass langchainApp instance to routes
     this.app.use('/api/health', healthRoutes(this.langchainApp));
     this.app.use('/api/medical', medicalRoutes(this.langchainApp));
+    this.app.use('/api/json', jsonRoutes(this.langchainApp));
     this.app.use('/api/memory', memoryRoutes(this.langchainApp));
     this.app.use('/api/prompts', promptRoutes(this.langchainApp));
     this.app.use('/api/parsers', parserRoutes(this.langchainApp));
@@ -79,6 +81,10 @@ class MedicalLangChainAPI {
             'POST /api/medical/treatment': 'Get treatment recommendations',
             'GET /api/medical/patients': 'List patients (demo data)',
             'GET /api/medical/tables': 'List available database tables'
+          },
+          json: {
+            'POST /api/json/blood-tests': 'Get blood test records as JSON array',
+            'POST /api/json/patients': 'Get patient records as JSON array'
           },
           memory: {
             'POST /api/memory/conversation': 'Save conversation to memory',

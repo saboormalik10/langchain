@@ -780,6 +780,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@types/papaparse@npm:^5.3.16":
+  version: 5.3.16
+  resolution: "@types/papaparse@npm:5.3.16"
+  dependencies:
+    "@types/node": "npm:*"
+  checksum: 10c0/0009d3dcdc20cd37f171db77307844a575b89435a3398d1437173a1e5feb13a88e61fed7756f264555743a9510693ae1c9e20c4558c066085fd0bd881abf5497
+  languageName: node
+  linkType: hard
+
 "@types/qs@npm:*":
   version: 6.14.0
   resolution: "@types/qs@npm:6.14.0"
@@ -2049,6 +2058,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"jsonic@npm:^2.16.0":
+  version: 2.16.0
+  resolution: "jsonic@npm:2.16.0"
+  bin:
+    jsonic: bin/jsonic
+  checksum: 10c0/87b8b865716d22c4f75b6ce935d7265ffbee0c649b74bcd54015a2c544e118c1d05d8c2cae101fb48f2d23448cef75cb7c0c3fab2e94bbb5ef85fe3d94896bb6
+  languageName: node
+  linkType: hard
+
 "jsonpointer@npm:^5.0.1":
   version: 5.0.1
   resolution: "jsonpointer@npm:5.0.1"
@@ -2067,17 +2085,20 @@ __metadata:
     "@types/express": "npm:^5.0.3"
     "@types/morgan": "npm:^1.9.10"
     "@types/node": "npm:^24.1.0"
+    "@types/papaparse": "npm:^5.3.16"
     cors: "npm:^2.8.5"
     dotenv: "npm:^17.2.1"
     express: "npm:^5.1.0"
     express-rate-limit: "npm:^8.0.1"
     express-validator: "npm:^7.2.1"
     helmet: "npm:^8.1.0"
+    jsonic: "npm:^2.16.0"
     langchain: "npm:^0.3.30"
     morgan: "npm:^1.10.1"
     mysql2: "npm:^3.14.2"
     nodemon: "npm:^3.1.10"
     openai: "npm:^5.10.2"
+    papaparse: "npm:^5.5.3"
     reflect-metadata: "npm:^0.2.2"
     ts-node: "npm:^10.9.2"
     typeorm: "npm:^0.3.25"
@@ -2686,6 +2707,13 @@ __metadata:
   version: 1.0.1
   resolution: "package-json-from-dist@npm:1.0.1"
   checksum: 10c0/62ba2785eb655fec084a257af34dbe24292ab74516d6aecef97ef72d4897310bc6898f6c85b5cd22770eaa1ce60d55a0230e150fb6a966e3ecd6c511e23d164b
+  languageName: node
+  linkType: hard
+
+"papaparse@npm:^5.5.3":
+  version: 5.5.3
+  resolution: "papaparse@npm:5.5.3"
+  checksum: 10c0/623aae6a35703308fd5a39d616fb3837231ebc70697346355ea508154d3f24df75b6554b736afc1924192205518a5db14e75f5e1cf35d154326050a37cdd9447
   languageName: node
   linkType: hard
 
