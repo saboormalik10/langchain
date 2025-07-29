@@ -549,10 +549,9 @@ Include the exact SQL query in the output.`;
                         
 CRITICAL SQL REQUIREMENTS:
 1. Use only pattern matching with LIKE for dosage comparison
-2. Include LIKE patterns for all common dosage values up to 250mg (1mg, 5mg, 10mg, 25mg, 50mg, 100mg, 200mg, 250mg)
-3. DO NOT use any LIMIT clause
-4. Return ALL matching records
-5. Use proper JOIN between patients and medications tables`;
+2. DO NOT use any LIMIT clause
+3. Return ALL matching records
+4. Use proper JOIN between patients and medications tables`;
                         
                         console.log('🔄 Executing emergency direct query...');
                         const directResult = await langchainApp.executeSmartQuery(directQuery, 'Dosage query with forced patterns');

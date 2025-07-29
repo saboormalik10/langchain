@@ -40,6 +40,231 @@ import { MemoryVectorStore } from 'langchain/vectorstores/memory';
 // Load environment variables
 dotenv.config();
 
+// Database Record Parser Class for Enhanced JSON Parsing
+class DatabaseRecordParser {
+  private parsers: Array<(text: string) => { records: any[], format: string | null, metadata?: any }>;
+
+  constructor() {
+    this.parsers = [
+      this.parseJSON.bind(this),
+      this.parseMarkdownTable.bind(this),
+      this.parseCSV.bind(this)
+    ];
+  }
+
+  parse(text: string): { records: any[], sql: string[], format: string | null, metadata: any } {
+    const results: { records: any[], sql: string[], format: string | null, metadata: any } = {
+      records: [],
+      sql: this.extractSQL(text),
+      format: null,
+      metadata: {}
+    };
+
+    for (const parser of this.parsers) {
+      const parsed = parser(text);
+      if (parsed.records && parsed.records.length > 0) {
+        results.records = parsed.records;
+        results.format = parsed.format;
+        results.metadata = parsed.metadata || {};
+        break;
+      }
+    }
+
+    return results;
+  }
+
+  private parseJSON(text: string): { records: any[], format: string | null, metadata?: any } {
+    const jsonRegex = /```json\s*([\s\S]*?)\s*```/g;
+    let match;
+    let records: any[] = [];
+
+    while ((match = jsonRegex.exec(text)) !== null) {
+      try {
+        // Clean up JSON by removing comments and extra whitespace
+        let jsonText = match[1]
+          .replace(/\/\/.*$/gm, '') // Remove single-line comments
+          .replace(/\/\*[\s\S]*?\*\//g, '') // Remove multi-line comments
+          .trim();
+
+        // Try to fix incomplete JSON arrays
+        if (jsonText.endsWith(',')) {
+          jsonText = jsonText.slice(0, -1); // Remove trailing comma
+        }
+        
+        // If it looks like an incomplete array, try to close it
+        if (jsonText.includes('[') && !jsonText.includes(']')) {
+          const openBrackets = (jsonText.match(/\[/g) || []).length;
+          const closeBrackets = (jsonText.match(/\]/g) || []).length;
+          if (openBrackets > closeBrackets) {
+            jsonText += ']';
+          }
+        }
+
+        const parsed = JSON.parse(jsonText);
+        if (Array.isArray(parsed)) {
+          records = records.concat(parsed);
+        } else {
+          records.push(parsed);
+        }
+      } catch (e) {
+        console.warn('Failed to parse JSON code block:', (e as Error).message);
+        console.log('Problematic JSON text:', match[1].substring(0, 200) + '...');
+      }
+    }
+
+    // Also try to find JSON arrays without code blocks
+    if (records.length === 0) {
+      const jsonArrayMatch = text.match(/\[[\s\S]*?\]/);
+      if (jsonArrayMatch) {
+        try {
+          let jsonText = jsonArrayMatch[0]
+            .replace(/\/\/.*$/gm, '') // Remove comments
+            .replace(/\/\*[\s\S]*?\*\//g, ''); // Remove multi-line comments
+          
+          const parsed = JSON.parse(jsonText);
+          if (Array.isArray(parsed)) {
+            records = parsed;
+          }
+        } catch (e) {
+          console.warn('Failed to parse inline JSON array:', (e as Error).message);
+        }
+      }
+    }
+
+    return {
+      records,
+      format: records.length > 0 ? 'json' : null,
+      metadata: { source: 'json_codeblock' }
+    };
+  }
+
+  private parseMarkdownTable(text: string): { records: any[], format: string | null, metadata?: any } {
+    const tableRegex = /\|(.+?)\|\s*\n\s*\|[-:\s|]+\|\s*\n((?:\s*\|.+?\|\s*\n?)+)/;
+    const match = text.match(tableRegex);
+
+    if (!match) return { records: [], format: null };
+
+    const headerRow = match[1];
+    const dataRows = match[2];
+
+    const headers = headerRow.split('|')
+      .map(h => h.trim())
+      .filter(h => h);
+
+    const rows = dataRows.split('\n')
+      .filter(row => row.trim() && row.includes('|'))
+      .map(row => row.split('|')
+        .map(cell => cell.trim())
+        .filter(cell => cell !== ''));
+
+    const records = rows.map(row => {
+      const record: any = {};
+      headers.forEach((header, index) => {
+        if (row[index] !== undefined) {
+          record[header.toLowerCase().replace(/\s+/g, '_')] = this.convertValue(row[index]);
+        }
+      });
+      return record;
+    });
+
+    return {
+      records,
+      format: 'markdown_table',
+      metadata: { 
+        headers,
+        totalRows: records.length 
+      }
+    };
+  }
+
+  private parseCSV(text: string): { records: any[], format: string | null, metadata?: any } {
+    // Look for actual CSV data - should have consistent comma-separated structure
+    const lines = text.split('\n')
+      .filter(line => line.trim())
+      .filter(line => {
+        // Filter out lines that are clearly not CSV
+        return !line.includes('```') && 
+               !line.includes('SELECT') && 
+               !line.includes('SQL') &&
+               !line.includes('query') &&
+               !line.toLowerCase().includes('result') &&
+               !line.includes('//') &&
+               line.includes(',') &&
+               line.split(',').length >= 2; // Must have at least 2 columns
+      });
+
+    if (lines.length < 2) return { records: [], format: null };
+
+    // Check if the first line looks like headers
+    const firstLine = lines[0];
+    const potentialHeaders = firstLine.split(',').map(h => h.trim());
+    
+    // Headers should be reasonable column names
+    const validHeaders = potentialHeaders.every(header => 
+      header.length > 0 && 
+      header.length < 50 && 
+      !header.includes('"') &&
+      !/^\d+$/.test(header) // Headers shouldn't be just numbers
+    );
+
+    if (!validHeaders) return { records: [], format: null };
+
+    const headers = potentialHeaders;
+    const records = lines.slice(1).map(line => {
+      const values = line.split(',').map(v => v.trim().replace(/^["']|["']$/g, '')); // Remove quotes
+      const record: any = {};
+      headers.forEach((header, index) => {
+        if (values[index] !== undefined) {
+          record[header.toLowerCase().replace(/\s+/g, '_')] = this.convertValue(values[index]);
+        }
+      });
+      return record;
+    });
+
+    return {
+      records,
+      format: 'csv',
+      metadata: { headers }
+    };
+  }
+
+  private extractSQL(text: string): string[] {
+    const sqlRegex = /```sql\s*([\s\S]*?)\s*```/g;
+    const queries: string[] = [];
+    let match;
+
+    while ((match = sqlRegex.exec(text)) !== null) {
+      queries.push(match[1].trim());
+    }
+
+    // Also look for SQL queries without code blocks
+    if (queries.length === 0) {
+      const sqlKeywords = /\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\b[\s\S]*?;/gi;
+      let sqlMatch;
+      while ((sqlMatch = sqlKeywords.exec(text)) !== null) {
+        queries.push(sqlMatch[0].trim());
+      }
+    }
+
+    return queries;
+  }
+
+  private convertValue(value: any): any {
+    // Try to convert string values to appropriate types
+    if (!value || typeof value !== 'string') return value;
+    
+    // Number conversion
+    if (/^\d+$/.test(value)) return parseInt(value, 10);
+    if (/^\d+\.\d+$/.test(value)) return parseFloat(value);
+    
+    // Boolean conversion
+    if (value.toLowerCase() === 'true') return true;
+    if (value.toLowerCase() === 'false') return false;
+    
+    return value;
+  }
+}
+
 // Enhanced Query Intelligence Types
 interface QueryIntent {
   type: 'SELECT' | 'COUNT' | 'AGGREGATE' | 'JOIN' | 'FILTER' | 'SEARCH' | 'TREND' | 'COMPARISON';
@@ -473,6 +698,23 @@ Only use the below tools. Only use the information returned by the below tools t
 You MUST double check your query before executing it. If you get an error while executing a query, rewrite the query and try again.
 
 DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
+
+CRITICAL DOSAGE HANDLING RULES:
+1. For dosage range queries (e.g., "200mg to 500mg" or "between 200 and 500mg"), use proper numeric extraction and comparison
+2. NEVER use multiple LIKE statements for numeric ranges as they miss records
+3. Use CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) to extract numeric values from dosage strings
+4. For range queries, use BETWEEN operator or >= and <= comparisons
+5. Examples:
+   - For "200mg to 500mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) BETWEEN 200 AND 500
+   - For "greater than 100mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) > 100
+   - For "less than 50mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) < 50
+
+DOSAGE QUERY BEST PRACTICES:
+- Always extract numeric values from dosage strings before comparison
+- Use proper MySQL numeric functions for accurate range filtering
+- Handle cases where dosage might contain multiple numbers (take the first/primary dosage)
+- Include unit information in results when displaying dosage data
+- Test your numeric extraction logic to ensure it works with various dosage formats
 
 When providing your final answer, format it clearly and include the actual data results.
 Return ALL matching records unless specifically asked to limit.`,
@@ -1002,10 +1244,16 @@ CRITICAL SYNTAX SAFETY REQUIREMENTS:
 8. Use WHERE conditions that are guaranteed to work
 
 DOSAGE HANDLING RULES (CRITICAL):
-- If filtering by dosage amount, use simple string matching
-- Example: WHERE dosage LIKE '%500mg%' OR dosage LIKE '%250mg%'
-- Do NOT attempt numeric conversion of dosage strings
-- Do NOT use mathematical operations on text fields
+- For dosage range queries (e.g., "200mg to 500mg"), use proper numeric extraction and comparison
+- NEVER use multiple LIKE statements for numeric ranges as they miss records
+- Use CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) to extract numeric values from dosage strings
+- For range queries, use BETWEEN operator or >= and <= comparisons
+- Examples:
+  * For "200mg to 500mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) BETWEEN 200 AND 500
+  * For "greater than 100mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) > 100
+  * For "at least 250mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) >= 250
+- Only use LIKE for exact text matching, not for numeric ranges
+- Always test numeric extraction logic for accuracy
 
 MEDICAL DATABASE CONTEXT:
 - patients table: id, full_name, age, gender, email
@@ -1497,26 +1745,57 @@ Execute the query now with guaranteed syntax correctness:`;
 
   // ========== PUBLIC ENHANCED QUERY INTELLIGENCE METHODS ==========
 
-  // Parse SQL Agent response into JSON array of records
+  // Parse SQL Agent response into JSON array of records using enhanced parser
   private parseResponseToJsonArray(response: string): any[] {
     try {
-      console.log('🔍 Parsing response to JSON array...');
+      console.log('🔍 Parsing response to JSON array using enhanced DatabaseRecordParser...');
 
-      // First, try to find if there's already a JSON array in the response
+      // Create instance of the enhanced parser
+      const parser = new DatabaseRecordParser();
+      const parseResult = parser.parse(response);
+
+      console.log(`📊 Parser found ${parseResult.records.length} records using format: ${parseResult.format}`);
+      
+      if (parseResult.sql.length > 0) {
+        console.log(`🔧 Extracted ${parseResult.sql.length} SQL queries:`, parseResult.sql);
+      }
+
+      if (parseResult.records.length > 0) {
+        console.log(`✅ Successfully parsed ${parseResult.records.length} records`);
+        console.log('📋 Sample record:', parseResult.records[0]);
+        return parseResult.records;
+      }
+
+      // Fallback to legacy parsing if no records found
+      console.log('⚠️ No records found with enhanced parser, trying legacy fallback...');
+      return this.fallbackLegacyParsing(response);
+
+    } catch (error) {
+      console.error('❌ Error in enhanced parsing, using legacy fallback:', error);
+      return this.fallbackLegacyParsing(response);
+    }
+  }
+
+  // Legacy fallback parsing method
+  private fallbackLegacyParsing(response: string): any[] {
+    try {
+      console.log('🔄 Using legacy parsing method...');
+
+      // Try to find JSON array in response
       const jsonArrayMatch = response.match(/\[[\s\S]*?\]/);
       if (jsonArrayMatch) {
         try {
           const parsed = JSON.parse(jsonArrayMatch[0]);
           if (Array.isArray(parsed)) {
-            console.log(`✅ Found JSON array with ${parsed.length} records`);
+            console.log(`✅ Legacy parser found JSON array with ${parsed.length} records`);
             return parsed;
           }
         } catch (e) {
-          console.log('⚠️ Found JSON-like structure but failed to parse');
+          console.log('⚠️ Legacy JSON parsing failed');
         }
       }
 
-      // If no JSON array found, try to parse table-like data
+      // Try to parse table-like data
       const records: any[] = [];
       const lines = response.split('\n').filter(line => line.trim());
 
@@ -1529,7 +1808,7 @@ Execute the query now with guaranteed syntax correctness:`;
         if (line.includes('|') && line.includes('id') && (line.includes('name') || line.includes('patient'))) {
           headerIndex = i;
           headers = line.split('|').map(h => h.trim()).filter(h => h && h !== '---' && h !== '--');
-          console.log(`📋 Found table headers at line ${i}:`, headers);
+          console.log(`📋 Legacy parser found table headers at line ${i}:`, headers);
           break;
         }
       }
@@ -1561,46 +1840,18 @@ Execute the query now with guaranteed syntax correctness:`;
             }
           }
         }
-      } else {
-        // Try to extract key-value pairs or structured data
-        console.log('🔍 Looking for structured data patterns...');
-
-        // Look for ID patterns like "ID: 1, Name: John, Age: 25"
-        const idPattern = /(?:id|patient_id):\s*(\d+)[\s\S]*?(?:name|full_name):\s*([^,\n]+)[\s\S]*?(?:age):\s*(\d+)/gi;
-        let match;
-        while ((match = idPattern.exec(response)) !== null) {
-          records.push({
-            id: parseInt(match[1]),
-            name: match[2].trim(),
-            age: parseInt(match[3])
-          });
-        }
-
-        // If still no records, try line-by-line parsing for simple lists
-        if (records.length === 0) {
-          const simpleRecords = response.split('\n')
-            .filter(line => line.trim() && !line.includes('Query:') && !line.includes('SQL:'))
-            .map((line, index) => ({
-              id: index + 1,
-              content: line.trim()
-            }));
-
-          if (simpleRecords.length > 0) {
-            records.push(...simpleRecords);
-          }
-        }
       }
 
-      console.log(`✅ Parsed ${records.length} records from response`);
-      return records.length > 0 ? records : [{
-        message: 'No structured data found',
-        raw_response: response.substring(0, 500)
+      console.log(`� Legacy parser extracted ${records.length} records`);
+      return records.length > 0 ? records : [{ 
+        message: 'No structured data found with any parser', 
+        raw_response: response.substring(0, 500) 
       }];
 
     } catch (error) {
-      console.error('❌ Error parsing response to JSON array:', error);
-      return [{
-        error: 'Failed to parse response',
+      console.error('❌ Legacy parsing also failed:', error);
+      return [{ 
+        error: 'All parsing methods failed', 
         message: (error as Error).message,
         raw_response: response.substring(0, 500)
       }];
