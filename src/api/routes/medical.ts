@@ -180,7 +180,7 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
                 console.log('🧠 Smart query result:', smartResult);
 
                 // ALWAYS use convertToJsonArray to handle nested data parsing
-                const jsonArray: Array<Record<string, unknown>> = convertToJsonArray(smartResult, query);
+                const jsonArray: Array<Record<string, unknown>> = smartResult.data;
 
                 // PERFORMANCE OPTIMIZATION 5: Pre-compute response structure
                 const processingTime = performance.now() - startTime;

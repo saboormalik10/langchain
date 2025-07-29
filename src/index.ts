@@ -13,15 +13,15 @@ import { PromptTemplate, FewShotPromptTemplate } from '@langchain/core/prompts';
 import { AzureChatOpenAI, OpenAIEmbeddings } from '@langchain/openai';
 
 // LangChain Memory Imports
-import { 
-  BufferMemory, 
-  ConversationSummaryMemory, 
+import {
+  BufferMemory,
+  ConversationSummaryMemory,
   BufferWindowMemory,
   VectorStoreRetrieverMemory
 } from 'langchain/memory';
 
 // LangChain Chain Imports
-import { 
+import {
   ConversationalRetrievalQAChain,
   LLMChain,
   SequentialChain
@@ -96,7 +96,7 @@ class MedicalDatabaseLangChainApp {
   private dbConfig!: DatabaseConfig;
   private langchainConfig!: LangChainConfig;
   private llm!: AzureChatOpenAI;
-  
+
   // SQL Database instance
   private sqlDatabase: SqlDatabase | null = null;
 
@@ -199,7 +199,7 @@ class MedicalDatabaseLangChainApp {
 
       // VectorStoreRetrieverMemory - Temporarily disabled due to missing embeddings model
       console.log('⚠️ VectorStoreRetrieverMemory disabled - no embeddings model available');
-      
+
       // Create basic memory without vector store
       this.vectorMemory = new BufferMemory({
         memoryKey: 'vector_history',
@@ -354,7 +354,7 @@ Ensure the query follows medical database best practices and is production-ready
   public async connectToDatabase(): Promise<void> {
     try {
       console.log('🔗 Connecting to MySQL database...');
-      
+
       // Test basic connection first
       const testConnection = await mysql.createConnection({
         host: this.dbConfig.host,
@@ -381,7 +381,7 @@ Ensure the query follows medical database best practices and is production-ready
       });
 
       console.log('🔗 Initializing TypeORM DataSource...');
-      
+
       // Initialize the data source
       await dataSource.initialize();
       console.log('✅ TypeORM DataSource initialized');
@@ -390,7 +390,7 @@ Ensure the query follows medical database best practices and is production-ready
       this.sqlDatabase = await SqlDatabase.fromDataSourceParams({
         appDataSource: dataSource,
       });
-      
+
       console.log('✅ LangChain SqlDatabase created');
 
       // Build Schema Intelligence
@@ -481,10 +481,10 @@ Ensure the query follows medical database best practices and is production-ready
 
     try {
       console.log('🧠 Building database schema intelligence...');
-      
+
       // Get basic schema information
       const schemaInfo = await this.sqlDatabase.getTableInfo();
-      
+
       // Initialize schema intelligence structure
       this.schemaIntelligence = {
         tables: [],
@@ -610,8 +610,8 @@ Ensure the query follows medical database best practices and is production-ready
 
     try {
       console.log(`🧠 Analyzing query intent: "${query}"`);
-      
-      const contextString = context || (this.contextMemory ? 
+
+      const contextString = context || (this.contextMemory ?
         (await this.contextMemory.loadMemoryVariables({})).query_context || '' : '');
 
       const result = await this.queryIntentAnalyzer.call({
@@ -620,7 +620,7 @@ Ensure the query follows medical database best practices and is production-ready
       });
 
       const intent = JSON.parse(result.text) as QueryIntent;
-      
+
       // Store in context memory for future queries
       if (this.contextMemory) {
         await this.contextMemory.saveContext(
@@ -646,9 +646,9 @@ Ensure the query follows medical database best practices and is production-ready
 
     try {
       console.log(`🗺️ Creating query execution plan for ${intent.type} query`);
-      
+
       const schemaInfo = schema || (this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '');
-      const previousContext = this.contextMemory ? 
+      const previousContext = this.contextMemory ?
         (await this.contextMemory.loadMemoryVariables({})).query_context || '' : '';
 
       const result = await this.queryPlannerChain.call({
@@ -694,7 +694,7 @@ Ensure the query follows medical database best practices and is production-ready
           alternativeApproaches: ['Standard approach']
         };
       }
-      
+
       console.log(`✅ Query plan created with ${plan.steps.length} steps (${plan.estimatedPerformance} performance)`);
       return plan;
     } catch (error) {
@@ -712,9 +712,9 @@ Ensure the query follows medical database best practices and is production-ready
 
     try {
       console.log(`⚡ Optimizing SQL query for performance and best practices`);
-      
+
       const schemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
-      
+
       const result = await this.queryOptimizerChain.call({
         original_query: originalQuery,
         query_plan: plan ? JSON.stringify(plan) : '',
@@ -723,13 +723,13 @@ Ensure the query follows medical database best practices and is production-ready
       });
 
       const optimization = JSON.parse(result.text);
-      
+
       console.log(`✅ Query optimized with ${optimization.improvements.length} improvements`);
       return optimization;
     } catch (error) {
       console.error('❌ Error optimizing query:', error);
-      return { 
-        optimized_query: originalQuery, 
+      return {
+        optimized_query: originalQuery,
         improvements: ['Optimization failed'],
         error: (error as Error).message
       };
@@ -740,7 +740,7 @@ Ensure the query follows medical database best practices and is production-ready
   public async processQueryProfessionally(query: string, context?: string): Promise<any> {
     try {
       console.log(`🚀 Starting professional query processing for: "${query}"`);
-      
+
       // Step 1: Analyze query intent
       const intent = await this.analyzeQueryIntent(query, context);
       if (!intent) {
@@ -759,10 +759,10 @@ Ensure the query follows medical database best practices and is production-ready
         try {
           // Use enhanced prompt with syntax safety instructions
           const enhancedQuery = this.buildEnhancedQueryPrompt(query, intent, plan);
-          
+
           // Execute with retry mechanism and syntax validation
           const agentResult = await this.executeWithRetryAndValidation(enhancedQuery, 3);
-          
+
           finalResult = {
             type: 'professional_query',
             intent_analysis: {
@@ -809,25 +809,25 @@ Ensure the query follows medical database best practices and is production-ready
   // Execute query with retry mechanism and syntax validation
   private async executeWithRetryAndValidation(enhancedQuery: string, maxRetries: number): Promise<any> {
     let lastError: Error | null = null;
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(`🔄 Execution attempt ${attempt}/${maxRetries}`);
-        
+
         const result = await this.sqlAgent!.call({ input: enhancedQuery });
-        
+
         // Validate result for syntax errors
         if (this.containsSyntaxError(result.output)) {
           throw new Error(`Syntax error detected in attempt ${attempt}`);
         }
-        
+
         console.log(`✅ Query executed successfully on attempt ${attempt}`);
         return { ...result, attempts: attempt };
-        
+
       } catch (error) {
         lastError = error as Error;
         console.log(`⚠️ Attempt ${attempt} failed: ${lastError.message}`);
-        
+
         if (attempt < maxRetries) {
           // Modify query for next attempt
           enhancedQuery = this.adjustQueryForRetry(enhancedQuery, attempt);
@@ -835,7 +835,7 @@ Ensure the query follows medical database best practices and is production-ready
         }
       }
     }
-    
+
     throw lastError || new Error('All retry attempts failed');
   }
 
@@ -853,7 +853,7 @@ Ensure the query follows medical database best practices and is production-ready
       'near "',
       'unexpected token'
     ];
-    
+
     const lowerOutput = output.toLowerCase();
     return syntaxErrorIndicators.some(indicator => lowerOutput.includes(indicator));
   }
@@ -866,7 +866,7 @@ Ensure the query follows medical database best practices and is production-ready
       // Attempt 3: Use basic string matching instead of numeric conversion
       (query: string) => query + '\n\nIMPORTANT: If numeric conversion fails, use simple string matching with LIKE operator instead.',
     ];
-    
+
     const adjustment = adjustments[attempt - 2];
     return adjustment ? adjustment(originalQuery) : originalQuery;
   }
@@ -874,11 +874,11 @@ Ensure the query follows medical database best practices and is production-ready
   // Generate fallback query with guaranteed syntax
   private async generateFallbackQuery(query: string, intent: QueryIntent): Promise<any> {
     console.log('� Generating fallback query with guaranteed syntax');
-    
+
     try {
       // Create a safe, simple query based on intent
       let safeQuery = '';
-      
+
       if (intent.entities.includes('medications') && intent.entities.includes('patients')) {
         if (query.toLowerCase().includes('dosage')) {
           // Safe query for medication dosage without complex conversions
@@ -912,10 +912,10 @@ Ensure the query follows medical database best practices and is production-ready
           Limit results to 10 records.
         `;
       }
-      
+
       // Execute the safe query
       const result = await this.sqlAgent!.call({ input: safeQuery });
-      
+
       return {
         type: 'professional_query',
         intent_analysis: {
@@ -941,7 +941,7 @@ Ensure the query follows medical database best practices and is production-ready
           fallback_used: true
         }
       };
-      
+
     } catch (fallbackError) {
       console.error('❌ Even fallback query failed:', fallbackError);
       return this.fallbackQueryProcessing(query, 'All query execution methods failed');
@@ -950,9 +950,9 @@ Ensure the query follows medical database best practices and is production-ready
 
   // Build enhanced query prompt with intelligence and syntax safety
   private buildEnhancedQueryPrompt(query: string, intent: QueryIntent, plan: QueryPlan): string {
-    const schemaContext = this.schemaIntelligence ? 
+    const schemaContext = this.schemaIntelligence ?
       `Available tables: ${this.schemaIntelligence.tables.map(t => t.name).join(', ')}` : '';
-    
+
     return `
 ${query}
 
@@ -1155,7 +1155,7 @@ Execute the query now with guaranteed syntax correctness:`;
     try {
       // Test database connection and basic operations
       console.log('1. Testing LangChain SQL Database...');
-      
+
       // Get database schema
       console.log('2. Getting database schema:');
       const schema = await this.sqlDatabase.getTableInfo();
@@ -1209,7 +1209,7 @@ Execute the query now with guaranteed syntax correctness:`;
 
     console.log('⚠️ SQL Agent temporarily disabled due to package availability.');
     console.log('   Agent functionality will be restored once proper packages are available.');
-    
+
     try {
       console.log('1. Basic Agent Concepts:');
       console.log('   - ReAct approach: Reasoning + Acting');
@@ -1308,7 +1308,7 @@ Execute the query now with guaranteed syntax correctness:`;
       'UPDATE users SET password = \'hacked\'',
       'INSERT INTO logs VALUES (\'unauthorized\')'
     ];
-    
+
     for (const query of invalidQueries) {
       console.log(`   ❌ Blocked dangerous query: ${query}`);
     }
@@ -1322,7 +1322,7 @@ Execute the query now with guaranteed syntax correctness:`;
     console.log('\\n4. Custom Retry Logic:');
     let retryCount = 0;
     const maxRetries = 3;
-    
+
     while (retryCount < maxRetries) {
       try {
         console.log(`   Attempt ${retryCount + 1}/${maxRetries}: Database operation`);
@@ -1405,7 +1405,7 @@ Execute the query now with guaranteed syntax correctness:`;
   // Main execution method
   public async run(): Promise<void> {
     console.log('🏥 === MEDICAL DATABASE LANGCHAIN APPLICATION ===\\n');
-    
+
     try {
       // Initialize all components
       await this.connectToDatabase();
@@ -1415,7 +1415,7 @@ Execute the query now with guaranteed syntax correctness:`;
 
       // Run all demonstrations
       await this.demonstrateMemoryTypes();
-      await this.demonstrateDatabaseOperations(); 
+      await this.demonstrateDatabaseOperations();
       await this.demonstrateAgents();
       await this.demonstrateOutputParsers();
       await this.demonstratePromptEngineering();
@@ -1474,24 +1474,49 @@ Execute the query now with guaranteed syntax correctness:`;
   public async executeSmartQuery(query: string, context?: string): Promise<any> {
     try {
       // Use professional query processing if available
-      if (this.queryIntentAnalyzer && this.queryPlannerChain) {
+      if (false && this.queryIntentAnalyzer && this.queryPlannerChain) {
         return await this.processQueryProfessionally(query, context);
       }
-      
+
       // Fallback to regular SQL agent
       if (this.sqlAgent) {
         console.log(`🔄 Using standard SQL agent for: "${query}"`);
-        const result = await this.sqlAgent.call({ input: query });
+        // Request JSON format in the query
+        const jsonQuery = `${query}\n\nIMPORTANT: Return the results as a valid JSON array of objects. Format all data as proper JSON with keys corresponding to column names.`;
+        const result = await this.sqlAgent.call({ input: jsonQuery });
+        
+        // Try to extract and parse JSON from the response
+        let jsonData;
+        try {
+          // Look for JSON array in the response
+          const jsonMatch = result.output.match(/(\[[\s\S]*\])/);
+          if (jsonMatch) {
+            jsonData = JSON.parse(jsonMatch[1]);
+          } else {
+            // If no array found, look for any JSON object
+            const objMatch = result.output.match(/(\{[\s\S]*\})/);
+            if (objMatch) {
+              jsonData = JSON.parse(objMatch[1]);
+            } else {
+              jsonData = result.output; // Fallback to raw output
+            }
+          }
+        } catch (parseError) {
+          console.warn('Failed to parse JSON response:', parseError);
+          jsonData = result.output; // Fallback to raw output on parse error
+        }
+        
         return {
           type: 'standard_query',
-          data: result.output,
+          data: jsonData, // Return parsed JSON or raw output as fallback
+          raw_output: result.output, // Include raw output for debugging
           query_processed: query,
           source: 'standard_sql_agent',
           timestamp: new Date().toISOString(),
           note: 'Enhanced query intelligence not available, used standard processing'
         };
       }
-      
+
       return {
         type: 'error',
         data: [{ error: 'No query processing capabilities available' }],
@@ -1516,7 +1541,7 @@ Execute the query now with guaranteed syntax correctness:`;
   public async getQueryInsights(query: string): Promise<any> {
     try {
       const intent = await this.analyzeQueryIntent(query);
-      
+
       if (!intent) {
         return {
           analysis_available: false,
@@ -1548,27 +1573,27 @@ Execute the query now with guaranteed syntax correctness:`;
   // Get query recommendations based on intent
   private getQueryRecommendations(intent: QueryIntent): string[] {
     const recommendations: string[] = [];
-    
+
     if (intent.confidence < 0.5) {
       recommendations.push('Query intent unclear - consider rephrasing for better results');
     }
-    
+
     if (intent.type === 'JOIN' && intent.entities.length > 3) {
       recommendations.push('Complex join query detected - may have slower performance');
     }
-    
+
     if (intent.entities.some(e => e.toLowerCase().includes('patient'))) {
       recommendations.push('Patient data query - HIPAA compliance measures will be applied');
     }
-    
+
     if (intent.timeframe) {
       recommendations.push('Time-based query detected - ensure proper indexing on date fields');
     }
-    
+
     if (recommendations.length === 0) {
       recommendations.push('Query looks optimized for good performance');
     }
-    
+
     return recommendations;
   }
 
@@ -1622,11 +1647,11 @@ Execute the query now with guaranteed syntax correctness:`;
     try {
       const query = `Generate ${reportType} report with parameters: ${JSON.stringify(parameters)}`;
       const result = await this.sqlAgent.call({ input: query });
-      return { 
-        report: result.output, 
-        reportType, 
-        parameters, 
-        timestamp: new Date().toISOString() 
+      return {
+        report: result.output,
+        reportType,
+        parameters,
+        timestamp: new Date().toISOString()
       };
     } catch (error) {
       return { error: (error as Error).message, report: null };
