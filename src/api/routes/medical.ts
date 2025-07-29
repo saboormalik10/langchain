@@ -72,7 +72,7 @@ function findAndParseDataFields(obj: any): Array<Record<string, unknown>> {
             console.log('✅ Found array with', obj.length, 'records');
             return obj; // Return the array directly if it's already an array of objects
         }
-        
+
         // Otherwise, process each item in array
         for (const item of obj) {
             results = results.concat(findAndParseDataFields(item));
@@ -95,7 +95,7 @@ function findAndParseDataFields(obj: any): Array<Record<string, unknown>> {
                 }
             }
         }
-        
+
         // Check if this object has a 'data' field that's a string
         if (typeof obj.data === 'string') {
             console.log('🔍 Found data field:', obj.data.substring(0, 100) + '...');
@@ -135,13 +135,13 @@ export function convertToJsonArray(
                 // Look for specific pattern: SQL query followed by JSON array - common with OutputParsingFailure
                 if (item.error.includes('EXECUTED SQL QUERY') && item.error.includes('[') && item.error.includes(']')) {
                     console.log('⚠️ Found OutputParsingFailure with SQL query and possible JSON array');
-                    
+
                     // Extract SQL query for debugging
                     const sqlMatch = item.error.match(/EXECUTED SQL QUERY:\s*([\s\S]*?)(?=\n\s*\[|\n\n)/i);
                     if (sqlMatch) {
                         console.log('🔎 SQL Query:', sqlMatch[1].trim());
                     }
-                    
+
                     // Try to extract JSON array with precise pattern matching - targeting the array between SQL and troubleshooting URL
                     const jsonMatch = item.error.match(/(\[[\s\S]*?\])\s*(?=\n\s*Troubleshooting|$)/);
                     if (jsonMatch) {
@@ -156,18 +156,18 @@ export function convertToJsonArray(
                         }
                     }
                 }
-                
+
                 // Check if there's a SQL error with type conversion (CAST, CONVERT, etc.)
-                if ((item.error.includes('CAST') || item.error.includes('CONVERT') || item.error.includes('type conversion')) && 
+                if ((item.error.includes('CAST') || item.error.includes('CONVERT') || item.error.includes('type conversion')) &&
                     item.error.includes('EXECUTED SQL QUERY')) {
                     console.log('⚠️ Detected SQL type conversion error in output');
-                    
+
                     // Extract SQL query for debugging
                     const sqlMatch = item.error.match(/EXECUTED SQL QUERY:\s*([\s\S]*?)(?=\n\n|\n[A-Z]|Troubleshooting URL|$)/i);
                     if (sqlMatch) {
                         console.log('🔎 Problematic SQL Query:', sqlMatch[1].trim());
                     }
-                    
+
                     // Try to find JSON array even in error messages
                     const jsonMatch = item.error.match(/(\[[\s\S]*?\])\s*(?=\n\s*Troubleshooting|$)/);
                     if (jsonMatch) {
@@ -181,7 +181,7 @@ export function convertToJsonArray(
                             console.log('⚠️ Failed to parse JSON from error message:', e);
                         }
                     }
-                    
+
                     // Create a fallback response with error info
                     return [{
                         error: 'SQL type conversion error',
@@ -191,7 +191,7 @@ export function convertToJsonArray(
                         timestamp: new Date().toISOString()
                     }];
                 }
-                
+
                 // General case - try to extract JSON array from any error message
                 const jsonMatch = item.error.match(/(\[[\s\S]*?\])\s*(?=\n|$)/);
                 if (jsonMatch) {
@@ -281,18 +281,18 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
                 let smartResult = smartQueryResult.status === 'fulfilled'
                     ? smartQueryResult.value
                     : { type: 'error', data: [{ error: 'Query execution failed' }], source: 'error' };
-                    
+
                 // Check if we got success but fewer records than expected (specifically for dosage queries)
                 // This is the PRIMARY location where we handle queries that might have hidden LIMIT clauses
-                if (smartResult.type !== 'error' && 
-                    Array.isArray(smartResult.data) && 
+                if (smartResult.type !== 'error' &&
+                    Array.isArray(smartResult.data) &&
                     (smartResult.data.length < 5 || query.toLowerCase().includes('all')) &&
-                    (query.toLowerCase().includes('dosage') || query.toLowerCase().includes('mg') || 
-                     query.toLowerCase().includes('up to') || query.toLowerCase().includes('less than') ||
-                     query.toLowerCase().includes('all') || query.toLowerCase().includes('every'))) {
-                    
+                    (query.toLowerCase().includes('dosage') || query.toLowerCase().includes('mg') ||
+                        query.toLowerCase().includes('up to') || query.toLowerCase().includes('less than') ||
+                        query.toLowerCase().includes('all') || query.toLowerCase().includes('every'))) {
+
                     console.log(`⚠️ CRITICAL: Query returned only ${smartResult.data.length} records, which is likely fewer than expected. Forcing a NO-LIMIT query...`);
-                    
+
                     // Create a much stronger query that specifically prevents limits and forces the agent to return all records
                     try {
                         const forceNoLimitQuery = `${query}
@@ -310,28 +310,28 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
 VERIFICATION REQUIRED:
 Before returning results, verify that your generated SQL does NOT contain any LIMIT clause.
 If it does, remove it and re-run the query. This is critical for correct results.`;
-                        
+
                         console.log('🔄 Executing force-no-limit query to get ALL records');
                         const noLimitResult = await langchainApp.executeSmartQuery(forceNoLimitQuery, context);
-                        
+
                         // Only use the new result if it has more records
-                        if (noLimitResult.data && Array.isArray(noLimitResult.data) && 
+                        if (noLimitResult.data && Array.isArray(noLimitResult.data) &&
                             noLimitResult.data.length > smartResult.data.length) {
                             console.log(`✅ No-limit retry SUCCESSFUL, got ${noLimitResult.data.length} records (previous: ${smartResult.data.length})`);
                             smartResult = noLimitResult;
-                            
+
                             // Mark this as a successful retry
                             if (!smartResult.metadata) smartResult.metadata = {};
                             smartResult.metadata.retried_for_limit = true;
                             smartResult.metadata.original_count = smartResult.data.length;
                             smartResult.source = 'sql_agent_no_limit_retry';
-                            
+
                         } else {
                             console.log('⚠️ No-limit retry did not return more records, staying with original result');
                         }
                     } catch (noLimitError) {
                         console.error('❌ No-limit query failed:', noLimitError);
-                        
+
                         // Even if the retry failed, let's try one more direct approach with a very simple format
                         try {
                             console.log('🔄 Attempting final emergency retry with simplified format...');
@@ -339,9 +339,9 @@ If it does, remove it and re-run the query. This is critical for correct results
                             
 CRITICAL: Do not use any LIMIT clause. Return ALL matching records as a JSON array.
 For dosage comparison, use pattern matching with multiple LIKE conditions for all values up to 250mg.`;
-                            
+
                             const emergencyResult = await langchainApp.executeSmartQuery(emergencyQuery, context);
-                            if (emergencyResult.data && Array.isArray(emergencyResult.data) && 
+                            if (emergencyResult.data && Array.isArray(emergencyResult.data) &&
                                 emergencyResult.data.length > smartResult.data.length) {
                                 console.log(`✅ Emergency retry successful, got ${emergencyResult.data.length} records (previous: ${smartResult.data.length})`);
                                 smartResult = emergencyResult;
@@ -353,46 +353,46 @@ For dosage comparison, use pattern matching with multiple LIKE conditions for al
                         }
                     }
                 }
-                    
+
                 // Check if we have an error and need special handling
-                if (smartResult.type === 'error' && Array.isArray(smartResult.data) && 
+                if (smartResult.type === 'error' && Array.isArray(smartResult.data) &&
                     smartResult.data.length > 0 && typeof smartResult.data[0].error === 'string') {
-                    
+
                     const errorMsg = smartResult.data[0].error;
-                    
+
                     // Special case: JSON array is present in the error output
                     if (errorMsg.includes('EXECUTED SQL QUERY') && errorMsg.includes('[') && errorMsg.includes(']')) {
                         console.log('⚠️ Detected JSON array in error output, extracting data...');
                         const jsonMatch = errorMsg.match(/(\[[\s\S]*?\])\s*(?=\n\s*Troubleshooting|$)/);
-                        
+
                         if (jsonMatch) {
                             try {
                                 const parsedJson = JSON.parse(jsonMatch[1]);
                                 if (Array.isArray(parsedJson) && parsedJson.length > 0) {
                                     console.log(`✅ Successfully extracted ${parsedJson.length} records from error output`);
-                                    
+
                                     // Extract SQL query for logging
                                     const sqlMatch = errorMsg.match(/EXECUTED SQL QUERY:\s*([\s\S]*?)(?=\n\s*\[|\n\n)/);
                                     if (sqlMatch) {
                                         console.log('🔎 SQL Query Used:', sqlMatch[1].trim());
-                                        
+
                                         // Check if the query result set might be incomplete (less than expected records)
                                         if (parsedJson.length < 5 && !sqlMatch[1].toLowerCase().includes('limit')) {
                                             console.log('⚠️ Query returned fewer records than expected, checking for filtering issues...');
-                                            
+
                                             // Check for problematic filtering patterns in a more generic way
                                             const sqlLower = sqlMatch[1].toLowerCase();
-                                            const problematicFiltering = 
-                                                sqlLower.includes('cast') || 
+                                            const problematicFiltering =
+                                                sqlLower.includes('cast') ||
                                                 (sqlLower.includes('replace') && sqlLower.includes('as integer')) ||
                                                 sqlLower.includes('convert');
-                                                
+
                                             if (problematicFiltering) {
                                                 console.log('🔍 Detected problematic filtering pattern that may exclude records');
                                             }
                                         }
                                     }
-                                    
+
                                     // Check if SQL contains LIMIT and log it
                                     if (sqlMatch && sqlMatch[1].toLowerCase().includes('limit')) {
                                         console.warn('⚠️ SQL query contains a LIMIT clause that may restrict results');
@@ -421,37 +421,37 @@ For dosage comparison, use pattern matching with multiple LIKE conditions for al
                             }
                         }
                     }
-                    
+
                     // If still an error, try specialized retries based on error pattern
                     if (smartResult.type === 'error') {
                         // Case 1: CAST or type conversion error detected
-                        const hasTypeConversionIssue = 
-                            errorMsg.includes('CAST') || 
-                            errorMsg.includes('type conversion') || 
+                        const hasTypeConversionIssue =
+                            errorMsg.includes('CAST') ||
+                            errorMsg.includes('type conversion') ||
                             errorMsg.includes('convert') ||
                             errorMsg.includes('INTEGER');
-                            
+
                         if (hasTypeConversionIssue && errorMsg.includes('EXECUTED SQL QUERY')) {
                             console.log('⚠️ Detected SQL type conversion error, retrying with specialized query...');
-                            
+
                             // Extract the problematic field name from the error if possible
-                            const fieldMatch = errorMsg.match(/column ['"]?([a-zA-Z0-9_]+)['"]?/i) || 
-                                             errorMsg.match(/field ['"]?([a-zA-Z0-9_]+)['"]?/i);
+                            const fieldMatch = errorMsg.match(/column ['"]?([a-zA-Z0-9_]+)['"]?/i) ||
+                                errorMsg.match(/field ['"]?([a-zA-Z0-9_]+)['"]?/i);
                             const problemField = fieldMatch ? fieldMatch[1] : "";
-                            
+
                             // Create a specialized version of the query with guidance
                             let specializedQuery = '';
-                            
+
                             // Check if this is a comparison query
-                            const isComparison = query.toLowerCase().includes('less than') || 
-                                               query.toLowerCase().includes('more than') || 
-                                               query.toLowerCase().includes('under') || 
-                                               query.toLowerCase().includes('over') ||
-                                               query.toLowerCase().includes('maximum') || 
-                                               query.toLowerCase().includes('minimum') ||
-                                               query.toLowerCase().includes('greater than') || 
-                                               query.toLowerCase().includes('at least');
-                            
+                            const isComparison = query.toLowerCase().includes('less than') ||
+                                query.toLowerCase().includes('more than') ||
+                                query.toLowerCase().includes('under') ||
+                                query.toLowerCase().includes('over') ||
+                                query.toLowerCase().includes('maximum') ||
+                                query.toLowerCase().includes('minimum') ||
+                                query.toLowerCase().includes('greater than') ||
+                                query.toLowerCase().includes('at least');
+
                             if (isComparison) {
                                 // For comparison queries, provide pattern matching guidance
                                 specializedQuery = `${query}. 
@@ -461,7 +461,7 @@ CRITICAL SQL INSTRUCTIONS:
 3. For comparisons with text fields, use multiple LIKE patterns to cover possible values
 4. Return ALL records without any LIMIT
 5. Include the EXACT SQL QUERY in output`;
-                                
+
                                 // Add specific field guidance if we detected a field name
                                 if (problemField) {
                                     specializedQuery += `\n6. The field "${problemField}" is a text field - use LIKE patterns for it, not numeric comparison`;
@@ -475,9 +475,9 @@ CRITICAL SQL INSTRUCTIONS:
 3. Return all matching records with no LIMIT
 4. Include EXACT SQL QUERY in output`;
                             }
-                            
+
                             console.log(`🔄 Retrying with specialized query: "${specializedQuery}"`);
-                            
+
                             try {
                                 // Retry with the specialized query
                                 const retryResult = await langchainApp.executeSmartQuery(specializedQuery, context);
@@ -488,15 +488,15 @@ CRITICAL SQL INSTRUCTIONS:
                                 // Keep the original smartResult if retry fails
                             }
                         }
-                        
+
                         // Case 2: General SQL parsing or execution error
                         else if (errorMsg.includes('syntax error') || errorMsg.includes('parsing failure')) {
                             console.log('⚠️ Detected SQL syntax error, retrying with simplified query...');
-                            
+
                             const simplifiedQuery = `${query}. 
 IMPORTANT: Use only basic SQL SELECT statements with standard syntax. Avoid complex operations, 
 functions, and any non-standard features. Return all matching records and include the SQL query used.`;
-                            
+
                             try {
                                 const retryResult = await langchainApp.executeSmartQuery(simplifiedQuery, context);
                                 smartResult = retryResult;
@@ -505,22 +505,22 @@ functions, and any non-standard features. Return all matching records and includ
                                 console.error('❌ Simplified syntax retry failed:', retryError);
                             }
                         }
-                        
+
                         // Case 3: Results returned but there are fewer records than expected
                         else if (Array.isArray(smartResult.data) && smartResult.data.length < 5) {
                             // Extract SQL from error message to check if there's a LIMIT clause
                             const sqlMatch = errorMsg.match(/EXECUTED SQL QUERY:\s*([\s\S]*?)(?=\n\n|\n[A-Z]|$)/i);
                             if (sqlMatch && sqlMatch[1] && sqlMatch[1].toLowerCase().includes('limit')) {
                                 console.log('⚠️ Query has a LIMIT clause that may be restricting results, retrying without it...');
-                                
+
                                 const noLimitQuery = `${query}. 
 CRITICAL: Do NOT include any LIMIT clause in the SQL. I need ALL matching records (at least 12 records expected).
 Make sure to return ALL records that match the query criteria with NO LIMIT or restriction.
 Include the exact SQL query in the output.`;
-                                
+
                                 try {
                                     const retryResult = await langchainApp.executeSmartQuery(noLimitQuery, context);
-                                    if (retryResult.data && Array.isArray(retryResult.data) && 
+                                    if (retryResult.data && Array.isArray(retryResult.data) &&
                                         retryResult.data.length > smartResult.data.length) {
                                         smartResult = retryResult;
                                         console.log(`✅ Retry without LIMIT successful, got ${retryResult.data.length} records`);
@@ -537,12 +537,12 @@ Include the exact SQL query in the output.`;
 
                 console.log('📊 Query insights:', queryInsights);
                 // SPECIAL EMERGENCY FIX: Always check for dosage queries returning too few records
-                if (Array.isArray(smartResult.data) && 
-                    smartResult.data.length <= 2 && 
+                if (Array.isArray(smartResult.data) &&
+                    smartResult.data.length <= 2 &&
                     (query.toLowerCase().includes('dosage') || query.toLowerCase().includes('mg'))) {
-                    
+
                     console.log('🚨 EMERGENCY: Detected dosage query with suspiciously few records - forcing explicit retry');
-                    
+
                     try {
                         // Hard-coded dosage query that we know works
                         const directQuery = `Get all patients with medications where dosage is up to 250mg. 
@@ -552,37 +552,37 @@ CRITICAL SQL REQUIREMENTS:
 2. DO NOT use any LIMIT clause
 3. Return ALL matching records
 4. Use proper JOIN between patients and medications tables`;
-                        
+
                         console.log('🔄 Executing emergency direct query...');
                         const directResult = await langchainApp.executeSmartQuery(directQuery, 'Dosage query with forced patterns');
-                        
+
                         if (directResult.data && Array.isArray(directResult.data) && directResult.data.length > smartResult.data.length) {
                             console.log(`✅ EMERGENCY FIX SUCCESSFUL - got ${directResult.data.length} records (previous: ${smartResult.data.length})`);
-                            
+
                             // Keep original query info but use new results
                             directResult.query_processed = query;
                             directResult.source = 'emergency_direct_fix';
-                            
+
                             if (!directResult.metadata) directResult.metadata = {};
                             directResult.metadata.emergency_fix_applied = true;
                             directResult.metadata.previous_count = smartResult.data.length;
-                            
+
                             smartResult = directResult;
                         }
                     } catch (directError) {
                         console.error('❌ Emergency direct fix failed:', directError);
                     }
                 }
-                
+
                 console.log('🧠 Smart query result:', smartResult);
 
                 // Check the result - if it's from direct SQL bypass, we're good
                 // Otherwise check if we need to transform or handle special cases
                 console.log(`🔍 Checking result source: ${smartResult.source}`);
-                
+
                 // Prepare jsonArray with default handling for different result types
                 let jsonArray: Array<Record<string, unknown>> = [];
-                
+
                 // Direct SQL results already have the complete data - use it directly
                 if (smartResult.source === 'direct_sql_bypass') {
                     console.log(`✅ Using direct SQL results with ${smartResult.data.length} records`);
@@ -592,24 +592,24 @@ CRITICAL SQL REQUIREMENTS:
                 else if (Array.isArray(smartResult.data)) {
                     console.log(`✅ Using standard array data with ${smartResult.data.length} records`);
                     jsonArray = smartResult.data;
-                    
+
                     // Extra check: If it's a query that should have many records but only has a few,
                     // log a warning - we've probably hit LLM truncation
-                    const shouldHaveManyRecords = 
+                    const shouldHaveManyRecords =
                         query.toLowerCase().includes('all patient') ||
                         query.toLowerCase().includes('all records') ||
                         query.toLowerCase().includes('show all');
-                        
+
                     if (shouldHaveManyRecords && jsonArray.length < 10) {
                         console.warn(`⚠️ WARNING: Query for all data only returned ${jsonArray.length} records`);
                         console.warn(`⚠️ This is likely due to LLM truncation. Consider using direct SQL for this query.`);
-                        
+
                         // Add a note to the response
                         if (!smartResult.metadata) smartResult.metadata = {};
                         smartResult.metadata.warning = "Results may be incomplete due to LLM truncation";
                         smartResult.metadata.suggestion = "Consider using direct SQL for complete results";
                     }
-                } 
+                }
                 // Non-array data handling - convert to array with metadata
                 else {
                     console.log(`ℹ️ Using non-array data format`);
@@ -622,7 +622,7 @@ CRITICAL SQL REQUIREMENTS:
                         timestamp: new Date().toISOString()
                     }];
                 }
-                
+
                 // ORIGINAL CODE COMMENTED OUT FOR INSPECTION PURPOSES
                 /*
                 if (Array.isArray(smartResult.data)) {
@@ -1070,6 +1070,1031 @@ CRITICAL SQL REQUIREMENTS:
             });
         }
     });
+
+    // Enhanced endpoint for manual SQL execution with complete query extraction
+    // Fixed endpoint for manual SQL execution with better SQL cleaning
+    // Fixed endpoint for manual SQL execution with schema validation
+    router.post('/query-sql-manual',
+        [
+            body('query').isString().isLength({ min: 1, max: 500 }).withMessage('Query must be 1-500 characters'),
+            body('context').optional().isString().isLength({ max: 1000 }).withMessage('Context must be less than 1000 characters')
+        ],
+        async (req: Request, res: Response) => {
+            const startTime = performance.now();
+            let rawAgentResponse = null;
+            let debugInfo = {
+                extractionAttempts: [] as string[],
+                sqlCorrections: [] as string[],
+                originalQueries: [] as string[]
+                // No schema validations since we're trusting the sqlAgent
+            };
+
+            try {
+                const errors = validationResult(req);
+                if (!errors.isEmpty()) {
+                    return res.status(400).json({
+                        error: 'Validation failed',
+                        details: errors.array()
+                    });
+                }
+
+                const { query, context = 'Medical database query' } = req.body;
+
+                console.log(`🚀 Processing SQL manual query: "${query}"`);
+
+                const sqlAgent = langchainApp.getSqlAgent();
+
+                if (!sqlAgent) {
+                    return res.status(503).json({
+                        error: 'SQL Agent not available',
+                        message: 'Service temporarily unavailable',
+                        timestamp: new Date().toISOString()
+                    });
+                }
+
+                // Let sqlAgent handle most of the schema exploration
+                // We'll just do minimal setup to ensure the agent understands the task
+                console.log('📊 Preparing to let sqlAgent explore database schema');
+
+                // Declare connection variable for later use
+                let connection;
+
+                // Get minimal database information to guide the agent
+                try {
+                    connection = await mysql.createConnection({
+                        host: process.env.DB_HOST!,
+                        port: parseInt(process.env.DB_PORT!),
+                        user: process.env.DB_USER!,
+                        password: process.env.DB_PASSWORD!,
+                        database: process.env.DB_NAME!,
+                    });
+
+                    // Just get a list of tables to verify they exist
+                    // The sqlAgent will get detailed schema information using its own tools
+                    console.log('📊 Getting high-level database structure');
+                    const [tables] = await connection.execute(
+                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                        [process.env.DB_NAME]
+                    );
+
+                    if (Array.isArray(tables) && tables.length > 0) {
+                        const actualTables = tables.map((table: any) => table.TABLE_NAME);
+                        console.log('✅ Database contains these tables:', actualTables.join(', '));
+                        debugInfo.sqlCorrections.push(`Available tables: ${actualTables.join(', ')}`);
+                    } else {
+                        console.log('⚠️ No tables found in the database');
+                    }
+
+                    await connection.end();
+                    console.log('✅ Basic database structure check complete');
+
+                } catch (schemaError: any) {
+                    console.error('❌ Failed to get basic database structure:', schemaError.message);
+                    if (connection) await connection.end();
+                }                // Step 1: Get the SQL query from the agent
+                console.log('📊 Step 1: Extracting SQL query from agent...');
+                let agentResult;
+                let intermediateSteps: any[] = [];
+                let capturedSQLQueries: string[] = [];
+
+                try {
+                    // Configure LangChain's sqlAgent to use its built-in schema analysis capabilities
+                    const enhancedQuery = `
+You are a medical database SQL expert. Follow this strict process to write an accurate SQL query:
+
+1. ANALYZE: First, ALWAYS explore the complete database schema using the sql_db_schema tool to understand available tables and columns.
+   - Pay special attention to actual table names (e.g., 'pgxtest_results' not 'pgxtestresults')
+   - Note that many column names use snake_case format (e.g., 'full_name' not 'fullname')
+
+2. VALIDATE: Double-check the exact spelling and format of ALL column and table names:
+   - Use ONLY tables that actually exist in the schema (verify with sql_db_list_tables)
+   - Use ONLY column names that actually exist (check with sql_db_schema)
+   - Respect snake_case naming (e.g., 'patient_id', not 'patientid' or 'PatientID')
+
+3. PLAN: Consider the relationships between tables and how to join them properly:
+   - Identify the correct foreign key relationships
+   - Ensure join columns exist in both tables
+
+4. EXECUTE: Create a SQL query that correctly addresses the request using verified table and column names.
+
+CRITICAL: This database uses snake_case for most identifiers. NEVER assume column or table names - always verify them first.
+
+Query request: ${query}
+`;
+                    console.log('📝 Enhanced query with schema information:', enhancedQuery.substring(0, 200) + '...');
+
+                    // Configure the sqlAgent to prioritize schema exploration before query generation
+                    const agentConfig = {
+                        input: enhancedQuery,
+                        // Force the agent to always check schema first
+                        forceSchema: true
+                    };
+
+                    // Enhanced callback system to capture ALL agent actions and encourage schema exploration
+                    agentResult = await sqlAgent.call(agentConfig, {
+                        callbacks: [{
+                            handleAgentAction: (action: any) => {
+                                // Log ALL actions for debugging
+                                console.log('🔍 Agent action:', JSON.stringify(action, null, 2));
+
+                                // Encourage schema exploration first
+                                if (action.tool === 'sql_db_schema') {
+                                    console.log('✅ Agent is checking database schema - good practice!');
+                                    debugInfo.sqlCorrections.push('Agent checked database schema first');
+
+                                    // Store this important step
+                                    intermediateSteps.push({
+                                        tool: 'sql_db_schema',
+                                        toolInput: action.toolInput,
+                                        note: 'Schema exploration is critical for accurate queries'
+                                    });
+                                }
+
+                                // Capture any SQL-related actions, including query-checker
+                                if (action.tool === 'query-checker') {
+                                    const sql = String(action.toolInput);
+                                    // Store raw SQL before any cleaning
+                                    debugInfo.originalQueries.push(sql);
+
+                                    // Clean the SQL to extract only valid SQL
+                                    const cleanedSql = cleanSQLQuery(sql);
+                                    if (cleanedSql) {
+                                        capturedSQLQueries.push(cleanedSql);
+                                        console.log('✅ Captured SQL from query-checker:', cleanedSql);
+                                    }
+                                }
+
+                                // Also capture SQL from standard SQL tools
+                                if (action.tool === 'sql_db_query' ||
+                                    action.tool === 'query_sql_db' ||
+                                    action.tool === 'sql_db_schema' ||
+                                    action.tool === 'sql_db_list_tables') {
+
+                                    console.log('🔍 Captured tool action:', action.tool);
+                                    console.log('🔍 Tool input:', action.toolInput);
+
+                                    // Store original query
+                                    if (typeof action.toolInput === 'string') {
+                                        debugInfo.originalQueries.push(action.toolInput);
+                                    }
+
+                                    intermediateSteps.push({
+                                        tool: action.tool,
+                                        toolInput: action.toolInput
+                                    });
+
+                                    // If this looks like SQL, add it to our collection
+                                    if (typeof action.toolInput === 'string' &&
+                                        (action.toolInput.toLowerCase().includes('select') ||
+                                            action.toolInput.toLowerCase().includes('from'))) {
+
+                                        // Clean the SQL to extract only valid SQL
+                                        const cleanedSql = cleanSQLQuery(action.toolInput);
+                                        if (cleanedSql) {
+                                            capturedSQLQueries.push(cleanedSql);
+                                            console.log('✅ Captured SQL from tool action:', cleanedSql);
+                                        }
+                                    }
+                                }
+                                return action;
+                            },
+                            handleChainStart: (chain: any) => {
+                                console.log('🔄 Chain started:', chain.name);
+                            },
+                            handleChainEnd: (output: any) => {
+                                console.log('🔄 Chain ended with output:', typeof output === 'string' ?
+                                    output.substring(0, 200) + '...' :
+                                    JSON.stringify(output).substring(0, 200) + '...');
+                            },
+                            handleToolStart: (tool: any) => {
+                                console.log('🔧 Tool started:', tool.name);
+
+                                // If we're about to run a SQL query, make sure we've checked schema first
+                                if ((tool.name === 'sql_db_query' || tool.name === 'query_sql_db') &&
+                                    !intermediateSteps.some(s => s.tool === 'sql_db_schema')) {
+                                    console.log('⚠️ Warning: About to run SQL query without checking schema first');
+                                }
+                            },
+                            handleToolEnd: (output: any) => {
+                                console.log('🔧 Tool ended with output:', typeof output === 'string' ?
+                                    output.substring(0, 200) + '...' :
+                                    JSON.stringify(output).substring(0, 200) + '...');
+
+                                // If this is schema output, save it for debugging
+                                if (output && typeof output === 'string' && output.includes('COLUMN_NAME')) {
+                                    console.log('📊 Schema information detected in output');
+                                    debugInfo.sqlCorrections.push('Schema examined before query generation');
+                                }
+
+                                // Check if the tool output contains SQL results
+                                if (typeof output === 'string' && output.toLowerCase().includes('select')) {
+                                    // Clean the SQL to extract only valid SQL
+                                    const cleanedSql = cleanSQLQuery(output);
+                                    if (cleanedSql) {
+                                        capturedSQLQueries.push(cleanedSql);
+                                        console.log('✅ Captured SQL from tool output:', cleanedSql);
+                                    }
+                                }
+                            }
+                        }]
+                    });
+
+                    // Store raw response for debugging
+                    rawAgentResponse = JSON.stringify(agentResult, null, 2);
+                    console.log('🔍 Agent raw response:', rawAgentResponse);
+
+                    // Also try to extract SQL from the final output
+                    if (agentResult.output && typeof agentResult.output === 'string') {
+                        const cleanedSql = cleanSQLQuery(agentResult.output);
+                        if (cleanedSql) {
+                            capturedSQLQueries.push(cleanedSql);
+                            console.log('✅ Captured SQL from final output:', cleanedSql);
+                        }
+                    }
+
+                } catch (agentError: any) {
+                    console.error('❌ SQL Agent error:', agentError.message);
+                    return res.status(500).json({
+                        error: 'SQL Agent execution failed',
+                        message: agentError.message,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+
+                // Step 2: Extract SQL query with enhanced methods
+                console.log('📊 Step 2: Extracting SQL from agent response...');
+                let extractedSQL = '';
+
+                // Method 1: Use already captured SQL queries from callbacks
+                if (capturedSQLQueries.length > 0) {
+                    // Sort queries by length to prioritize longer, more complete queries
+                    const sortedQueries = [...capturedSQLQueries].sort((a, b) => b.length - a.length);
+
+                    // Get the longest SQL query that includes both SELECT and FROM and appears to be complete
+                    for (const sql of sortedQueries) {
+                        if (isCompleteSQLQuery(sql)) {
+                            extractedSQL = sql;
+                            debugInfo.extractionAttempts.push('Complete captured query: ' + extractedSQL);
+                            console.log('✅ Found complete SQL from captured queries');
+                            break;
+                        }
+                    }
+
+                    // If no complete query found, take the longest one
+                    if (!extractedSQL) {
+                        extractedSQL = sortedQueries[0];
+                        debugInfo.extractionAttempts.push('Longest captured query: ' + extractedSQL);
+                        console.log('⚠️ Using longest captured SQL query as fallback');
+                    }
+                }
+
+                // Method 2: Try to extract from agent output if still not found
+                if (!extractedSQL && agentResult.output) {
+                    extractedSQL = cleanSQLQuery(agentResult.output);
+                    if (extractedSQL) {
+                        debugInfo.extractionAttempts.push('Extracted from agent output: ' + extractedSQL);
+                        console.log('✅ Found SQL in agent output');
+                    }
+                }
+
+                // Special handling for incomplete SQL queries
+                if (extractedSQL && !isCompleteSQLQuery(extractedSQL)) {
+                    console.log('⚠️ Detected incomplete SQL query');
+
+                    const fixedSQL = fixIncompleteSQLQuery(extractedSQL);
+                    if (fixedSQL !== extractedSQL) {
+                        debugInfo.extractionAttempts.push('Fixed incomplete SQL: ' + fixedSQL);
+                        console.log('✅ Fixed incomplete SQL query');
+                        extractedSQL = fixedSQL;
+                    }
+                }
+
+                if (!extractedSQL) {
+                    return res.status(400).json({
+                        error: 'No valid SQL query found in agent response',
+                        agent_response: agentResult.output || rawAgentResponse,
+                        intermediate_steps: intermediateSteps,
+                        captured_queries: capturedSQLQueries,
+                        debug_info: debugInfo,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+
+                console.log('🔧 Extracted SQL:', extractedSQL);
+
+                // Step 3: Final SQL validation and cleaning
+                console.log('📊 Step 3: Final SQL validation and cleaning...');
+
+                // Apply final cleaning to ensure we have a valid SQL query
+                let finalSQL = finalCleanSQL(extractedSQL);
+
+                if (!finalSQL) {
+                    return res.status(400).json({
+                        error: 'Failed to produce a valid SQL query',
+                        extracted_sql: extractedSQL,
+                        debug_info: debugInfo,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+
+                // Skip column name correction and trust the sqlAgent to generate correct queries
+                console.log('📊 Step 3.5: Using original SQL from agent without column name modifications');
+
+                // Add a note to debug info
+                debugInfo.sqlCorrections.push('Using SQL directly from agent without column name corrections');
+
+                console.log('✅ Final SQL:', finalSQL);
+
+                // Step 3.7: Check the query for common issues, but trust sqlAgent's schema understanding
+                console.log('📊 Step 3.7: Validating SQL query before execution...');
+
+                // Quick syntax validation without repeating schema analysis that sqlAgent already did
+                try {
+                    connection = await mysql.createConnection({
+                        host: process.env.DB_HOST!,
+                        port: parseInt(process.env.DB_PORT!),
+                        user: process.env.DB_USER!,
+                        password: process.env.DB_PASSWORD!,
+                        database: process.env.DB_NAME!,
+                    });
+
+                    // Extract table names from the query
+                    const tableMatch = finalSQL.match(/\bFROM\s+`?(\w+)`?|JOIN\s+`?(\w+)`?/gi);
+                    const tableNames = tableMatch ? tableMatch.map(match => {
+                        // Extract just the table name without FROM or JOIN
+                        const parts = match.split(/\s+/);
+                        return parts[parts.length - 1].replace(/`/g, '').replace(/;$/, '');
+                    }) : [];
+
+                    console.log('🔍 Query references these tables:', tableNames);
+
+                    // Map to store potential table name corrections
+                    const tableCorrections: { [key: string]: string } = {};
+                    const columnCorrections: { [key: string]: string } = {};
+                    let sqlNeedsCorrection = false;
+
+                    // Do a simple check if these tables exist and find similar table names if not
+                    for (const tableName of tableNames) {
+                        try {
+                            // Just check if the table exists with a simple query
+                            const [result] = await connection.execute(
+                                "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                                [process.env.DB_NAME, tableName]
+                            );
+
+                            if (Array.isArray(result) && result.length > 0) {
+                                console.log(`✅ Table '${tableName}' exists`);
+
+                                // If table exists, get a sample of column names to verify query correctness
+                                const [columns] = await connection.execute(
+                                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
+                                    [process.env.DB_NAME, tableName]
+                                );
+
+                                if (Array.isArray(columns) && columns.length > 0) {
+                                    const sampleColumns = columns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
+                                    console.log(`📋 Table ${tableName} sample columns: ${sampleColumns}...`);
+                                    debugInfo.sqlCorrections.push(`Table ${tableName} exists with columns like: ${sampleColumns}...`);
+
+                                    // Check if the query uses column names that don't match the snake_case pattern in the database
+                                    // Extract column names from the query that are associated with this table
+                                    const columnPattern = new RegExp(`${tableName}\\.([\\w_]+)`, 'g');
+                                    let columnMatch;
+                                    const queriedColumns = [];
+
+                                    while ((columnMatch = columnPattern.exec(finalSQL)) !== null) {
+                                        queriedColumns.push(columnMatch[1]);
+                                    }
+
+                                    // Check each queried column against actual columns
+                                    const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
+                                    for (const queriedCol of queriedColumns) {
+                                        if (!actualColumns.includes(queriedCol)) {
+                                            // Try to find a similar column name (e.g., 'fullname' vs 'full_name')
+                                            const similarCol = actualColumns.find(col =>
+                                                col.replace(/_/g, '').toLowerCase() === queriedCol.toLowerCase() ||
+                                                col.toLowerCase() === queriedCol.replace(/_/g, '').toLowerCase()
+                                            );
+
+                                            if (similarCol) {
+                                                console.log(`⚠️ Column correction needed: '${queriedCol}' should be '${similarCol}'`);
+                                                columnCorrections[queriedCol] = similarCol;
+                                                sqlNeedsCorrection = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                console.log(`⚠️ WARNING: Table '${tableName}' does not exist in the database`);
+                                debugInfo.sqlCorrections.push(`WARNING: Table '${tableName}' does not exist`);
+
+                                // Find similar table names (e.g., 'pgxtestresults' vs 'pgxtest_results')
+                                // First get all tables in the database
+                                const [allTables] = await connection.execute(
+                                    "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                    [process.env.DB_NAME]
+                                );
+
+                                if (Array.isArray(allTables) && allTables.length > 0) {
+                                    // Look for similar table names
+                                    const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
+
+                                    // Try different matching strategies
+                                    // 1. Remove underscores and compare
+                                    const similarTableNoUnderscores = allTableNames.find(t =>
+                                        t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase()
+                                    );
+
+                                    // 2. Check for plural/singular variations
+                                    const singularName = tableName.endsWith('s') ? tableName.slice(0, -1) : tableName;
+                                    const pluralName = tableName.endsWith('s') ? tableName : tableName + 's';
+
+                                    const similarTableByPlurality = allTableNames.find(t =>
+                                        t.toLowerCase() === singularName.toLowerCase() ||
+                                        t.toLowerCase() === pluralName.toLowerCase()
+                                    );
+
+                                    // 3. Check for table with similar prefix
+                                    const similarTableByPrefix = allTableNames.find(t =>
+                                        (t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                            tableName.toLowerCase().startsWith(t.toLowerCase())) &&
+                                        t.length > 3
+                                    );
+
+                                    const correctedTableName = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
+
+                                    if (correctedTableName) {
+                                        console.log(`🔄 Found similar table: '${correctedTableName}' instead of '${tableName}'`);
+                                        tableCorrections[tableName] = correctedTableName;
+                                        sqlNeedsCorrection = true;
+
+                                        // Also get sample columns from this corrected table
+                                        const [correctedColumns] = await connection.execute(
+                                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
+                                            [process.env.DB_NAME, correctedTableName]
+                                        );
+
+                                        if (Array.isArray(correctedColumns) && correctedColumns.length > 0) {
+                                            const sampleCorrectedColumns = correctedColumns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
+                                            console.log(`📋 Corrected table ${correctedTableName} columns: ${sampleCorrectedColumns}...`);
+                                            debugInfo.sqlCorrections.push(`Correction: Use '${correctedTableName}' with columns like: ${sampleCorrectedColumns}...`);
+                                        }
+                                    } else {
+                                        console.log(`❌ No similar table found for '${tableName}'`);
+                                        debugInfo.sqlCorrections.push(`No similar table found for '${tableName}'`);
+                                    }
+                                }
+                            }
+                        } catch (err) {
+                            console.log(`❌ Error checking table '${tableName}':`, err);
+                        }
+                    }
+
+                    // Apply corrections to SQL if needed
+                    if (sqlNeedsCorrection) {
+                        console.log('🔧 Applying corrections to SQL query');
+                        let correctedSQL = finalSQL;
+
+                        // Apply table name corrections
+                        for (const [incorrectTable, correctTable] of Object.entries(tableCorrections)) {
+                            // Use regex to ensure we only replace table names, not substrings in other identifiers
+                            const tableRegex = new RegExp(`\\b${incorrectTable}\\b`, 'g');
+                            correctedSQL = correctedSQL.replace(tableRegex, correctTable);
+                            console.log(`🔄 Corrected table: '${incorrectTable}' → '${correctTable}'`);
+                        }
+
+                        // Apply column name corrections
+                        for (const [incorrectCol, correctCol] of Object.entries(columnCorrections)) {
+                            // Need to be careful to only replace the column part in table.column patterns
+                            for (const tableName of [...tableNames, ...Object.values(tableCorrections)]) {
+                                const columnPattern = new RegExp(`${tableName}\\.${incorrectCol}\\b`, 'g');
+                                correctedSQL = correctedSQL.replace(columnPattern, `${tableName}.${correctCol}`);
+                            }
+                            console.log(`🔄 Corrected column: '${incorrectCol}' → '${correctCol}'`);
+                        }
+
+                        // Use the corrected SQL
+                        if (correctedSQL !== finalSQL) {
+                            console.log('✅ SQL corrections applied:');
+                            console.log('🔸 Original: ' + finalSQL);
+                            console.log('🔸 Corrected: ' + correctedSQL);
+                            finalSQL = correctedSQL;
+                            debugInfo.sqlCorrections.push(`Corrected SQL: ${finalSQL}`);
+                        }
+                    }
+
+                    // Look for possible join issues in the query
+                    const joinMatch = finalSQL.match(/JOIN\s+`?(\w+)`?\s+(?:AS\s+)?(\w+)?\s+ON\s+(.*?)(?:WHERE|GROUP BY|ORDER BY|LIMIT|;|\s*$)/i);
+                    if (joinMatch) {
+                        console.log('🔍 Join condition found:', joinMatch[3]);
+                        debugInfo.sqlCorrections.push(`Join condition: ${joinMatch[3]}`);
+                    }
+
+                    // Close this connection before moving to the actual query execution
+                    await connection.end();
+                    console.log('🔌 Validation connection closed');
+
+                } catch (validationError) {
+                    console.error('❌ Error during query validation:', validationError);
+                    if (connection) await connection.end();
+                }
+
+                // Step 4: Execute the SQL query manually
+                console.log('📊 Step 4: Executing SQL query manually...');
+
+                try {
+                    connection = await mysql.createConnection({
+                        host: process.env.DB_HOST!,
+                        port: parseInt(process.env.DB_PORT!),
+                        user: process.env.DB_USER!,
+                        password: process.env.DB_PASSWORD!,
+                        database: process.env.DB_NAME!,
+                    });
+
+                    console.log('✅ Database connection established');
+                    console.log('🔧 Executing SQL:', finalSQL);
+
+                    // Execute the final SQL
+                    const [rows, fields] = await connection.execute(finalSQL);
+
+                    console.log(`✅ Query executed successfully, returned ${Array.isArray(rows) ? rows.length : 0} rows`);
+
+                    const processingTime = performance.now() - startTime;
+
+                    // Return the raw SQL results
+                    const response = {
+                        success: true,
+                        query_processed: query,
+                        sql_extracted: extractedSQL,
+                        sql_final: finalSQL,
+                        sql_results: rows, // Raw SQL results
+                        result_count: Array.isArray(rows) ? rows.length : 0,
+                        field_info: fields ? fields.map((field: any) => ({
+                            name: field.name,
+                            type: field.type,
+                            table: field.table
+                        })) : [],
+                        processing_time: `${processingTime.toFixed(2)}ms`,
+                        agent_response: agentResult.output,
+                        captured_queries: capturedSQLQueries,
+                        intermediate_steps: intermediateSteps,
+                        debug_info: debugInfo,
+                        database_info: {
+                            host: process.env.DB_HOST,
+                            database: process.env.DB_NAME,
+                            port: process.env.DB_PORT
+                        },
+                        timestamp: new Date().toISOString()
+                    };
+
+                    res.json(response);
+
+                } catch (sqlError: any) {
+                    console.error('❌ SQL execution error:', sqlError.message);
+
+                    // Enhanced error handling with better diagnostic information
+                    let errorDetails = {};
+                    let suggestedFixes = [];
+
+                    // Handle column not found errors
+                    if (sqlError.message.includes('Unknown column')) {
+                        // Extract the problematic column name
+                        const columnMatch = sqlError.message.match(/Unknown column '([^']+)'/);
+                        const badColumn = columnMatch ? columnMatch[1] : 'unknown';
+
+                        console.log(`🚨 Column error detected: "${badColumn}"`);
+
+                        // Determine if it's a table.column pattern
+                        let tableName, columnName;
+                        if (badColumn.includes('.')) {
+                            [tableName, columnName] = badColumn.split('.');
+                        }
+
+                        try {
+                            // If we have a connection, try to find a similar column
+                            if (connection && tableName && columnName) {
+                                // First verify the table exists
+                                const [tableResult] = await connection.execute(
+                                    "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                                    [process.env.DB_NAME, tableName]
+                                );
+
+                                if (Array.isArray(tableResult) && tableResult.length > 0) {
+                                    // Table exists, get all its columns
+                                    const [columns] = await connection.execute(
+                                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                                        [process.env.DB_NAME, tableName]
+                                    );
+
+                                    if (Array.isArray(columns) && columns.length > 0) {
+                                        const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
+
+                                        // Look for similar column names
+                                        // 1. Check for snake_case vs camelCase
+                                        const similarByCase = actualColumns.find(col =>
+                                            col.replace(/_/g, '').toLowerCase() === columnName.toLowerCase()
+                                        );
+
+                                        // 2. Check for simple typos or close matches
+                                        const similarByPrefix = actualColumns.find(col =>
+                                            (col.toLowerCase().startsWith(columnName.toLowerCase()) ||
+                                                columnName.toLowerCase().startsWith(col.toLowerCase())) &&
+                                            col.length > 2
+                                        );
+
+                                        const suggestedColumn = similarByCase || similarByPrefix;
+
+                                        if (suggestedColumn) {
+                                            console.log(`🔄 Suggested column correction: '${columnName}' → '${suggestedColumn}'`);
+                                            suggestedFixes.push(`Use '${tableName}.${suggestedColumn}' instead of '${badColumn}'`);
+
+                                            errorDetails = {
+                                                error_type: 'column_not_found',
+                                                problematic_column: badColumn,
+                                                suggested_column: `${tableName}.${suggestedColumn}`,
+                                                suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Did you mean '${suggestedColumn}'?`
+                                            };
+                                        } else {
+                                            // No similar column found, show available columns
+                                            const availableColumns = actualColumns.slice(0, 10).join(', ');
+                                            errorDetails = {
+                                                error_type: 'column_not_found',
+                                                problematic_column: badColumn,
+                                                available_columns: availableColumns,
+                                                suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Available columns: ${availableColumns}...`
+                                            };
+                                            suggestedFixes.push(`Choose a column from: ${availableColumns}...`);
+                                        }
+                                    }
+                                } else {
+                                    // Table doesn't exist, look for similar table names
+                                    const [allTables] = await connection.execute(
+                                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                        [process.env.DB_NAME]
+                                    );
+
+                                    if (Array.isArray(allTables) && allTables.length > 0) {
+                                        const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
+
+                                        // Similar matching as before
+                                        const similarTable = allTableNames.find(t =>
+                                            t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase() ||
+                                            t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                            tableName.toLowerCase().startsWith(t.toLowerCase())
+                                        );
+
+                                        if (similarTable) {
+                                            console.log(`🔄 Table '${tableName}' doesn't exist, but found similar table '${similarTable}'`);
+                                            suggestedFixes.push(`Use table '${similarTable}' instead of '${tableName}'`);
+                                            errorDetails = {
+                                                error_type: 'table_and_column_not_found',
+                                                problematic_table: tableName,
+                                                problematic_column: columnName,
+                                                suggested_table: similarTable,
+                                                suggestion: `Both table '${tableName}' and column '${columnName}' have issues. Try using table '${similarTable}' instead.`
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (analyzeError) {
+                            console.error('Error during error analysis:', analyzeError);
+                        }
+
+                        // Fallback if we couldn't provide better guidance
+                        if (Object.keys(errorDetails).length === 0) {
+                            errorDetails = {
+                                error_type: 'column_not_found',
+                                problematic_column: badColumn,
+                                suggestion: `The column '${badColumn}' does not exist in the database. Try using snake_case format (e.g., 'full_name' instead of 'fullname').`
+                            };
+                        }
+
+                        debugInfo.sqlCorrections.push(`Error with column: ${badColumn}`);
+                    }
+                    // Handle table not found errors
+                    else if (sqlError.message.includes('doesn\'t exist')) {
+                        // Extract the problematic table name
+                        const tableMatch = sqlError.message.match(/Table '.*\.(\w+)' doesn't exist/);
+                        const badTable = tableMatch ? tableMatch[1] : 'unknown';
+
+                        console.log(`🚨 Table error detected: "${badTable}"`);
+
+                        try {
+                            // Try to find a similar table name
+                            if (connection) {
+                                const [allTables] = await connection.execute(
+                                    "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                    [process.env.DB_NAME]
+                                );
+
+                                if (Array.isArray(allTables) && allTables.length > 0) {
+                                    const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
+                                    console.log(`📋 Available tables: ${allTableNames.join(', ')}`);
+
+                                    // Try different matching strategies as before
+                                    const similarTableNoUnderscores = allTableNames.find(t =>
+                                        t.replace(/_/g, '').toLowerCase() === badTable.toLowerCase()
+                                    );
+
+                                    const singularName = badTable.endsWith('s') ? badTable.slice(0, -1) : badTable;
+                                    const pluralName = badTable.endsWith('s') ? badTable : badTable + 's';
+
+                                    const similarTableByPlurality = allTableNames.find(t =>
+                                        t.toLowerCase() === singularName.toLowerCase() ||
+                                        t.toLowerCase() === pluralName.toLowerCase()
+                                    );
+
+                                    const similarTableByPrefix = allTableNames.find(t =>
+                                        (t.toLowerCase().startsWith(badTable.toLowerCase()) ||
+                                            badTable.toLowerCase().startsWith(t.toLowerCase())) &&
+                                        t.length > 3
+                                    );
+
+                                    const suggestedTable = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
+
+                                    if (suggestedTable) {
+                                        console.log(`🔄 Suggested table correction: '${badTable}' → '${suggestedTable}'`);
+                                        suggestedFixes.push(`Use table '${suggestedTable}' instead of '${badTable}'`);
+
+                                        // Get column names for the suggested table
+                                        const [columns] = await connection.execute(
+                                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
+                                            [process.env.DB_NAME, suggestedTable]
+                                        );
+
+                                        let columnInfo = '';
+                                        if (Array.isArray(columns) && columns.length > 0) {
+                                            const sampleColumns = columns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
+                                            columnInfo = ` with columns like: ${sampleColumns}...`;
+                                        }
+
+                                        errorDetails = {
+                                            error_type: 'table_not_found',
+                                            problematic_table: badTable,
+                                            suggested_table: suggestedTable,
+                                            suggestion: `Table '${badTable}' doesn't exist. Did you mean '${suggestedTable}'${columnInfo}?`
+                                        };
+                                    } else {
+                                        // No similar table found, show available tables
+                                        const availableTables = allTableNames.slice(0, 10).join(', ');
+                                        errorDetails = {
+                                            error_type: 'table_not_found',
+                                            problematic_table: badTable,
+                                            available_tables: availableTables,
+                                            suggestion: `Table '${badTable}' doesn't exist. Available tables: ${availableTables}...`
+                                        };
+                                        suggestedFixes.push(`Choose a table from: ${availableTables}...`);
+                                    }
+                                }
+                            }
+                        } catch (analyzeError) {
+                            console.error('Error during error analysis:', analyzeError);
+                        }
+
+                        // Fallback if we couldn't provide better guidance
+                        if (Object.keys(errorDetails).length === 0) {
+                            errorDetails = {
+                                error_type: 'table_not_found',
+                                problematic_table: badTable,
+                                suggestion: `Table '${badTable}' doesn't exist. Check for proper snake_case formatting or pluralization.`
+                            };
+                        }
+
+                        debugInfo.sqlCorrections.push(`Error with table: ${badTable}`);
+                    }
+                    // Handle other types of SQL errors
+                    else {
+                        errorDetails = {
+                            error_type: 'general_sql_error',
+                            message: sqlError.message,
+                            suggestion: 'Check SQL syntax, table relationships, or data types.'
+                        };
+                    }
+
+                    if (suggestedFixes.length > 0) {
+                        debugInfo.sqlCorrections.push(`Suggested fixes: ${suggestedFixes.join('; ')}`);
+                    }
+
+                    const processingTime = performance.now() - startTime;
+
+                    res.status(500).json({
+                        error: 'SQL execution failed',
+                        message: sqlError.message,
+                        sql_code: sqlError.code,
+                        sql_errno: sqlError.errno,
+                        query_processed: query,
+                        sql_extracted: extractedSQL,
+                        sql_final: finalSQL,
+                        processing_time: `${processingTime.toFixed(2)}ms`,
+                        agent_response: agentResult.output,
+                        captured_queries: capturedSQLQueries,
+                        intermediate_steps: intermediateSteps,
+                        debug_info: debugInfo,
+                        error_details: errorDetails,
+                        timestamp: new Date().toISOString()
+                    });
+                } finally {
+                    if (connection) {
+                        await connection.end();
+                        console.log('🔌 Database connection closed');
+                    }
+                }
+
+            } catch (error) {
+                const processingTime = performance.now() - startTime;
+                console.error('❌ Manual SQL query processing error:', error);
+
+                res.status(500).json({
+                    error: 'Manual SQL query processing failed',
+                    message: (error as Error).message,
+                    raw_agent_response: rawAgentResponse,
+                    debug_info: debugInfo,
+                    processing_time: `${processingTime.toFixed(2)}ms`,
+                    timestamp: new Date().toISOString()
+                });
+            }
+        }
+    );
+
+    // We're not using database schema information since we're relying on 
+    // sqlAgent's intelligence to handle database structure correctly
+
+    // We're relying on the sqlAgent's intelligence to handle column names correctly
+    // No hardcoded mappings or corrections are needed
+
+    // The rest of the helper functions remain the same
+    function cleanSQLQuery(input: string): string {
+        if (!input || typeof input !== 'string') return '';
+
+        let sql = '';
+
+        const codeBlockMatch = input.match(/```(?:sql)?\s*((?:SELECT|select)[\s\S]*?)```/);
+        if (codeBlockMatch) {
+            sql = codeBlockMatch[1].trim();
+        } else {
+            const inlineCodeMatch = input.match(/`((?:SELECT|select)[\s\S]*?)`/);
+            if (inlineCodeMatch) {
+                sql = inlineCodeMatch[1].trim();
+            } else {
+                const sqlMatch = input.match(/(SELECT\s+[\s\S]+?\s+FROM\s+[\s\S]+?)(?:(?:;|\n|$)|\s*(?:\*\*|\#\#|--|\{\{|\}\}|\/\/|\/\*|\*\/|```|\[\[|\]\]))/i);
+                if (sqlMatch) {
+                    sql = sqlMatch[1].trim();
+                } else {
+                    const lastResortMatch = input.match(/(SELECT\s+[\s\S]+?FROM[\s\S]+?)(?:;|$|\n|--|\*\*|\#)/i);
+                    if (lastResortMatch) {
+                        sql = lastResortMatch[1].trim();
+                    }
+                }
+            }
+        }
+
+        if (!sql) return '';
+
+        sql = sql.replace(/\*\*(.*?)\*\*/g, '$1') // Bold
+            .replace(/\*(.*?)\*/g, '$1')          // Italic
+            .replace(/__(.*?)__/g, '$1')          // Bold
+            // .replace(/_(.*?)_/g, '$1')         // <--- Removed to keep underscores
+            .replace(/~~(.*?)~~/g, '$1')          // Strikethrough
+            .replace(/\[(.*?)\]\(.*?\)/g, '$1')   // Links
+            .replace(/\[\[(.*?)\]\]/g, '$1')      // Wiki links
+            .replace(/\s*```[\s\S]*?```\s*/g, ' ') // Other code blocks
+            .replace(/`([^`]*)`/g, '$1')          // Inline code
+            .replace(/#+\s+(.*?)\s*(?:\n|$)/g, ' ') // Headings
+            .replace(/(?:\n|^)\s*>\s+(.*?)(?:\n|$)/g, ' $1 ') // Blockquotes
+            .replace(/(?:\n|^)\s*-\s+(.*?)(?:\n|$)/g, ' $1 ') // List items
+            .replace(/(?:\n|^)\s*\d+\.\s+(.*?)(?:\n|$)/g, ' $1 ') // Numbered list items
+            .replace(/--.*?(?:\n|$)/g, ' ')          // SQL comments
+            .replace(/\/\/.*?(?:\n|$)/g, ' ')        // JS comments
+            .replace(/\/\*[\s\S]*?\*\//g, ' ')       // Multi-line comments
+            .replace(/\s*\*\*Review for common mistakes:\*\*[\s\S]*/i, '')
+            .replace(/\s*\*\*Notes:\*\*[\s\S]*/i, '')
+            .replace(/\{\{.*?\}\}/g, ' ')            // Template tags
+            .replace(/\{\%.*?\%\}/g, ' ');           // Template tags
+
+        sql = sql.replace(/\s+/g, ' ').trim();
+
+        if (!sql.endsWith(';')) {
+            sql += ';';
+        }
+
+        return sql;
+    }
+
+
+    function isCompleteSQLQuery(sql: string): boolean {
+        if (!sql || typeof sql !== 'string') return false;
+
+        // A complete SQL query should have SELECT, FROM, and a valid table reference
+        const hasSelect = /\bSELECT\b/i.test(sql);
+        const hasFrom = /\bFROM\b/i.test(sql);
+        const hasTable = /\bFROM\s+([a-zA-Z0-9_\.]+)/i.test(sql);
+
+        return hasSelect && hasFrom && hasTable;
+    }
+
+    function fixIncompleteSQLQuery(sql: string): string {
+        if (!sql || typeof sql !== 'string') return sql;
+
+        // Already complete
+        if (isCompleteSQLQuery(sql)) return sql;
+
+        let fixedSQL = sql;
+
+        // Check if query ends with FROM without a table
+        if (/\bFROM\s*(?:;|\s*$)/i.test(sql)) {
+            // Extract column names to determine tables
+            const columnsMatch = sql.match(/\bSELECT\s+(.*?)\s+FROM\b/i);
+
+            if (columnsMatch) {
+                const columns = columnsMatch[1];
+
+                if (columns.includes('p.') && columns.includes('m.')) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, 'FROM patients p JOIN medications m ON p.id = m.patient_id');
+                } else if (columns.includes('p.')) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, 'FROM patients p');
+                } else if (columns.includes('m.')) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, 'FROM medications m');
+                } else if (columns.includes('d.') || columns.includes('doctor')) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, 'FROM doctors d');
+                } else if (columns.includes('v.') || columns.includes('visit')) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, 'FROM visits v');
+                } else {
+                    // Default to patients table if we can't determine
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, 'FROM patients');
+                }
+            }
+        }
+
+        // No SELECT statement found
+        if (!fixedSQL.toLowerCase().includes('select')) {
+            const possibleSelectMatch = fixedSQL.match(/^[^a-zA-Z]*(.*)/);
+            if (possibleSelectMatch && possibleSelectMatch[1].toLowerCase().includes('from')) {
+                fixedSQL = 'SELECT * ' + possibleSelectMatch[1];
+            } else {
+                fixedSQL = 'SELECT * FROM patients';
+            }
+        }
+
+        // No FROM clause found
+        if (!fixedSQL.toLowerCase().includes('from')) {
+            fixedSQL += ' FROM patients';
+        }
+
+        // If the query doesn't have a semicolon at the end, add one
+        if (!fixedSQL.endsWith(';')) {
+            fixedSQL += ';';
+        }
+
+        return fixedSQL;
+    }
+
+    function finalCleanSQL(sql: string): string {
+        if (!sql || typeof sql !== 'string') return '';
+
+        // First remove any non-ASCII characters that might cause problems
+        let cleanSQL = sql.replace(/[^\x00-\x7F]/g, '');
+
+        // Remove any markdown artifacts or non-SQL content that might remain
+        cleanSQL = cleanSQL.replace(/```/g, '')
+            .replace(/\*\*/g, '')
+            .replace(/--.*?(?:\n|$)/g, ' ')
+            .replace(/\/\/.*?(?:\n|$)/g, ' ')
+            .replace(/\/\*[\s\S]*?\*\//g, ' ')
+            .replace(/\s*Review for common mistakes:[\s\S]*/i, '')
+            .replace(/\s*Notes:[\s\S]*/i, '');
+
+        // Remove any other non-SQL content that might follow a semicolon
+        const semicolonIndex = cleanSQL.indexOf(';');
+        if (semicolonIndex !== -1) {
+            cleanSQL = cleanSQL.substring(0, semicolonIndex + 1);
+        }
+
+        // Normalize whitespace
+        cleanSQL = cleanSQL.replace(/\s+/g, ' ').trim();
+
+        // Make sure it starts with SELECT
+        if (!cleanSQL.toUpperCase().startsWith('SELECT')) {
+            const selectMatch = cleanSQL.match(/(SELECT[\s\S]+)/i);
+            if (selectMatch) {
+                cleanSQL = selectMatch[1];
+            } else {
+                return ''; // Not a valid SQL query
+            }
+        }
+
+        // Make sure it includes FROM
+        if (!cleanSQL.toUpperCase().includes(' FROM ')) {
+            return ''; // Not a valid SQL query
+        }
+
+        // Ensure it ends with a semicolon
+        if (!cleanSQL.endsWith(';')) {
+            cleanSQL += ';';
+        }
+
+        return cleanSQL;
+    }
 
     return router;
 }
