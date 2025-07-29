@@ -457,13 +457,35 @@ Ensure the query follows medical database best practices and is production-ready
     }
 
     try {
-      // Create SQL Agent using the toolkit
+      // Create SQL Agent with custom configuration to return all results
       this.sqlAgent = await createSqlAgent(
         this.llm,
-        this.sqlToolkit
+        this.sqlToolkit,
+        {
+          prefix: `You are an agent designed to interact with a SQL database.
+Given an input question, create a syntactically correct MySQL query to run, then look at the results of the query and return the answer.
+IMPORTANT: Unless the user specifically asks for a limited number of results, always return ALL matching records from the database.
+Do NOT automatically limit results - the user needs complete data for analysis.
+You can order the results by a relevant column to return the most interesting examples in the database.
+Never query for all the columns from a specific table, only ask for the relevant columns given the question.
+You have access to tools for interacting with the database.
+Only use the below tools. Only use the information returned by the below tools to construct your final answer.
+You MUST double check your query before executing it. If you get an error while executing a query, rewrite the query and try again.
+
+DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
+
+When providing your final answer, format it clearly and include the actual data results.
+Return ALL matching records unless specifically asked to limit.`,
+          suffix: `Begin!
+
+Question: {input}
+Thought: I should look at the tables in the database to see what I can query. Then I should query the schema of the most relevant tables.
+{agent_scratchpad}`,
+          inputVariables: ["input", "agent_scratchpad"]
+        }
       );
 
-      console.log('✅ SQL Agents initialized');
+      console.log('✅ SQL Agents initialized with unlimited results configuration');
     } catch (error) {
       console.error('❌ Error initializing agents:', error);
       throw error;
@@ -886,16 +908,18 @@ Ensure the query follows medical database best practices and is production-ready
             Find patients and their medications where dosage information is available.
             Use a simple JOIN between patients and medications tables.
             Include patient name, medication name, and dosage as text.
-            Limit results to 10 records for performance.
+            Return ALL matching records - DO NOT use LIMIT clause.
+            Print the exact SQL query executed before showing results.
             Do not attempt any numeric conversions on dosage field.
-            Use only basic SELECT, FROM, JOIN, and LIMIT clauses.
+            Use only basic SELECT, FROM, and JOIN clauses.
           `;
         } else {
           safeQuery = `
             Show patients with their medications.
             Simple JOIN between patients and medications tables.
             Select patient name and medication name only.
-            Limit to 10 records.
+            Return ALL matching records - DO NOT use LIMIT clause.
+            Print the exact SQL query executed before showing results.
           `;
         }
       } else if (intent.entities.includes('patients')) {
@@ -903,13 +927,15 @@ Ensure the query follows medical database best practices and is production-ready
           Show basic patient information.
           Select from patients table only.
           Include name, age, gender.
-          Limit to 10 records.
+          Return ALL matching records - DO NOT use LIMIT clause.
+          Print the exact SQL query executed before showing results.
         `;
       } else {
         safeQuery = `
           Show available data based on the request: ${query}
           Use simple SELECT statements only.
-          Limit results to 10 records.
+          Return ALL matching records - DO NOT use LIMIT clause.
+          Print the exact SQL query executed before showing results.
         `;
       }
 
@@ -988,10 +1014,11 @@ MEDICAL DATABASE CONTEXT:
 - Always join using proper foreign key relationships
 
 PERFORMANCE REQUIREMENTS:
-1. Limit results to maximum 20 records
+1. DO NOT LIMIT the number of records - return ALL matching records
 2. Use efficient JOIN conditions
 3. Select only necessary columns
 4. Apply filters before joins when possible
+5. Log the exact SQL query that is executed
 
 Please execute this query with the following considerations:
 1. Generate syntactically correct MySQL queries only
@@ -1470,56 +1497,227 @@ Execute the query now with guaranteed syntax correctness:`;
 
   // ========== PUBLIC ENHANCED QUERY INTELLIGENCE METHODS ==========
 
+  // Parse SQL Agent response into JSON array of records
+  private parseResponseToJsonArray(response: string): any[] {
+    try {
+      console.log('🔍 Parsing response to JSON array...');
+
+      // First, try to find if there's already a JSON array in the response
+      const jsonArrayMatch = response.match(/\[[\s\S]*?\]/);
+      if (jsonArrayMatch) {
+        try {
+          const parsed = JSON.parse(jsonArrayMatch[0]);
+          if (Array.isArray(parsed)) {
+            console.log(`✅ Found JSON array with ${parsed.length} records`);
+            return parsed;
+          }
+        } catch (e) {
+          console.log('⚠️ Found JSON-like structure but failed to parse');
+        }
+      }
+
+      // If no JSON array found, try to parse table-like data
+      const records: any[] = [];
+      const lines = response.split('\n').filter(line => line.trim());
+
+      // Look for table headers (lines with |)
+      let headerIndex = -1;
+      let headers: string[] = [];
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.includes('|') && line.includes('id') && (line.includes('name') || line.includes('patient'))) {
+          headerIndex = i;
+          headers = line.split('|').map(h => h.trim()).filter(h => h && h !== '---' && h !== '--');
+          console.log(`📋 Found table headers at line ${i}:`, headers);
+          break;
+        }
+      }
+
+      if (headerIndex !== -1 && headers.length > 0) {
+        // Parse table data
+        for (let i = headerIndex + 1; i < lines.length; i++) {
+          const line = lines[i];
+          if (!line.includes('|') || line.includes('---') || line.includes('--')) continue;
+
+          const values = line.split('|').map(v => v.trim()).filter(v => v);
+          if (values.length >= headers.length) {
+            const record: any = {};
+            for (let j = 0; j < Math.min(headers.length, values.length); j++) {
+              const header = headers[j].toLowerCase().replace(/\s+/g, '_');
+              let value = values[j];
+
+              // Try to convert numeric values
+              if (/^\d+$/.test(value)) {
+                record[header] = parseInt(value);
+              } else if (/^\d+\.\d+$/.test(value)) {
+                record[header] = parseFloat(value);
+              } else {
+                record[header] = value;
+              }
+            }
+            if (Object.keys(record).length > 0) {
+              records.push(record);
+            }
+          }
+        }
+      } else {
+        // Try to extract key-value pairs or structured data
+        console.log('🔍 Looking for structured data patterns...');
+
+        // Look for ID patterns like "ID: 1, Name: John, Age: 25"
+        const idPattern = /(?:id|patient_id):\s*(\d+)[\s\S]*?(?:name|full_name):\s*([^,\n]+)[\s\S]*?(?:age):\s*(\d+)/gi;
+        let match;
+        while ((match = idPattern.exec(response)) !== null) {
+          records.push({
+            id: parseInt(match[1]),
+            name: match[2].trim(),
+            age: parseInt(match[3])
+          });
+        }
+
+        // If still no records, try line-by-line parsing for simple lists
+        if (records.length === 0) {
+          const simpleRecords = response.split('\n')
+            .filter(line => line.trim() && !line.includes('Query:') && !line.includes('SQL:'))
+            .map((line, index) => ({
+              id: index + 1,
+              content: line.trim()
+            }));
+
+          if (simpleRecords.length > 0) {
+            records.push(...simpleRecords);
+          }
+        }
+      }
+
+      console.log(`✅ Parsed ${records.length} records from response`);
+      return records.length > 0 ? records : [{
+        message: 'No structured data found',
+        raw_response: response.substring(0, 500)
+      }];
+
+    } catch (error) {
+      console.error('❌ Error parsing response to JSON array:', error);
+      return [{
+        error: 'Failed to parse response',
+        message: (error as Error).message,
+        raw_response: response.substring(0, 500)
+      }];
+    }
+  }
+
   // Main public method for professional query processing
   public async executeSmartQuery(query: string, context?: string): Promise<any> {
     try {
-      // Use professional query processing if available
-      if (false && this.queryIntentAnalyzer && this.queryPlannerChain) {
-        return await this.processQueryProfessionally(query, context);
-      }
+      // Use SQL agent directly with minimal formatting
+      console.log(`🤖 Using SQL Agent for query: "${query}"`);
 
-      // Fallback to regular SQL agent
       if (this.sqlAgent) {
-        console.log(`🔄 Using standard SQL agent for: "${query}"`);
-        // Request JSON format in the query
-        const jsonQuery = `${query}\n\nIMPORTANT: Return the results as a valid JSON array of objects. Format all data as proper JSON with keys corresponding to column names.`;
-        const result = await this.sqlAgent.call({ input: jsonQuery });
-        
-        // Try to extract and parse JSON from the response
-        let jsonData;
         try {
-          // Look for JSON array in the response
-          const jsonMatch = result.output.match(/(\[[\s\S]*\])/);
-          if (jsonMatch) {
-            jsonData = JSON.parse(jsonMatch[1]);
-          } else {
-            // If no array found, look for any JSON object
-            const objMatch = result.output.match(/(\{[\s\S]*\})/);
-            if (objMatch) {
-              jsonData = JSON.parse(objMatch[1]);
-            } else {
-              jsonData = result.output; // Fallback to raw output
+          // Just pass the query directly to the agent without complex formatting
+          const result = await this.sqlAgent.call({ input: query });
+
+          // Parse the response into JSON array of records
+          console.log(`🔍 Looking for structured data patterns...`, result.output);
+          const parsedRecords = this.parseResponseToJsonArray(result.output);
+
+          console.log(`✅ SQL Agent completed successfully with ${parsedRecords.length} records`);
+          return {
+            type: 'sql_agent_query',
+            data: parsedRecords,
+            raw_response: result.output,
+            query_processed: query,
+            source: 'sql_agent',
+            timestamp: new Date().toISOString(),
+            record_count: parsedRecords.length,
+            note: 'Results parsed into JSON array of records'
+          };
+        } catch (agentError: any) {
+          console.error('❌ SQL Agent error:', agentError.message);
+
+          // If it's an OutputParserException, try a different approach
+          if (agentError.message && agentError.message.includes('Could not parse LLM output:')) {
+            console.log('� OutputParserException detected, trying alternative approach...');
+
+            try {
+              // Try with explicit instruction to not use Action format
+              const simpleQuery = `${query}
+
+CRITICAL: Do not format your response as an Action. Just execute the SQL and return the results directly. Answer in plain text format only.`;
+
+              const retryResult = await this.sqlAgent.call({ input: simpleQuery });
+
+              // Parse the retry response into JSON array of records
+              const parsedRetryRecords = this.parseResponseToJsonArray(retryResult.output);
+
+              return {
+                type: 'sql_agent_retry',
+                data: parsedRetryRecords,
+                raw_response: retryResult.output,
+                query_processed: query,
+                source: 'sql_agent_retry',
+                timestamp: new Date().toISOString(),
+                record_count: parsedRetryRecords.length,
+                note: 'Results from SQL agent retry after OutputParserException, parsed into JSON array'
+              };
+
+            } catch (retryError) {
+              console.error('❌ SQL Agent retry also failed:', retryError);
+
+              // Extract data from error message if possible
+              const errorMessage = agentError.message;
+              const jsonMatch = errorMessage.match(/(\[[\s\S]*?\])/);
+
+              if (jsonMatch) {
+                try {
+                  const extractedData = JSON.parse(jsonMatch[1]);
+                  console.log(`✅ Successfully extracted ${extractedData.length} records from error output`);
+
+                  return {
+                    type: 'extracted_from_error',
+                    data: extractedData,
+                    query_processed: query,
+                    record_count: extractedData.length,
+                    source: 'error_extraction',
+                    timestamp: new Date().toISOString(),
+                    note: 'Data successfully extracted from OutputParserException'
+                  };
+                } catch (parseError) {
+                  console.error('❌ Failed to extract data from error:', parseError);
+                }
+              }
+
+              return {
+                type: 'error',
+                data: [{
+                  error: 'SQL Agent failed',
+                  message: agentError.message,
+                  query_processed: query
+                }],
+                source: 'error',
+                timestamp: new Date().toISOString()
+              };
             }
+          } else {
+            // Handle other types of errors
+            return {
+              type: 'error',
+              data: [{
+                error: 'SQL Agent execution failed',
+                message: agentError.message,
+                query_processed: query
+              }],
+              source: 'error',
+              timestamp: new Date().toISOString()
+            };
           }
-        } catch (parseError) {
-          console.warn('Failed to parse JSON response:', parseError);
-          jsonData = result.output; // Fallback to raw output on parse error
         }
-        
-        return {
-          type: 'standard_query',
-          data: jsonData, // Return parsed JSON or raw output as fallback
-          raw_output: result.output, // Include raw output for debugging
-          query_processed: query,
-          source: 'standard_sql_agent',
-          timestamp: new Date().toISOString(),
-          note: 'Enhanced query intelligence not available, used standard processing'
-        };
       }
 
       return {
         type: 'error',
-        data: [{ error: 'No query processing capabilities available' }],
+        data: [{ error: 'SQL Agent not available' }],
         source: 'error'
       };
     } catch (error) {
