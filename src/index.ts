@@ -1866,8 +1866,60 @@ Execute the query now with guaranteed syntax correctness:`;
 
       if (this.sqlAgent) {
         try {
-          // Just pass the query directly to the agent without complex formatting
-          const result = await this.sqlAgent.call({ input: query });
+          // Check if the query already has MySQL version info
+          const hasVersionInfo = query.includes('MySQL VERSION INFO:');
+          
+          // If no version info is provided, try to get it (only if we have a database connection)
+          let versionEnhancedQuery = query;
+          
+          if (!hasVersionInfo && this.sqlDatabase) {
+            console.log('🔍 Adding MySQL version info to query...');
+            try {
+              // Try to get MySQL version using the existing connection
+              const mysql = require('mysql2/promise');
+              const connection = await mysql.createConnection({
+                host: this.dbConfig.host,
+                port: this.dbConfig.port,
+                user: this.dbConfig.username,
+                password: this.dbConfig.password,
+                database: this.dbConfig.database,
+                connectTimeout: 5000,
+              });
+              
+              const [rows] = await connection.execute('SELECT VERSION() as version');
+              await connection.end();
+              
+              if (rows && rows[0] && rows[0].version) {
+                const mysqlVersion = rows[0].version;
+                console.log(`✅ MySQL Version: ${mysqlVersion}`);
+                
+                // Parse version string
+                const versionMatch = mysqlVersion.match(/(\d+)\.(\d+)\.(\d+)/);
+                if (versionMatch) {
+                  const major = parseInt(versionMatch[1]);
+                  const minor = parseInt(versionMatch[2]);
+                  
+                  // Enhance query with version info
+                  versionEnhancedQuery = `${query}
+
+MySQL VERSION INFO: Your query will run on MySQL ${mysqlVersion}
+VERSION-SPECIFIC REQUIREMENTS:
+- JSON Functions: ${major >= 5 && minor >= 7 ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Window Functions: ${major >= 8 ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Common Table Expressions: ${major >= 8 ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Regular Expressions: AVAILABLE
+
+IMPORTANT: Generate SQL compatible with this specific MySQL version. Avoid using features not supported by this version.`;
+                }
+              }
+            } catch (versionError) {
+              console.warn('⚠️ Could not get MySQL version:', versionError);
+              // Continue without version info
+            }
+          }
+          
+          // Pass the query (potentially enhanced with version info) to the agent
+          const result = await this.sqlAgent.call({ input: versionEnhancedQuery });
 
           // Parse the response into JSON array of records
           console.log(`🔍 Looking for structured data patterns...`, result.output);

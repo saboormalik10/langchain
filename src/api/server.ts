@@ -77,6 +77,9 @@ class MedicalLangChainAPI {
           },
           medical: {
             'POST /api/medical/query': 'Query medical database with natural language',
+            'POST /api/medical/query-sql-manual': 'Manual SQL query with optional conversational capabilities',
+            'GET /api/medical/conversation/sessions': 'List all active conversation sessions',
+            'DELETE /api/medical/conversation/sessions/:sessionId': 'Delete a specific conversation session',
             'POST /api/medical/diagnosis': 'Get AI-powered diagnosis suggestions',
             'POST /api/medical/treatment': 'Get treatment recommendations',
             'GET /api/medical/patients': 'List patients (demo data)',

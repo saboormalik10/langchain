@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
 import mysql from 'mysql2/promise';
 import { MedicalDatabaseLangChainApp } from '../../index';
+import { BufferMemory } from 'langchain/memory';
+import { v4 as uuidv4 } from 'uuid';
 
 import Papa from 'papaparse';
 // @ts-ignore
@@ -15,6 +17,33 @@ type AgentResult = {
     intermediateSteps?: Step[];
     [key: string]: unknown;
 };
+
+// Storage for conversation sessions with last access timestamps
+interface ConversationSession {
+    memory: BufferMemory;
+    lastAccess: Date;
+}
+
+const conversationSessions = new Map<string, ConversationSession>();
+
+// Cleanup function for expired conversations (runs every hour)
+const CONVERSATION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
+setInterval(() => {
+    const now = new Date();
+    let expiredCount = 0;
+    
+    conversationSessions.forEach((session, sessionId) => {
+        const timeDiff = now.getTime() - session.lastAccess.getTime();
+        if (timeDiff > CONVERSATION_TIMEOUT_MS) {
+            conversationSessions.delete(sessionId);
+            expiredCount++;
+        }
+    });
+    
+    if (expiredCount > 0) {
+        console.log(`🧹 Cleaned up ${expiredCount} expired conversation sessions`);
+    }
+}, 60 * 60 * 1000); // Check every hour
 
 /**
  * Parse patient data from numbered list format
@@ -242,7 +271,10 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
         ],
         async (req: Request, res: Response) => {
             const startTime = performance.now();
-
+            // Initialize MySQL version variables with default values
+            let mySQLVersionString = "unknown";
+            let mysqlVersionInfo = null;
+            
             try {
                 const errors = validationResult(req);
                 if (!errors.isEmpty()) {
@@ -267,10 +299,78 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
                     });
                 }
 
+                // Get MySQL version information first
+                console.log('🔍 Analyzing MySQL version before query execution...');
+                let mysqlVersionInfo = null;
+                let mySQLVersionString = "unknown";
+                
+                try {
+                    const mysql = require('mysql2/promise');
+                    const connection = await mysql.createConnection({
+                        host: process.env.DB_HOST!,
+                        port: parseInt(process.env.DB_PORT!),
+                        user: process.env.DB_USER!,
+                        password: process.env.DB_PASSWORD!,
+                        database: process.env.DB_NAME!,
+                        connectTimeout: 8000,
+                    });
+                    
+                    const [rows] = await connection.execute('SELECT VERSION() as version');
+                    if (rows && rows[0] && rows[0].version) {
+                        mySQLVersionString = rows[0].version;
+                        
+                        // Parse version string
+                        const versionMatch = mySQLVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
+                        if (versionMatch) {
+                            mysqlVersionInfo = {
+                                full: mySQLVersionString,
+                                major: parseInt(versionMatch[1]),
+                                minor: parseInt(versionMatch[2]),
+                                patch: parseInt(versionMatch[3]),
+                                features: {
+                                    supportsJSON: false,
+                                    supportsWindowFunctions: false,
+                                    supportsCTE: false,
+                                    supportsRegex: true
+                                }
+                            };
+                            
+                            // Detect supported features based on version
+                            mysqlVersionInfo.features.supportsJSON = mysqlVersionInfo.major >= 5 && mysqlVersionInfo.minor >= 7;
+                            mysqlVersionInfo.features.supportsWindowFunctions = mysqlVersionInfo.major >= 8;
+                            mysqlVersionInfo.features.supportsCTE = mysqlVersionInfo.major >= 8;
+                            
+                            console.log(`✅ MySQL Version: ${mySQLVersionString} (Major: ${mysqlVersionInfo.major}, Minor: ${mysqlVersionInfo.minor})`);
+                            console.log(`✅ Features: JSON=${mysqlVersionInfo.features.supportsJSON}, Windows=${mysqlVersionInfo.features.supportsWindowFunctions}, CTE=${mysqlVersionInfo.features.supportsCTE}`);
+                        } else {
+                            console.log(`⚠️ MySQL version format not recognized: ${mySQLVersionString}`);
+                        }
+                    }
+                    
+                    await connection.end();
+                } catch (versionError) {
+                    console.error('❌ Failed to get MySQL version:', versionError);
+                    // Continue without version info if there's an error
+                }
+                
+                // Enhance the query with MySQL version information
+                const versionEnhancedQuery = mysqlVersionInfo ? 
+                    `${query}
+
+MySQL VERSION INFO: Your query will run on MySQL ${mysqlVersionInfo.full}
+VERSION-SPECIFIC REQUIREMENTS:
+- JSON Functions: ${mysqlVersionInfo.features.supportsJSON ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Window Functions: ${mysqlVersionInfo.features.supportsWindowFunctions ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Common Table Expressions: ${mysqlVersionInfo.features.supportsCTE ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Regular Expressions: ${mysqlVersionInfo.features.supportsRegex ? 'AVAILABLE' : 'NOT AVAILABLE'}
+
+IMPORTANT: Generate SQL compatible with this specific MySQL version. Avoid using features not supported by this version.` 
+                    : query;
+                
                 // PERFORMANCE OPTIMIZATION 2: Use Promise.allSettled for parallel processing
                 const [queryInsightsResult, smartQueryResult] = await Promise.allSettled([
                     langchainApp.getQueryInsights(query),
-                    langchainApp.executeSmartQuery(query, context)
+                    langchainApp.executeSmartQuery(versionEnhancedQuery, context)
                 ]);
 
                 // Extract results with error handling
@@ -705,7 +805,12 @@ CRITICAL SQL REQUIREMENTS:
                     metadata: {
                         processing_time: `${processingTime.toFixed(2)}ms`,
                         source: 'langchain_medical_assistant',
-                        timestamp: new Date().toISOString()
+                        timestamp: new Date().toISOString(),
+                        database: {
+                            mysql_version: mySQLVersionString,
+                            version_info: mysqlVersionInfo,
+                            used_version_adaptive_query: !!mysqlVersionInfo
+                        }
                     }
                 };
 
@@ -719,7 +824,11 @@ CRITICAL SQL REQUIREMENTS:
                     error: 'Query processing failed',
                     message: (error as Error).message,
                     processing_time: `${processingTime.toFixed(2)}ms`,
-                    timestamp: new Date().toISOString()
+                    timestamp: new Date().toISOString(),
+                    database_info: {
+                        mysql_version: mySQLVersionString,
+                        version_checked: !!mysqlVersionInfo
+                    }
                 });
             }
         }
@@ -1074,14 +1183,21 @@ CRITICAL SQL REQUIREMENTS:
     // Enhanced endpoint for manual SQL execution with complete query extraction
     // Fixed endpoint for manual SQL execution with better SQL cleaning
     // Fixed endpoint for manual SQL execution with schema validation
+    // Now includes conversational capabilities with session management
     router.post('/query-sql-manual',
         [
             body('query').isString().isLength({ min: 1, max: 500 }).withMessage('Query must be 1-500 characters'),
-            body('context').optional().isString().isLength({ max: 1000 }).withMessage('Context must be less than 1000 characters')
+            body('context').optional().isString().isLength({ max: 1000 }).withMessage('Context must be less than 1000 characters'),
+            body('sessionId').optional().isString().withMessage('Session ID must be a string'),
+            body('conversational').optional().isBoolean().withMessage('Conversational flag must be a boolean')
         ],
         async (req: Request, res: Response) => {
             const startTime = performance.now();
             let rawAgentResponse = null;
+            // Initialize MySQL version variables
+            let mySQLVersionString = "unknown";
+            let mysqlVersionInfo = null;
+            
             let debugInfo = {
                 extractionAttempts: [] as string[],
                 sqlCorrections: [] as string[],
@@ -1098,9 +1214,47 @@ CRITICAL SQL REQUIREMENTS:
                     });
                 }
 
-                const { query, context = 'Medical database query' } = req.body;
+                const { query, context = 'Medical database query', sessionId = uuidv4(), conversational = false } = req.body;
 
-                console.log(`🚀 Processing SQL manual query: "${query}"`);
+                console.log(`🚀 Processing SQL manual query: "${query}" ${conversational ? 'with conversation' : ''}`);
+
+                // Get or create conversation memory for this session if using conversational mode
+                let sessionData = null;
+                let chatHistory: any[] = [];
+                
+                if (conversational) {
+                    console.log(`💬 Using conversational mode with session: ${sessionId}`);
+                    sessionData = conversationSessions.get(sessionId);
+                    
+                    if (!sessionData) {
+                        console.log(`🆕 Creating new conversation session: ${sessionId}`);
+                        const memory = new BufferMemory({
+                            memoryKey: 'chat_history',
+                            returnMessages: true,
+                            inputKey: 'input',
+                            outputKey: 'output',
+                        });
+                        sessionData = {
+                            memory,
+                            lastAccess: new Date()
+                        };
+                        conversationSessions.set(sessionId, sessionData);
+                    } else {
+                        // Update last access time
+                        sessionData.lastAccess = new Date();
+                        console.log(`📝 Using existing conversation session: ${sessionId}`);
+                    }
+                    
+                    // Retrieve conversation history if available
+                    try {
+                        const memoryVariables = await sessionData.memory.loadMemoryVariables({});
+                        chatHistory = memoryVariables.chat_history || [];
+                        console.log(`📜 Retrieved conversation history with ${Array.isArray(chatHistory) ? chatHistory.length : 0} messages`);
+                    } catch (memoryError) {
+                        console.error('❌ Error retrieving conversation history:', memoryError);
+                        // Continue without history if there's an error
+                    }
+                }
 
                 const sqlAgent = langchainApp.getSqlAgent();
 
@@ -1158,8 +1312,77 @@ CRITICAL SQL REQUIREMENTS:
                 let capturedSQLQueries: string[] = [];
 
                 try {
-                    // Configure LangChain's sqlAgent to use its built-in schema analysis capabilities
-                    const enhancedQuery = `
+                    // Get MySQL version information to ensure compatibility
+                    console.log('🔍 Analyzing MySQL version before generating SQL...');
+                    let mySQLVersionString = "unknown";
+                    let mysqlVersionInfo = null;
+                    
+                    try {
+                        const mysql = require('mysql2/promise');
+                        const versionConnection = await mysql.createConnection({
+                            host: process.env.DB_HOST!,
+                            port: parseInt(process.env.DB_PORT!),
+                            user: process.env.DB_USER!,
+                            password: process.env.DB_PASSWORD!,
+                            database: process.env.DB_NAME!,
+                            connectTimeout: 8000,
+                        });
+                        
+                        const [rows] = await versionConnection.execute('SELECT VERSION() as version');
+                        if (rows && rows[0] && rows[0].version) {
+                            mySQLVersionString = rows[0].version;
+                            
+                            // Parse version string
+                            const versionMatch = mySQLVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
+                            if (versionMatch) {
+                                const major = parseInt(versionMatch[1]);
+                                const minor = parseInt(versionMatch[2]);
+                                const patch = parseInt(versionMatch[3]);
+                                
+                                mysqlVersionInfo = {
+                                    full: mySQLVersionString,
+                                    major,
+                                    minor,
+                                    patch,
+                                    supportsJSON: major >= 5 && minor >= 7,
+                                    supportsWindowFunctions: major >= 8,
+                                    supportsCTE: major >= 8,
+                                    supportsRegex: true
+                                };
+                                
+                                console.log(`✅ MySQL Version: ${mySQLVersionString} (${major}.${minor}.${patch})`);
+                                console.log(`✅ Features: JSON=${mysqlVersionInfo.supportsJSON}, Windows=${mysqlVersionInfo.supportsWindowFunctions}, CTE=${mysqlVersionInfo.supportsCTE}`);
+                            }
+                        }
+                        
+                        await versionConnection.end();
+                    } catch (versionError) {
+                        console.error('❌ Failed to get MySQL version:', versionError);
+                        // Continue without version info
+                    }
+                    
+                    // Configure LangChain's sqlAgent with version-specific instructions
+                    const versionSpecificInstructions = mysqlVersionInfo ? `
+MySQL VERSION INFO: Your query will run on MySQL ${mysqlVersionInfo.full} (${mysqlVersionInfo.major}.${mysqlVersionInfo.minor}.${mysqlVersionInfo.patch})
+
+VERSION-SPECIFIC COMPATIBILITY:
+- JSON Functions (e.g., JSON_EXTRACT): ${mysqlVersionInfo.supportsJSON ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
+- Window Functions (e.g., ROW_NUMBER()): ${mysqlVersionInfo.supportsWindowFunctions ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
+- Common Table Expressions (WITH): ${mysqlVersionInfo.supportsCTE ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
+- Regular Expressions: AVAILABLE ✅
+
+CRITICAL: Use ONLY SQL features compatible with this MySQL version. Avoid any syntax not supported by ${mysqlVersionInfo.full}.
+` : '';
+
+                    // Add conversation context if in conversational mode
+                let conversationalContext = '';
+                if (conversational && Array.isArray(chatHistory) && chatHistory.length > 0) {
+                    conversationalContext = '\n\nPrevious conversation:\n' + chatHistory
+                        .map((msg: any) => `${msg.type === 'human' ? 'User' : 'Assistant'}: ${msg.content}`)
+                        .join('\n') + '\n\n';
+                }
+                
+                const enhancedQuery = `
 You are a medical database SQL expert. Follow this strict process to write an accurate SQL query:
 
 1. ANALYZE: First, ALWAYS explore the complete database schema using the sql_db_schema tool to understand available tables and columns.
@@ -1177,8 +1400,10 @@ You are a medical database SQL expert. Follow this strict process to write an ac
 
 4. EXECUTE: Create a SQL query that correctly addresses the request using verified table and column names.
 
-CRITICAL: This database uses snake_case for most identifiers. NEVER assume column or table names - always verify them first.
+${versionSpecificInstructions}
 
+CRITICAL: This database uses snake_case for most identifiers. NEVER assume column or table names - always verify them first.
+${conversationalContext ? conversationalContext : ''}
 Query request: ${query}
 `;
                     console.log('📝 Enhanced query with schema information:', enhancedQuery.substring(0, 200) + '...');
@@ -1621,6 +1846,25 @@ Query request: ${query}
 
                     const processingTime = performance.now() - startTime;
 
+                    // Save conversation if in conversational mode
+                    if (conversational && sessionData) {
+                        try {
+                            // Prepare a user-friendly summary of the SQL results for the conversation
+                            const resultCount = Array.isArray(rows) ? rows.length : 0;
+                            const resultSummary = `Found ${resultCount} results for your query. SQL: ${finalSQL}`;
+                            
+                            // Save the conversation exchange to memory
+                            await sessionData.memory.saveContext(
+                                { input: query },
+                                { output: resultSummary }
+                            );
+                            console.log('💾 Saved conversation context');
+                        } catch (saveError) {
+                            console.error('❌ Error saving conversation:', saveError);
+                            // Continue without saving if there's an error
+                        }
+                    }
+                    
                     // Return the raw SQL results
                     const response = {
                         success: true,
@@ -1636,13 +1880,24 @@ Query request: ${query}
                         })) : [],
                         processing_time: `${processingTime.toFixed(2)}ms`,
                         agent_response: agentResult.output,
+                        // Add conversation information if in conversational mode
+                        ...(conversational ? {
+                            conversation: {
+                                sessionId: sessionId,
+                                historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
+                                mode: 'conversational'
+                            }
+                        } : {}),
                         captured_queries: capturedSQLQueries,
                         intermediate_steps: intermediateSteps,
                         debug_info: debugInfo,
                         database_info: {
                             host: process.env.DB_HOST,
                             database: process.env.DB_NAME,
-                            port: process.env.DB_PORT
+                            port: process.env.DB_PORT,
+                            mysql_version: mySQLVersionString,
+                            version_details: mysqlVersionInfo,
+                            query_adapted_to_version: !!mysqlVersionInfo
                         },
                         timestamp: new Date().toISOString()
                     };
@@ -1878,6 +2133,20 @@ Query request: ${query}
 
                     const processingTime = performance.now() - startTime;
 
+                    // If in conversational mode, still save the error to conversation history
+                    if (conversational && sessionData) {
+                        try {
+                            const errorSummary = `Error executing SQL: ${sqlError.message}`;
+                            await sessionData.memory.saveContext(
+                                { input: query },
+                                { output: errorSummary }
+                            );
+                            console.log('💾 Saved error to conversation context');
+                        } catch (saveError) {
+                            console.error('❌ Error saving conversation:', saveError);
+                        }
+                    }
+                    
                     res.status(500).json({
                         error: 'SQL execution failed',
                         message: sqlError.message,
@@ -1888,10 +2157,23 @@ Query request: ${query}
                         sql_final: finalSQL,
                         processing_time: `${processingTime.toFixed(2)}ms`,
                         agent_response: agentResult.output,
+                        // Add conversation information if in conversational mode
+                        ...(conversational ? {
+                            conversation: {
+                                sessionId: sessionId,
+                                historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
+                                mode: 'conversational'
+                            }
+                        } : {}),
                         captured_queries: capturedSQLQueries,
                         intermediate_steps: intermediateSteps,
                         debug_info: debugInfo,
                         error_details: errorDetails,
+                        database_info: {
+                            mysql_version: mySQLVersionString,
+                            version_details: mysqlVersionInfo ? JSON.stringify(mysqlVersionInfo) : null,
+                            query_adapted_to_version: !!mysqlVersionInfo
+                        },
                         timestamp: new Date().toISOString()
                     });
                 } finally {
@@ -1904,11 +2186,24 @@ Query request: ${query}
             } catch (error) {
                 const processingTime = performance.now() - startTime;
                 console.error('❌ Manual SQL query processing error:', error);
+                
+                // Ensure these variables are accessible in the error handler
+                const conversational = req.body.conversational === true;
+                const sessionId = req.body.sessionId || uuidv4();
+                const chatHistory: any[] = [];
 
                 res.status(500).json({
                     error: 'Manual SQL query processing failed',
                     message: (error as Error).message,
                     raw_agent_response: rawAgentResponse,
+                    // Add conversation information if in conversational mode
+                    ...(conversational ? {
+                        conversation: {
+                            sessionId: sessionId,
+                            historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
+                            mode: 'conversational'
+                        }
+                    } : {}),
                     debug_info: debugInfo,
                     processing_time: `${processingTime.toFixed(2)}ms`,
                     timestamp: new Date().toISOString()
@@ -2095,6 +2390,58 @@ Query request: ${query}
 
         return cleanSQL;
     }
-
+    
+    // Session management endpoints
+    router.get('/conversation/sessions', (req: Request, res: Response) => {
+        try {
+            const sessions: Record<string, any> = {};
+            
+            conversationSessions.forEach((session, sessionId) => {
+                sessions[sessionId] = {
+                    lastAccess: session.lastAccess,
+                    created: session.lastAccess, // We don't track creation time separately
+                    messageCount: 0 // We'll need to implement this if message count tracking is important
+                };
+            });
+            
+            res.json({
+                total: conversationSessions.size,
+                sessions
+            });
+        } catch (error) {
+            res.status(500).json({
+                error: 'Failed to retrieve sessions',
+                message: (error as Error).message
+            });
+        }
+    });
+    
+    router.delete('/conversation/sessions/:sessionId', (req: Request, res: Response) => {
+        try {
+            const { sessionId } = req.params;
+            
+            if (conversationSessions.has(sessionId)) {
+                conversationSessions.delete(sessionId);
+                res.json({
+                    success: true,
+                    message: `Session ${sessionId} deleted successfully`
+                });
+            } else {
+                res.status(404).json({
+                    error: 'Session not found',
+                    sessionId
+                });
+            }
+        } catch (error) {
+            res.status(500).json({
+                error: 'Failed to delete session',
+                message: (error as Error).message
+            });
+        }
+    });
+    
+    // The /query-conversation endpoint has been removed
+    // Its functionality has been integrated into /query-sql-manual
+    
     return router;
 }

@@ -1,0 +1,13 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Install dependencies and run API in dev mode",
+			"type": "shell",
+			"command": "cd /home/saboor.malik@2bvision.com/2bvt/Langchain && yarn add uuid @types/uuid && yarn api:dev",
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

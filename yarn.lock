@@ -2086,6 +2086,7 @@ __metadata:
     "@types/morgan": "npm:^1.9.10"
     "@types/node": "npm:^24.1.0"
     "@types/papaparse": "npm:^5.3.16"
+    "@types/uuid": "npm:^10.0.0"
     cors: "npm:^2.8.5"
     dotenv: "npm:^17.2.1"
     express: "npm:^5.1.0"
@@ -2103,6 +2104,7 @@ __metadata:
     ts-node: "npm:^10.9.2"
     typeorm: "npm:^0.3.25"
     typescript: "npm:^5.8.3"
+    uuid: "npm:^11.1.0"
     zod: "npm:^3.23.8"
   languageName: unknown
   linkType: soft

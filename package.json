@@ -26,6 +26,7 @@
   "devDependencies": {
     "@types/node": "^24.1.0",
     "@types/papaparse": "^5.3.16",
+    "@types/uuid": "^10.0.0",
     "nodemon": "^3.1.10",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
@@ -51,6 +52,7 @@
     "papaparse": "^5.5.3",
     "reflect-metadata": "^0.2.2",
     "typeorm": "^0.3.25",
+    "uuid": "^11.1.0",
     "zod": "^3.23.8"
   }
 }
