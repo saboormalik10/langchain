@@ -22,9 +22,36 @@ type AgentResult = {
 interface ConversationSession {
     memory: BufferMemory;
     lastAccess: Date;
+    // Schema caching
+    cachedSchema?: string;
+    schemaLastUpdated?: Date;
+    // For multi-agent system
+    secondaryMemory?: BufferMemory;
+    // For advanced analytics
+    toolUsage?: Record<string, number>;
+    queryHistory?: Array<{query: string, success: boolean, executionTime: number}>;
+    // For advanced conversation
+    ambiguityResolutions?: Record<string, string>;
+    userPreferences?: Record<string, any>;
+    // For autocomplete
+    frequentColumns?: string[];
+    frequentTables?: string[];
+    recentQueries?: string[];
 }
 
 const conversationSessions = new Map<string, ConversationSession>();
+
+// Global schema cache for non-session users
+const globalSchemaCache = {
+    schema: "",
+    tables: [] as string[],
+    columns: {} as Record<string, string[]>,
+    relationships: [] as Array<{fromTable: string, fromColumn: string, toTable: string, toColumn: string}>,
+    lastUpdated: new Date(0)
+};
+
+// Schema cache expiration time (15 minutes)
+const SCHEMA_CACHE_EXPIRY_MS = 15 * 60 * 1000;
 
 // Cleanup function for expired conversations (runs every hour)
 const CONVERSATION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -382,14 +409,14 @@ IMPORTANT: Generate SQL compatible with this specific MySQL version. Avoid using
                     ? smartQueryResult.value
                     : { type: 'error', data: [{ error: 'Query execution failed' }], source: 'error' };
 
-                // Check if we got success but fewer records than expected (specifically for dosage queries)
+                // Check if we got success but fewer records than expected (for queries that should return many records)
                 // This is the PRIMARY location where we handle queries that might have hidden LIMIT clauses
                 if (smartResult.type !== 'error' &&
                     Array.isArray(smartResult.data) &&
                     (smartResult.data.length < 5 || query.toLowerCase().includes('all')) &&
-                    (query.toLowerCase().includes('dosage') || query.toLowerCase().includes('mg') ||
+                    (query.toLowerCase().includes('all') || query.toLowerCase().includes('every') ||
                         query.toLowerCase().includes('up to') || query.toLowerCase().includes('less than') ||
-                        query.toLowerCase().includes('all') || query.toLowerCase().includes('every'))) {
+                        query.toLowerCase().includes('greater than') || query.toLowerCase().includes('more than'))) {
 
                     console.log(`⚠️ CRITICAL: Query returned only ${smartResult.data.length} records, which is likely fewer than expected. Forcing a NO-LIMIT query...`);
 
@@ -403,7 +430,7 @@ CRITICAL INSTRUCTIONS - READ CAREFULLY:
 3. The previous query only returned ${smartResult.data.length} records which is INCORRECT
 4. Return EVERY SINGLE record that matches the criteria - DO NOT LIMIT RESULTS
 5. Print the EXACT SQL query that was executed
-6. For dosage comparisons, use multiple LIKE patterns to match all possible values
+6. Use appropriate comparison methods based on the actual data types in the database
 7. Your SQL query MUST NOT contain any LIMIT clause or row restriction of any kind
 8. Return the results as a valid JSON array of objects
 
@@ -435,10 +462,11 @@ If it does, remove it and re-run the query. This is critical for correct results
                         // Even if the retry failed, let's try one more direct approach with a very simple format
                         try {
                             console.log('🔄 Attempting final emergency retry with simplified format...');
-                            const emergencyQuery = `Give me all patients with medications where dosage is up to 250mg.
+                            const emergencyQuery = `Find medical data with specific criteria.
                             
 CRITICAL: Do not use any LIMIT clause. Return ALL matching records as a JSON array.
-For dosage comparison, use pattern matching with multiple LIKE conditions for all values up to 250mg.`;
+Use database schema discovery to identify appropriate tables and relationships.
+Apply appropriate filtering based on the original query intent.`;
 
                             const emergencyResult = await langchainApp.executeSmartQuery(emergencyQuery, context);
                             if (emergencyResult.data && Array.isArray(emergencyResult.data) &&
@@ -636,25 +664,26 @@ Include the exact SQL query in the output.`;
                 }
 
                 console.log('📊 Query insights:', queryInsights);
-                // SPECIAL EMERGENCY FIX: Always check for dosage queries returning too few records
+                // SPECIAL EMERGENCY FIX: Always check for queries returning too few records when many are expected
                 if (Array.isArray(smartResult.data) &&
                     smartResult.data.length <= 2 &&
-                    (query.toLowerCase().includes('dosage') || query.toLowerCase().includes('mg'))) {
+                    (query.toLowerCase().includes('all') || query.toLowerCase().includes('every') ||
+                     query.toLowerCase().includes('total') || query.toLowerCase().includes('complete'))) {
 
-                    console.log('🚨 EMERGENCY: Detected dosage query with suspiciously few records - forcing explicit retry');
+                    console.log('🚨 EMERGENCY: Detected query expecting many records but got suspiciously few - forcing explicit retry');
 
                     try {
-                        // Hard-coded dosage query that we know works
-                        const directQuery = `Get all patients with medications where dosage is up to 250mg. 
+                        // Database-agnostic query using schema discovery
+                        const directQuery = `Find medical data matching the criteria from the original request. 
                         
 CRITICAL SQL REQUIREMENTS:
-1. Use only pattern matching with LIKE for dosage comparison
+1. Use database schema discovery to identify appropriate tables and columns
 2. DO NOT use any LIMIT clause
 3. Return ALL matching records
-4. Use proper JOIN between patients and medications tables`;
+4. Use proper JOIN relationships based on discovered foreign keys`;
 
                         console.log('🔄 Executing emergency direct query...');
-                        const directResult = await langchainApp.executeSmartQuery(directQuery, 'Dosage query with forced patterns');
+                        const directResult = await langchainApp.executeSmartQuery(directQuery, 'Query with forced complete results');
 
                         if (directResult.data && Array.isArray(directResult.data) && directResult.data.length > smartResult.data.length) {
                             console.log(`✅ EMERGENCY FIX SUCCESSFUL - got ${directResult.data.length} records (previous: ${smartResult.data.length})`);
@@ -1031,23 +1060,23 @@ CRITICAL SQL REQUIREMENTS:
                     treatment_plan: {
                         medications: [
                             {
-                                name: 'Metformin',
-                                dosage: '500mg twice daily',
-                                duration: '6 months',
-                                instructions: 'Take with meals to reduce stomach upset'
+                                name: 'Primary Medication A',
+                                dosage: 'As prescribed by physician',
+                                duration: 'As recommended',
+                                instructions: 'Follow physician guidance'
                             },
                             {
-                                name: 'Lisinopril',
-                                dosage: '10mg once daily',
-                                duration: 'Ongoing',
-                                instructions: 'Take at the same time each day'
+                                name: 'Secondary Medication B',
+                                dosage: 'As prescribed by physician',
+                                duration: 'As recommended',
+                                instructions: 'Follow physician guidance'
                             }
                         ],
                         lifestyle_modifications: [
-                            'Follow diabetic diet with carbohydrate counting',
-                            'Exercise 150 minutes per week of moderate activity',
-                            'Monitor blood glucose daily',
-                            'Weight management - target BMI 18.5-24.9'
+                            'Follow recommended dietary guidelines',
+                            'Maintain regular exercise routine as advised',
+                            'Follow monitoring schedule as prescribed',
+                            'Maintain healthy weight as recommended'
                         ],
                         monitoring: [
                             'HbA1c every 3 months',
@@ -1062,8 +1091,8 @@ CRITICAL SQL REQUIREMENTS:
                     estimated_cost: '$150-300/month',
                     success_probability: 0.85,
                     side_effects: [
-                        'Metformin: GI upset, lactic acidosis (rare)',
-                        'Lisinopril: Dry cough, hyperkalemia, angioedema (rare)'
+                        'Primary Medication A: Follow physician guidance for side effects',
+                        'Secondary Medication B: Monitor as advised by healthcare provider'
                     ]
                 };
 
@@ -1189,7 +1218,22 @@ CRITICAL SQL REQUIREMENTS:
             body('query').isString().isLength({ min: 1, max: 500 }).withMessage('Query must be 1-500 characters'),
             body('context').optional().isString().isLength({ max: 1000 }).withMessage('Context must be less than 1000 characters'),
             body('sessionId').optional().isString().withMessage('Session ID must be a string'),
-            body('conversational').optional().isBoolean().withMessage('Conversational flag must be a boolean')
+            body('conversational').optional().isBoolean().withMessage('Conversational flag must be a boolean'),
+            // New parameters for enhanced features
+            body('autoRetry').optional().isBoolean().withMessage('Auto-retry flag must be a boolean'),
+            body('generateSummary').optional().isBoolean().withMessage('Generate summary flag must be a boolean'),
+            body('useSchemaCache').optional().isBoolean().withMessage('Schema cache flag must be a boolean'),
+            body('multiAgentMode').optional().isBoolean().withMessage('Multi-agent mode flag must be a boolean'),
+            body('detailedAnalytics').optional().isBoolean().withMessage('Detailed analytics flag must be a boolean'),
+            body('friendlyErrors').optional().isBoolean().withMessage('Friendly errors flag must be a boolean'),
+            body('advancedConversation').optional().isBoolean().withMessage('Advanced conversation flag must be a boolean'),
+            body('autocompleteMode').optional().isBoolean().withMessage('Autocomplete mode flag must be a boolean'),
+            body('maxRetries').optional().isInt({ min: 0, max: 3 }).withMessage('Max retries must be between 0 and 3'),
+            body('summaryFormat').optional().isIn(['text', 'chart', 'highlights', 'full']).withMessage('Invalid summary format'),
+            // Chain parameters
+            body('useChains').optional().isBoolean().withMessage('Use chains flag must be a boolean'),
+            body('chainType').optional().isIn(['simple', 'sequential', 'router', 'multiprompt']).withMessage('Invalid chain type'),
+            body('preferredChain').optional().isString().withMessage('Preferred chain must be a string')
         ],
         async (req: Request, res: Response) => {
             const startTime = performance.now();
@@ -1214,7 +1258,30 @@ CRITICAL SQL REQUIREMENTS:
                     });
                 }
 
-                const { query, context = 'Medical database query', sessionId = uuidv4(), conversational = false } = req.body;
+                const { 
+                    query, 
+                    context = 'Medical database query', 
+                    conversational = false, 
+                    sessionId = uuidv4(),
+                    // Enhanced parameters
+                    enableAutoCorrect = false,
+                    summarizeResults = false,
+                    enableMultiAgent = false,
+                    enableSchemaCache = true,
+                    enableToolTracing = false,
+                    friendlyErrors = true,
+                    enableAgentQuestions = false,
+                    enableAutoComplete = true,
+                    maxRetries = 3,
+                    analyzePatterns = false,
+                    returnSQLExplanation = false,
+                    // Chain parameters
+                    chainType = 'simple',
+                    preferredChain = ''
+                } = req.body;
+
+                // Make useChains mutable so we can reset it if chains fail
+                let useChains = req.body.useChains || false;
 
                 console.log(`🚀 Processing SQL manual query: "${query}" ${conversational ? 'with conversation' : ''}`);
 
@@ -1305,17 +1372,267 @@ CRITICAL SQL REQUIREMENTS:
                 } catch (schemaError: any) {
                     console.error('❌ Failed to get basic database structure:', schemaError.message);
                     if (connection) await connection.end();
-                }                // Step 1: Get the SQL query from the agent
+                }
+
+                // ========== CHAIN EXECUTION LOGIC ==========
+                
+                // Check if chains should be used for SQL generation instead of direct SQL agent
+                let enhancedQuery = query;
+                let chainSQLGenerated = '';
+                let chainMetadata = {};
+
+                if (useChains) {
+                    console.log(`🔗 Using LangChain chains for SQL generation: ${chainType}`);
+                    
+                    try {
+                        // Get complete database knowledge for chains - both schema and version info
+                        console.log('🔍 Getting complete database knowledge for chain execution...');
+                        
+                        let mySQLVersionString = "unknown";
+                        let mysqlVersionInfo = null;
+                        let databaseSchemaInfo = "";
+                        
+                        try {
+                            // Get MySQL version information
+                            const mysql = require('mysql2/promise');
+                            const versionConnection = await mysql.createConnection({
+                                host: process.env.DB_HOST!,
+                                port: parseInt(process.env.DB_PORT!),
+                                user: process.env.DB_USER!,
+                                password: process.env.DB_PASSWORD!,
+                                database: process.env.DB_NAME!,
+                                connectTimeout: 8000,
+                            });
+                            
+                            const [rows] = await versionConnection.execute('SELECT VERSION() as version');
+                            if (rows && rows[0] && rows[0].version) {
+                                mySQLVersionString = rows[0].version;
+                                
+                                // Parse version string
+                                const versionMatch = mySQLVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
+                                if (versionMatch) {
+                                    const major = parseInt(versionMatch[1]);
+                                    const minor = parseInt(versionMatch[2]);
+                                    const patch = parseInt(versionMatch[3]);
+                                    
+                                    mysqlVersionInfo = {
+                                        full: mySQLVersionString,
+                                        major,
+                                        minor,
+                                        patch,
+                                        supportsJSON: major >= 5 && minor >= 7,
+                                        supportsWindowFunctions: major >= 8,
+                                        supportsCTE: major >= 8,
+                                        supportsRegex: true
+                                    };
+                                    
+                                    console.log(`✅ MySQL Version for chains: ${mySQLVersionString} (${major}.${minor}.${patch})`);
+                                }
+                            }
+                            
+                            await versionConnection.end();
+                        } catch (versionError) {
+                            console.error('❌ Failed to get MySQL version for chains:', versionError);
+                        }
+                        
+                        // Get database schema information using the SQL database connection
+                        try {
+                            console.log('📊 Getting complete database schema for chains...');
+                            const sqlDatabase = langchainApp.getSqlDatabase();
+                            if (sqlDatabase) {
+                                databaseSchemaInfo = await sqlDatabase.getTableInfo();
+                                console.log(`✅ Retrieved database schema info for chains (${databaseSchemaInfo.length} characters)`);
+                            } else {
+                                console.log('⚠️ SQL Database not available, chains will work without schema info');
+                            }
+                        } catch (schemaError) {
+                            console.error('❌ Failed to get database schema for chains:', schemaError);
+                        }
+                        
+                        // Create comprehensive database-aware query for chains
+                        const comprehensiveQuery = `${query}
+
+=== COMPLETE DATABASE KNOWLEDGE FOR CHAIN EXECUTION ===
+
+DATABASE SCHEMA INFORMATION:
+${databaseSchemaInfo || "Schema information not available - use database discovery tools"}
+
+MYSQL VERSION INFO: Your query will run on MySQL ${mysqlVersionInfo ? mysqlVersionInfo.full : 'Unknown'} ${mysqlVersionInfo ? `(${mysqlVersionInfo.major}.${mysqlVersionInfo.minor}.${mysqlVersionInfo.patch})` : ''}
+
+VERSION-SPECIFIC COMPATIBILITY:
+- JSON Functions (e.g., JSON_EXTRACT): ${mysqlVersionInfo ? (mysqlVersionInfo.supportsJSON ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌') : 'UNKNOWN ❓'}
+- Window Functions (e.g., ROW_NUMBER()): ${mysqlVersionInfo ? (mysqlVersionInfo.supportsWindowFunctions ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌') : 'UNKNOWN ❓'}
+- Common Table Expressions (WITH): ${mysqlVersionInfo ? (mysqlVersionInfo.supportsCTE ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌') : 'UNKNOWN ❓'}
+- Regular Expressions: AVAILABLE ✅
+
+CRITICAL INSTRUCTIONS FOR CHAINS:
+1. Use ONLY the tables and columns that exist in the database schema above
+2. Generate ONLY SQL queries compatible with the MySQL version specified
+3. Use exact table and column names from the schema - no assumptions
+4. Return ONLY the SQL query without explanations or markdown formatting
+5. If schema info is unavailable, specify that database discovery is needed
+
+===============================================`;
+                        
+                        let chainResult;
+                        
+                        switch (chainType) {
+                            case 'simple':
+                                chainResult = await langchainApp.executeSimpleSequentialChain(comprehensiveQuery);
+                                break;
+                            case 'sequential':
+                                chainResult = await langchainApp.executeSequentialChain(comprehensiveQuery);
+                                break;
+                            case 'router':
+                                chainResult = await langchainApp.executeRouterChain(comprehensiveQuery);
+                                break;
+                            case 'multiprompt':
+                                chainResult = await langchainApp.executeMultiPromptChain(comprehensiveQuery);
+                                break;
+                            default:
+                                throw new Error(`Unsupported chain type: ${chainType}`);
+                        }
+
+                        if (chainResult.success) {
+                            console.log(`✅ Chain SQL generation successful: ${chainResult.chainType}`);
+                            
+                            // Extract SQL from chain result
+                            if (chainResult.finalSQL) {
+                                chainSQLGenerated = chainResult.finalSQL;
+                                console.log(`🔗 Chain generated SQL from finalSQL: ${chainSQLGenerated.substring(0, 100)}...`);
+                            } else if (chainResult.sql) {
+                                chainSQLGenerated = chainResult.sql;
+                                console.log(`🔗 Chain generated SQL from sql: ${chainSQLGenerated.substring(0, 100)}...`);
+                            } else if (chainResult.result) {
+                                // Try to extract SQL from the chain result text
+                                const resultText = typeof chainResult.result === 'string' ? chainResult.result : JSON.stringify(chainResult.result);
+                                const sqlPattern = /```sql\s*([\s\S]*?)\s*```|SELECT[\s\S]*?;/i;
+                                const sqlMatch = resultText.match(sqlPattern);
+                                if (sqlMatch) {
+                                    chainSQLGenerated = sqlMatch[1] || sqlMatch[0];
+                                    console.log(`🔗 Extracted SQL from chain result: ${chainSQLGenerated.substring(0, 100)}...`);
+                                }
+                            }
+                            
+                            // Store chain metadata for final response including MySQL version and schema info
+                            chainMetadata = {
+                                chain_used: chainResult.chainType,
+                                chain_analysis: chainResult.analysis || 'No analysis available',
+                                chain_validation: chainResult.schemaValidation || 'No validation available',
+                                chain_steps: chainResult.steps || [],
+                                chain_timestamp: chainResult.timestamp,
+                                mysql_version: mySQLVersionString,
+                                mysql_features: mysqlVersionInfo ? {
+                                    json_support: mysqlVersionInfo.supportsJSON,
+                                    window_functions: mysqlVersionInfo.supportsWindowFunctions,
+                                    cte_support: mysqlVersionInfo.supportsCTE,
+                                    regex_support: mysqlVersionInfo.supportsRegex
+                                } : null,
+                                database_schema_provided: !!databaseSchemaInfo,
+                                schema_info_length: databaseSchemaInfo ? databaseSchemaInfo.length : 0,
+                                comprehensive_database_knowledge: true
+                            };
+                            
+                            // Save conversation if in conversational mode
+                            if (conversational && sessionData) {
+                                try {
+                                    const contextSummary = `Chain ${chainResult.chainType} generated SQL with complete database schema (${databaseSchemaInfo ? databaseSchemaInfo.length : 0} chars) and MySQL version ${mySQLVersionString}`;
+                                    await sessionData.memory.saveContext(
+                                        { input: query },
+                                        { output: `${contextSummary}: ${chainSQLGenerated || 'No SQL extracted'}` }
+                                    );
+                                    console.log('💾 Saved comprehensive chain SQL generation to conversation context');
+                                } catch (saveError) {
+                                    console.error('❌ Error saving chain conversation:', saveError);
+                                }
+                            }
+                            
+                        } else {
+                            console.log(`❌ Chain SQL generation failed: ${chainResult.error}`);
+                            
+                            // Fall back to regular SQL agent if chain fails
+                            console.log('🔄 Falling back to regular SQL agent...');
+                            useChains = false; // Reset flag so we use the regular path
+                            
+                            // Store error info for final response
+                            chainMetadata = {
+                                chain_attempted: chainType,
+                                chain_error: chainResult.error,
+                                fallback_used: true
+                            };
+                        }
+                        
+                    } catch (chainError: any) {
+                        console.error('❌ Chain execution error:', chainError);
+                        
+                        // Fall back to regular SQL agent if chain fails
+                        console.log('🔄 Falling back to regular SQL agent due to error...');
+                        useChains = false; // Reset flag so we use the regular path
+                        
+                        // Store error info for final response
+                        chainMetadata = {
+                            chain_attempted: chainType,
+                            chain_error: chainError.message,
+                            fallback_used: true
+                        };
+                    }
+                }
+
+                // Step 1: Get the SQL query from the agent (or use chain-generated SQL)
                 console.log('📊 Step 1: Extracting SQL query from agent...');
                 let agentResult;
                 let intermediateSteps: any[] = [];
                 let capturedSQLQueries: string[] = [];
 
-                try {
-                    // Get MySQL version information to ensure compatibility
-                    console.log('🔍 Analyzing MySQL version before generating SQL...');
-                    let mySQLVersionString = "unknown";
-                    let mysqlVersionInfo = null;
+                // If we have chain-generated SQL, use it directly
+                if (chainSQLGenerated) {
+                    console.log('🔗 Using SQL generated by chain instead of agent');
+                    console.log('🔍 Raw chain SQL before cleaning:', chainSQLGenerated);
+                    
+                    // For chain-generated SQL, we may not need aggressive cleaning since chains should produce clean SQL
+                    // Try minimal cleaning first
+                    let cleanedChainSQL = chainSQLGenerated.trim();
+                    
+                    // Only clean if it contains obvious markdown or formatting
+                    if (chainSQLGenerated.includes('```') || chainSQLGenerated.includes('**') || chainSQLGenerated.includes('*')) {
+                        console.log('🧹 Chain SQL contains formatting, applying cleaning...');
+                        cleanedChainSQL = cleanSQLQuery(chainSQLGenerated);
+                    } else {
+                        console.log('✅ Chain SQL appears clean, using directly');
+                        // Just ensure it ends with semicolon
+                        if (!cleanedChainSQL.endsWith(';')) {
+                            cleanedChainSQL += ';';
+                        }
+                    }
+                    
+                    console.log('🔧 Final cleaned chain SQL:', cleanedChainSQL);
+                    
+                    if (cleanedChainSQL) {
+                        capturedSQLQueries.push(cleanedChainSQL);
+                        debugInfo.originalQueries.push(chainSQLGenerated);
+                        debugInfo.extractionAttempts.push('Chain-generated SQL: ' + cleanedChainSQL);
+                        
+                        // Create a mock agent result for consistency with the rest of the flow
+                        agentResult = {
+                            output: `Chain-generated SQL query: ${cleanedChainSQL}`,
+                            type: 'chain_generated',
+                            metadata: chainMetadata
+                        };
+                        
+                        console.log('✅ Chain-generated SQL prepared for execution');
+                    } else {
+                        console.log('❌ Failed to clean chain-generated SQL, falling back to agent');
+                        chainSQLGenerated = ''; // Reset so we use the agent
+                    }
+                }
+
+                // If no chain SQL or chain SQL cleaning failed, use the regular agent
+                if (!chainSQLGenerated) {
+                    try {
+                        // Get MySQL version information to ensure compatibility
+                        console.log('🔍 Analyzing MySQL version before generating SQL...');
+                        let mySQLVersionString = "unknown";
+                        let mysqlVersionInfo = null;
                     
                     try {
                         const mysql = require('mysql2/promise');
@@ -1542,43 +1859,59 @@ Query request: ${query}
                     return res.status(500).json({
                         error: 'SQL Agent execution failed',
                         message: agentError.message,
+                        chain_metadata: chainMetadata,
                         timestamp: new Date().toISOString()
                     });
                 }
+            }
+
+            // Initialize agentResult if it wasn't set (safety check)
+            if (!agentResult) {
+                agentResult = {
+                    output: 'No agent result available',
+                    type: 'fallback'
+                };
+            }
 
                 // Step 2: Extract SQL query with enhanced methods
                 console.log('📊 Step 2: Extracting SQL from agent response...');
                 let extractedSQL = '';
 
-                // Method 1: Use already captured SQL queries from callbacks
-                if (capturedSQLQueries.length > 0) {
-                    // Sort queries by length to prioritize longer, more complete queries
-                    const sortedQueries = [...capturedSQLQueries].sort((a, b) => b.length - a.length);
+                // If we have chain-generated SQL, use it
+                if (chainSQLGenerated) {
+                    extractedSQL = cleanSQLQuery(chainSQLGenerated);
+                    console.log('✅ Using chain-generated SQL');
+                } else {
+                    // Method 1: Use already captured SQL queries from callbacks
+                    if (capturedSQLQueries.length > 0) {
+                        // Sort queries by length to prioritize longer, more complete queries
+                        const sortedQueries = [...capturedSQLQueries].sort((a, b) => b.length - a.length);
 
-                    // Get the longest SQL query that includes both SELECT and FROM and appears to be complete
-                    for (const sql of sortedQueries) {
-                        if (isCompleteSQLQuery(sql)) {
-                            extractedSQL = sql;
-                            debugInfo.extractionAttempts.push('Complete captured query: ' + extractedSQL);
-                            console.log('✅ Found complete SQL from captured queries');
-                            break;
+                        // Get the longest SQL query that includes both SELECT and FROM and appears to be complete
+                        for (const sql of sortedQueries) {
+                            if (isCompleteSQLQuery(sql)) {
+                                extractedSQL = sql;
+                                debugInfo.extractionAttempts.push('Complete captured query: ' + extractedSQL);
+                                console.log('✅ Found complete SQL from captured queries');
+                                break;
+                            }
+                        }
+
+                        // If no complete query found, take the longest one
+                        if (!extractedSQL) {
+                            extractedSQL = sortedQueries[0];
+                            debugInfo.extractionAttempts.push('Longest captured query: ' + extractedSQL);
+                            console.log('⚠️ Using longest captured SQL query as fallback');
                         }
                     }
 
-                    // If no complete query found, take the longest one
-                    if (!extractedSQL) {
-                        extractedSQL = sortedQueries[0];
-                        debugInfo.extractionAttempts.push('Longest captured query: ' + extractedSQL);
-                        console.log('⚠️ Using longest captured SQL query as fallback');
-                    }
-                }
-
-                // Method 2: Try to extract from agent output if still not found
-                if (!extractedSQL && agentResult.output) {
-                    extractedSQL = cleanSQLQuery(agentResult.output);
-                    if (extractedSQL) {
-                        debugInfo.extractionAttempts.push('Extracted from agent output: ' + extractedSQL);
-                        console.log('✅ Found SQL in agent output');
+                    // Method 2: Try to extract from agent output if still not found
+                    if (!extractedSQL && agentResult && agentResult.output) {
+                        extractedSQL = cleanSQLQuery(agentResult.output);
+                        if (extractedSQL) {
+                            debugInfo.extractionAttempts.push('Extracted from agent output: ' + extractedSQL);
+                            console.log('✅ Found SQL in agent output');
+                        }
                     }
                 }
 
@@ -1597,10 +1930,11 @@ Query request: ${query}
                 if (!extractedSQL) {
                     return res.status(400).json({
                         error: 'No valid SQL query found in agent response',
-                        agent_response: agentResult.output || rawAgentResponse,
+                        agent_response: agentResult ? agentResult.output : rawAgentResponse,
                         intermediate_steps: intermediateSteps,
                         captured_queries: capturedSQLQueries,
                         debug_info: debugInfo,
+                        chain_metadata: chainMetadata,
                         timestamp: new Date().toISOString()
                     });
                 }
@@ -1879,13 +2213,22 @@ Query request: ${query}
                             table: field.table
                         })) : [],
                         processing_time: `${processingTime.toFixed(2)}ms`,
-                        agent_response: agentResult.output,
+                        agent_response: agentResult ? agentResult.output : '',
+                        
+                        // Add chain information if chains were used
+                        ...(useChains && Object.keys(chainMetadata).length > 0 ? {
+                            chain_info: {
+                                ...chainMetadata,
+                                sql_source: chainSQLGenerated ? 'chain_generated' : 'agent_generated'
+                            }
+                        } : {}),
+                        
                         // Add conversation information if in conversational mode
                         ...(conversational ? {
                             conversation: {
                                 sessionId: sessionId,
                                 historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
-                                mode: 'conversational'
+                                mode: useChains ? 'conversational_with_chains' : 'conversational'
                             }
                         } : {}),
                         captured_queries: capturedSQLQueries,
@@ -2224,6 +2567,7 @@ Query request: ${query}
 
         let sql = '';
 
+        // First try to extract from code blocks
         const codeBlockMatch = input.match(/```(?:sql)?\s*((?:SELECT|select)[\s\S]*?)```/);
         if (codeBlockMatch) {
             sql = codeBlockMatch[1].trim();
@@ -2232,11 +2576,14 @@ Query request: ${query}
             if (inlineCodeMatch) {
                 sql = inlineCodeMatch[1].trim();
             } else {
-                const sqlMatch = input.match(/(SELECT\s+[\s\S]+?\s+FROM\s+[\s\S]+?)(?:(?:;|\n|$)|\s*(?:\*\*|\#\#|--|\{\{|\}\}|\/\/|\/\*|\*\/|```|\[\[|\]\]))/i);
+                // FIXED: More comprehensive regex that captures multi-line SQL including JOINs
+                // Look for SELECT ... FROM ... and capture everything until statement termination
+                const sqlMatch = input.match(/(SELECT\s+[\s\S]*?\s+FROM\s+[\s\S]*?)(?:;(?:\s*$|\s*[^\s])|\s*$|\s*(?:\*\*|\#\#|--(?!\s*ON)|```|\[\[|\]\]|Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s))/i);
                 if (sqlMatch) {
                     sql = sqlMatch[1].trim();
                 } else {
-                    const lastResortMatch = input.match(/(SELECT\s+[\s\S]+?FROM[\s\S]+?)(?:;|$|\n|--|\*\*|\#)/i);
+                    // Fallback: try to capture everything from SELECT to a natural stopping point
+                    const lastResortMatch = input.match(/(SELECT\s+[\s\S]*?FROM[\s\S]*?)(?:;(?:\s*$|\s*[^\s])|\s*$|\s*(?:\*\*|\#\#|Query executed|Result:|Error:|Final answer))/i);
                     if (lastResortMatch) {
                         sql = lastResortMatch[1].trim();
                     }
@@ -2246,6 +2593,7 @@ Query request: ${query}
 
         if (!sql) return '';
 
+        // Clean up markdown and formatting but preserve SQL structure
         sql = sql.replace(/\*\*(.*?)\*\*/g, '$1') // Bold
             .replace(/\*(.*?)\*/g, '$1')          // Italic
             .replace(/__(.*?)__/g, '$1')          // Bold
@@ -2259,7 +2607,7 @@ Query request: ${query}
             .replace(/(?:\n|^)\s*>\s+(.*?)(?:\n|$)/g, ' $1 ') // Blockquotes
             .replace(/(?:\n|^)\s*-\s+(.*?)(?:\n|$)/g, ' $1 ') // List items
             .replace(/(?:\n|^)\s*\d+\.\s+(.*?)(?:\n|$)/g, ' $1 ') // Numbered list items
-            .replace(/--.*?(?:\n|$)/g, ' ')          // SQL comments
+            .replace(/--.*?(?:\n|$)/g, ' ')          // SQL comments (but not ON conditions)
             .replace(/\/\/.*?(?:\n|$)/g, ' ')        // JS comments
             .replace(/\/\*[\s\S]*?\*\//g, ' ')       // Multi-line comments
             .replace(/\s*\*\*Review for common mistakes:\*\*[\s\S]*/i, '')
@@ -2267,8 +2615,10 @@ Query request: ${query}
             .replace(/\{\{.*?\}\}/g, ' ')            // Template tags
             .replace(/\{\%.*?\%\}/g, ' ');           // Template tags
 
+        // Normalize whitespace but preserve SQL structure
         sql = sql.replace(/\s+/g, ' ').trim();
 
+        // Add semicolon if not present
         if (!sql.endsWith(';')) {
             sql += ';';
         }

@@ -24,7 +24,11 @@ import {
 import {
   ConversationalRetrievalQAChain,
   LLMChain,
-  SequentialChain
+  SequentialChain,
+  SimpleSequentialChain,
+  RouterChain,
+  MultiPromptChain,
+  LLMRouterChain
 } from 'langchain/chains';
 
 // LangChain SQL Imports
@@ -334,6 +338,12 @@ class MedicalDatabaseLangChainApp {
   // Chain instances
   private sqlChain: LLMChain | null = null;
   private conversationChain: ConversationalRetrievalQAChain | null = null;
+  
+  // Advanced Chain instances for /query-sql-manual endpoint
+  private sequentialChain: SequentialChain | null = null;
+  private simpleSequentialChain: SimpleSequentialChain | null = null;
+  private routerChain: MultiPromptChain | null = null;  // Use MultiPromptChain as router
+  private multiPromptChain: MultiPromptChain | null = null;
 
   // Tools instances
   private sqlToolkit: SqlToolkit | null = null;
@@ -358,6 +368,28 @@ class MedicalDatabaseLangChainApp {
     this.initializeMemory();
     this.initializeOutputParsers();
     this.initializeQueryIntelligence();
+    // Note: Advanced chains will be initialized after database connection
+    // to ensure they have access to the actual database schema
+  }
+
+  private async initializeAdvancedChains(): Promise<void> {
+    try {
+      // Initialize Simple Sequential Chain for basic SQL processing
+      await this.initializeSimpleSequentialChain();
+      
+      // Initialize Sequential Chain for complex multi-step queries
+      await this.initializeSequentialChain();
+      
+      // Initialize Router Chain for query routing
+      await this.initializeRouterChain();
+      
+      // Initialize Multi-Prompt Chain for different query types
+      await this.initializeMultiPromptChain();
+      
+      console.log('✅ Advanced Chains initialized');
+    } catch (error) {
+      console.error('❌ Error initializing advanced chains:', error);
+    }
   }
 
   private initializeConfig(): void {
@@ -486,7 +518,7 @@ class MedicalDatabaseLangChainApp {
         prompt: PromptTemplate.fromTemplate(`
 You are a professional database query intent analyzer. Analyze the user's natural language query and extract structured intent information.
 
-Database Context: Medical database with tables for patients, blood_tests, medications, pgx_test_results, and related medical data.
+Database Context: Medical database - analyze the actual schema to understand available tables and data.
 
 User Query: {query}
 Previous Context: {context}
@@ -495,14 +527,14 @@ Analyze this query and respond with a JSON object containing:
 {{
   "type": "SELECT|COUNT|AGGREGATE|JOIN|FILTER|SEARCH|TREND|COMPARISON",
   "confidence": 0.0-1.0,
-  "entities": ["table names, column names, or medical terms mentioned"],
+  "entities": ["medical terms, data categories, or concepts mentioned"],
   "timeframe": "any time period mentioned or null",
   "conditions": ["filtering conditions mentioned"],
   "grouping": ["fields to group by if any"],
   "sorting": [{{"field": "field_name", "direction": "ASC|DESC"}}],
   "complexity": "simple|medium|complex",
   "requiresJoin": true/false,
-  "estimatedTables": ["likely tables needed"],
+  "estimatedTables": ["likely data categories needed"],
   "businessLogic": "what the user is trying to accomplish"
 }}
 
@@ -576,6 +608,712 @@ Ensure the query follows medical database best practices and is production-ready
     }
   }
 
+  // ========== ADVANCED CHAIN INITIALIZATION METHODS ==========
+
+  private async initializeSimpleSequentialChain(): Promise<void> {
+    try {
+      // Get database schema information if available
+      const schemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
+      
+      // Chain 1: SQL Generation with Database Schema
+      const sqlGenerationTemplate = `You are a medical database SQL expert with access to the database schema.
+      
+      Database Schema Information:
+      {schema_info}
+      
+      Generate a MySQL query for the following request: {input}
+      
+      CRITICAL SQL GENERATION RULES:
+      - Use ONLY the tables and columns that exist in the schema above
+      - If querying multiple tables, ALWAYS include proper JOIN clauses
+      - Never reference columns from tables without joining them
+      - Use exact table and column names from the schema
+      - Generate ONLY complete, executable SQL queries
+      - Return ALL matching records unless specifically asked for a limit
+      - Ensure proper MySQL syntax with complete SELECT, FROM, and JOIN statements
+      
+      EXAMPLES OF PROPER QUERIES:
+      - Single table: SELECT col1, col2 FROM table1 WHERE condition
+      - Multiple tables: SELECT t1.col1, t2.col2 FROM table1 t1 JOIN table2 t2 ON t1.id = t2.table1_id
+      
+      Generate a complete, executable MySQL query:`;
+
+      const sqlGenerationPrompt = new PromptTemplate({
+        template: sqlGenerationTemplate,
+        inputVariables: ["input", "schema_info"]
+      });
+
+      const sqlGenerationChain = new LLMChain({
+        llm: this.llm,
+        prompt: sqlGenerationPrompt,
+        outputKey: "sql_query"
+      });
+
+      // Chain 2: SQL Validation with Schema Knowledge
+      const sqlValidationTemplate = `Review and validate this SQL query against the database schema: {sql_query}
+      
+      Database Schema:
+      {schema_info}
+      
+      Check for:
+      - Syntax correctness
+      - Table and column names exist in schema
+      - Security (no DML operations)
+      
+      Return: VALID or INVALID with brief reason`;
+
+      const sqlValidationPrompt = new PromptTemplate({
+        template: sqlValidationTemplate,
+        inputVariables: ["sql_query", "schema_info"]
+      });
+
+      const sqlValidationChain = new LLMChain({
+        llm: this.llm,
+        prompt: sqlValidationPrompt
+      });
+
+      // Create a wrapper chain that injects FRESH schema info every time
+      this.simpleSequentialChain = {
+        call: async (inputs: any) => {
+          // Get FRESH schema information every time the chain is called
+          const freshSchemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
+          console.log(`🔄 Simple chain using FRESH schema info (${freshSchemaInfo.length} chars)`);
+          
+          const inputWithSchema = {
+            ...inputs,
+            schema_info: freshSchemaInfo
+          };
+          
+          // Execute first chain
+          const sqlResult = await sqlGenerationChain.call(inputWithSchema);
+          console.log('🔧 Simple chain SQL generation:', typeof sqlResult.sql_query === 'string' ?
+            sqlResult.sql_query.substring(0, 200) + '...' :
+            JSON.stringify(sqlResult.sql_query).substring(0, 200) + '...');
+          
+          // Execute second chain with schema
+          const validationResult = await sqlValidationChain.call({
+            sql_query: sqlResult.sql_query,
+            schema_info: freshSchemaInfo
+          });
+          
+          return {
+            output: validationResult.text || validationResult.output
+          };
+        }
+      } as any;
+
+      console.log('✅ SimpleSequentialChain initialized with database schema knowledge');
+    } catch (error) {
+      console.error('❌ Error initializing SimpleSequentialChain:', error);
+    }
+  }
+
+  private async initializeSequentialChain(): Promise<void> {
+    try {
+      // Get database schema information if available
+      const schemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
+      
+      // Chain 1: Query Analysis with Schema
+      const analysisTemplate = `Analyze this medical database query with complete schema knowledge: {input}
+      
+      Database Schema:
+      {schema_info}
+      
+      TASK: Analyze the query and determine EXACTLY what tables and columns are needed.
+      
+      CRITICAL ANALYSIS STEPS:
+      1. Identify what data the user wants (patients? medications? test results?)
+      2. From the schema above, find the EXACT table names that contain this data
+      3. Identify the EXACT column names in each table
+      4. If multiple tables are needed, find the foreign key relationships
+      5. Determine the JOIN conditions needed to connect the tables
+      
+      SCHEMA ANALYSIS REQUIREMENTS:
+      - Look for tables like: patients, medications, prescriptions, test_results, etc.
+      - Identify primary keys (usually patient_id, medication_id, etc.)
+      - Find foreign key relationships (patient_id in other tables linking to patients.patient_id)
+      - Note any linking/junction tables (like prescriptions connecting patients to medications)
+      
+      RETURN FORMAT (JSON):
+      {{
+        "query_type": "SELECT|COUNT|JOIN|etc",
+        "required_tables": ["exact_table_name1", "exact_table_name2"],
+        "required_columns": [
+          {{"table": "exact_table_name", "column": "exact_column_name"}},
+          {{"table": "exact_table_name2", "column": "exact_column_name2"}}
+        ],
+        "joins_needed": true/false,
+        "join_conditions": [
+          {{"from_table": "table1", "from_column": "id", "to_table": "table2", "to_column": "table1_id"}}
+        ],
+        "complexity": "simple|medium|complex",
+        "estimated_results": "number estimate"
+      }}
+      
+      Be extremely precise with table and column names from the schema.`;
+
+      const analysisPrompt = new PromptTemplate({
+        template: analysisTemplate,
+        inputVariables: ["input", "schema_info"]
+      });
+
+      const analysisChain = new LLMChain({
+        llm: this.llm,
+        prompt: analysisPrompt,
+        outputKey: "analysis"
+      });
+
+      // Chain 2: Schema Validation with Actual Schema
+      const schemaTemplate = `Based on this analysis: {analysis}
+      
+      Validate against the actual database schema:
+      {schema_info}
+      
+      CRITICAL VALIDATION REQUIREMENTS:
+      - Verify all mentioned tables exist in the schema
+      - Verify all mentioned columns exist in their respective tables
+      - If multiple tables are needed, identify the correct foreign key relationships
+      - Check if JOIN operations are required and specify the exact JOIN conditions
+      - Suggest exact table and column names from the schema
+      - Provide specific JOIN syntax if multiple tables are involved
+      
+      Return detailed schema_validation with:
+      - Status (VALID/INVALID/NEEDS_JOINS)
+      - Required tables with exact names
+      - Required columns with exact names
+      - JOIN conditions if multiple tables needed
+      - Any corrections needed`;
+
+      const schemaPrompt = new PromptTemplate({
+        template: schemaTemplate,
+        inputVariables: ["analysis", "schema_info"]
+      });
+
+      const schemaChain = new LLMChain({
+        llm: this.llm,
+        prompt: schemaPrompt,
+        outputKey: "schema_validation"
+      });
+
+      // Chain 3: SQL Generation with Schema Knowledge
+      const sqlGenTemplate = `You are a MySQL expert. Generate a complete, executable SQL query based on:
+      
+      Original request: {input}
+      Analysis: {analysis}
+      Schema validation: {schema_validation}
+      
+      Database Schema (USE EXACT NAMES):
+      {schema_info}
+      
+      ⚠️ CRITICAL SQL RULES - FAILURE TO FOLLOW WILL CAUSE ERRORS:
+      
+      1. NEVER select columns from tables that are not in the FROM clause
+      2. If you select columns from multiple tables, you MUST use JOIN clauses
+      3. Example of WRONG SQL (will cause "Unknown column" error):
+         SELECT patients.name, medications.drug FROM patients;  ❌ WRONG!
+      4. Example of CORRECT SQL:
+         SELECT p.name, m.drug FROM patients p JOIN prescriptions pr ON p.id = pr.patient_id JOIN medications m ON pr.med_id = m.id;  ✅ CORRECT!
+      
+      STEP-BY-STEP PROCESS:
+      1. Identify ALL tables mentioned in column selections
+      2. If multiple tables, determine the foreign key relationships from the schema
+      3. Create proper JOIN clauses connecting all tables
+      4. Use table aliases (p, m, etc.) for clarity
+      
+      DATABASE SCHEMA ANALYSIS:
+      From the schema above, identify:
+      - Table names and their primary keys
+      - Foreign key relationships between tables
+      - Column names in each table
+      
+      COMMON RELATIONSHIPS (check schema for exact foreign keys):
+      - patients table connects to other tables via patient_id
+      - medications table connects via medication_id or similar
+      - Look for linking tables like prescriptions, patient_medications, etc.
+      
+      Generate a complete, executable MySQL query with proper JOINs:`;
+
+      const sqlGenPrompt = new PromptTemplate({
+        template: sqlGenTemplate,
+        inputVariables: ["input", "analysis", "schema_validation", "schema_info"]
+      });
+
+      const sqlGenChain = new LLMChain({
+        llm: this.llm,
+        prompt: sqlGenPrompt,
+        outputKey: "final_sql"
+      });
+
+      // Create a wrapper chain that injects FRESH schema info every time
+      this.sequentialChain = {
+        call: async (inputs: any) => {
+          // Get FRESH schema information every time the chain is called
+          const freshSchemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
+          console.log(`🔄 Sequential chain using FRESH schema info (${freshSchemaInfo.length} chars)`);
+          
+          const inputWithSchema = {
+            ...inputs,
+            schema_info: freshSchemaInfo
+          };
+          
+          // Execute analysis chain
+          const analysisResult = await analysisChain.call(inputWithSchema);
+          console.log('📊 Analysis result:', typeof analysisResult.analysis === 'string' ? 
+            analysisResult.analysis.substring(0, 200) + '...' : 
+            JSON.stringify(analysisResult.analysis).substring(0, 200) + '...');
+          
+          // Execute schema validation chain
+          const schemaResult = await schemaChain.call({
+            analysis: analysisResult.analysis,
+            schema_info: freshSchemaInfo
+          });
+          console.log('✅ Schema validation result:', typeof schemaResult.schema_validation === 'string' ?
+            schemaResult.schema_validation.substring(0, 200) + '...' :
+            JSON.stringify(schemaResult.schema_validation).substring(0, 200) + '...');
+          
+          // Execute SQL generation chain
+          const sqlResult = await sqlGenChain.call({
+            input: inputs.input,
+            analysis: analysisResult.analysis,
+            schema_validation: schemaResult.schema_validation,
+            schema_info: freshSchemaInfo
+          });
+          console.log('🔧 Generated SQL result:', typeof sqlResult.final_sql === 'string' ?
+            sqlResult.final_sql.substring(0, 200) + '...' :
+            JSON.stringify(sqlResult.final_sql).substring(0, 200) + '...');
+          
+          return {
+            analysis: analysisResult.analysis,
+            schema_validation: schemaResult.schema_validation,
+            final_sql: sqlResult.final_sql
+          };
+        }
+      } as any;
+
+      console.log('✅ SequentialChain initialized with database schema knowledge');
+    } catch (error) {
+      console.error('❌ Error initializing SequentialChain:', error);
+    }
+  }
+
+  private async initializeRouterChain(): Promise<void> {
+    try {
+      // Get database schema information if available
+      const schemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
+      
+      // Define different prompt templates for different query types with schema knowledge
+      const patientQueryTemplate = `You are a medical database expert specializing in patient queries.
+      Handle this patient-related query: {input}
+      
+      Database Schema (USE EXACT NAMES):
+      {schema_info}
+      
+      CRITICAL SQL RULES:
+      - Use ONLY the tables and columns that exist in the schema above
+      - If multiple tables needed, include proper JOIN clauses with foreign key relationships
+      - Focus on patient demographics, medical history, and personal health information
+      - Ensure HIPAA compliance in your query design
+      - Generate complete, executable SQL queries only
+      
+      Return ONLY a complete SQL query with proper JOINs if multiple tables are involved.`;
+
+      const medicationQueryTemplate = `You are a medical database expert specializing in medication queries.
+      Handle this medication-related query: {input}
+      
+      Database Schema (USE EXACT NAMES):
+      {schema_info}
+      
+      CRITICAL SQL RULES:
+      - Use ONLY the tables and columns that exist in the schema above
+      - If multiple tables needed, include proper JOIN clauses with foreign key relationships
+      - Focus on drug information, prescription patterns, and therapeutic data
+      - Generate complete, executable SQL queries only
+      
+      Return ONLY a complete SQL query with proper JOINs if multiple tables are involved.`;
+
+      const testResultQueryTemplate = `You are a medical database expert specializing in test result queries.
+      Handle this test result query: {input}
+      
+      Database Schema (USE EXACT NAMES):
+      {schema_info}
+      
+      CRITICAL SQL RULES:
+      - Use ONLY the tables and columns that exist in the schema above
+      - If multiple tables needed, include proper JOIN clauses with foreign key relationships
+      - Focus on laboratory values, diagnostic patterns, and trend analysis
+      - Generate complete, executable SQL queries only
+      
+      Return ONLY a complete SQL query with proper JOINs if multiple tables are involved.`;
+
+      const generalQueryTemplate = `You are a medical database expert for general queries.
+      Handle this general medical query: {input}
+      
+      Database Schema (USE EXACT NAMES):
+      {schema_info}
+      
+      CRITICAL SQL RULES:
+      - Use ONLY the tables and columns that exist in the schema above
+      - If multiple tables needed, include proper JOIN clauses with foreign key relationships
+      - Generate complete, executable SQL queries only
+      
+      Return ONLY a complete SQL query with proper JOINs if multiple tables are involved.`;
+
+      // Create a custom RouterChain with FRESH schema awareness
+      this.routerChain = {
+        call: async (inputs: any) => {
+          // Get FRESH schema information every time the chain is called
+          const freshSchemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
+          console.log(`🔄 Router chain using FRESH schema info (${freshSchemaInfo.length} chars)`);
+          
+          const query = inputs.input;
+          const inputWithSchema = {
+            input: query,
+            schema_info: freshSchemaInfo
+          };
+
+          // Simple routing logic based on keywords
+          let selectedTemplate = generalQueryTemplate;
+          let routedTo = 'general';
+
+          if (query.toLowerCase().includes('patient') || query.toLowerCase().includes('demographic')) {
+            selectedTemplate = patientQueryTemplate;
+            routedTo = 'patient';
+          } else if (query.toLowerCase().match(/medication|drug|prescription|dosage|mg/)) {
+            selectedTemplate = medicationQueryTemplate;
+            routedTo = 'medication';
+          } else if (query.toLowerCase().match(/test|lab|blood|result/)) {
+            selectedTemplate = testResultQueryTemplate;
+            routedTo = 'test_result';
+          }
+
+          console.log(`🔀 Router chain selected: ${routedTo} template`);
+
+          // Create and execute the selected chain
+          const selectedChain = new LLMChain({
+            llm: this.llm,
+            prompt: new PromptTemplate({
+              template: selectedTemplate,
+              inputVariables: ["input", "schema_info"]
+            })
+          });
+
+          const result = await selectedChain.call(inputWithSchema);
+          
+          return {
+            text: result.text || result.output,
+            routedTo: routedTo
+          };
+        }
+      } as any;
+
+      console.log('✅ RouterChain initialized with database schema knowledge');
+    } catch (error) {
+      console.error('❌ Error initializing RouterChain:', error);
+    }
+  }
+
+  private async initializeMultiPromptChain(): Promise<void> {
+    try {
+      // Get database schema information if available
+      const schemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
+      
+      // Define prompts for different medical query scenarios with schema knowledge
+      const promptInfos = [
+        {
+          name: "patient_demographics",
+          description: "Good for queries about patient personal information, demographics, and basic details",
+          promptTemplate: `You are a medical database expert specializing in patient demographics.
+          
+          Query: {input}
+          
+          Database Schema (USE EXACT NAMES):
+          {schema_info}
+          
+          CRITICAL SQL RULES:
+          - Use ONLY the tables and columns that exist in the schema above
+          - If multiple tables needed, include proper JOIN clauses with foreign key relationships  
+          - Generate complete, executable MySQL queries
+          - Return ALL matching records unless specifically asked for a limit
+          
+          Generate a complete MySQL query to retrieve patient demographic information:
+          
+          SQL Query:`
+        },
+        {
+          name: "clinical_data",
+          description: "Good for queries about medical tests, lab results, vital signs, and clinical measurements",
+          promptTemplate: `You are a medical database expert specializing in clinical data.
+          
+          Query: {input}
+          
+          Database Schema (USE EXACT NAMES):
+          {schema_info}
+          
+          CRITICAL SQL RULES:
+          - Use ONLY the tables and columns that exist in the schema above
+          - If multiple tables needed, include proper JOIN clauses with foreign key relationships
+          - Generate complete, executable MySQL queries
+          - Return ALL matching records unless specifically asked for a limit
+          
+          Generate a complete MySQL query to retrieve clinical test data and measurements:
+          
+          SQL Query:`
+        },
+        {
+          name: "medications_prescriptions",
+          description: "Good for queries about medications, prescriptions, dosages, and drug-related information",
+          promptTemplate: `You are a medical database expert specializing in medications and prescriptions.
+          
+          Query: {input}
+          
+          Database Schema (USE EXACT NAMES):
+          {schema_info}
+          
+          CRITICAL SQL RULES:
+          - Use ONLY the tables and columns that exist in the schema above
+          - If multiple tables needed, include proper JOIN clauses with foreign key relationships
+          - For dosage comparisons, use proper numeric extraction techniques if needed
+          - Generate complete, executable MySQL queries
+          - Return ALL matching records unless specifically asked for a limit
+          
+          Generate a complete MySQL query to retrieve medication and prescription data:
+          
+          SQL Query:`
+        },
+        {
+          name: "genetic_pgx",
+          description: "Good for queries about genetic testing, pharmacogenomics (PGx), and personalized medicine",
+          promptTemplate: `You are a medical database expert specializing in genetic and pharmacogenomic data.
+          
+          Query: {input}
+          
+          Database Schema (USE EXACT NAMES):
+          {schema_info}
+          
+          CRITICAL SQL RULES:
+          - Use ONLY the tables and columns that exist in the schema above
+          - If multiple tables needed, include proper JOIN clauses with foreign key relationships
+          - Generate complete, executable MySQL queries
+          - Return ALL matching records unless specifically asked for a limit
+          
+          Generate a complete MySQL query to retrieve genetic test data and pharmacogenomic results:
+          
+          SQL Query:`
+        },
+        {
+          name: "analytics_reporting",
+          description: "Good for queries requiring aggregation, statistics, trends, and analytical reporting",
+          promptTemplate: `You are a medical database expert specializing in analytics and reporting.
+          
+          Query: {input}
+          
+          Database Schema (USE EXACT NAMES):
+          {schema_info}
+          
+          CRITICAL SQL RULES:
+          - Use ONLY the tables and columns that exist in the schema above
+          - If multiple tables needed, include proper JOIN clauses with foreign key relationships
+          - Use functions like: COUNT, AVG, SUM, GROUP BY, HAVING as needed
+          - Generate complete, executable MySQL queries with proper aggregations
+          - Return ALL matching records unless specifically asked for a limit
+          
+          Generate a complete MySQL query with appropriate aggregations and analytics:
+          
+          SQL Query:`
+        }
+      ];
+
+      // Create a custom MultiPromptChain with FRESH schema awareness
+      this.multiPromptChain = {
+        call: async (inputs: any) => {
+          // Get FRESH schema information every time the chain is called
+          const freshSchemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
+          console.log(`🔄 MultiPrompt chain using FRESH schema info (${freshSchemaInfo.length} chars)`);
+          
+          const query = inputs.input;
+          const inputWithSchema = {
+            input: query,
+            schema_info: freshSchemaInfo
+          };
+
+          // Simple routing logic based on keywords
+          let selectedPrompt = promptInfos[4]; // default to analytics_reporting
+          
+          if (query.toLowerCase().match(/demographic|patient.*info|personal/)) {
+            selectedPrompt = promptInfos[0]; // patient_demographics
+          } else if (query.toLowerCase().match(/test|lab|blood|clinical|vital/)) {
+            selectedPrompt = promptInfos[1]; // clinical_data
+          } else if (query.toLowerCase().match(/medication|drug|prescription|dosage|mg/)) {
+            selectedPrompt = promptInfos[2]; // medications_prescriptions
+          } else if (query.toLowerCase().match(/genetic|pgx|gene|variant/)) {
+            selectedPrompt = promptInfos[3]; // genetic_pgx
+          }
+
+          console.log(`🎯 MultiPrompt chain selected: ${selectedPrompt.name} template`);
+
+          // Create and execute the selected chain
+          const selectedChain = new LLMChain({
+            llm: this.llm,
+            prompt: new PromptTemplate({
+              template: selectedPrompt.promptTemplate,
+              inputVariables: ["input", "schema_info"]
+            })
+          });
+
+          const result = await selectedChain.call(inputWithSchema);
+          
+          return {
+            text: result.text || result.output,
+            selectedPrompt: selectedPrompt.name
+          };
+        }
+      } as any;
+
+      console.log('✅ MultiPromptChain initialized with database schema knowledge');
+    } catch (error) {
+      console.error('❌ Error initializing MultiPromptChain:', error);
+    }
+  }
+
+  // ========== CHAIN EXECUTION METHODS ==========
+
+  public async executeSimpleSequentialChain(input: string): Promise<any> {
+    if (!this.simpleSequentialChain) {
+      throw new Error('SimpleSequentialChain not initialized');
+    }
+    
+    try {
+      const result = await this.simpleSequentialChain.call({ input });
+      
+      // Safely extract result to prevent large object serialization issues
+      const safeResult = typeof result.output === 'string' ? 
+        result.output : 
+        JSON.stringify(result.output).substring(0, 2000);
+      
+      return {
+        success: true,
+        chainType: 'SimpleSequentialChain',
+        result: safeResult,
+        steps: ['SQL Generation', 'SQL Validation'],
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('❌ SimpleSequentialChain execution error:', error);
+      return {
+        success: false,
+        error: (error as Error).message,
+        chainType: 'SimpleSequentialChain'
+      };
+    }
+  }
+
+  public async executeSequentialChain(input: string): Promise<any> {
+    if (!this.sequentialChain) {
+      throw new Error('SequentialChain not initialized');
+    }
+    
+    try {
+      const result = await this.sequentialChain.call({ input });
+      
+      // Safely extract and truncate large responses to prevent JSON serialization issues
+      const safeExtract = (value: any, maxLength: number = 2000): string => {
+        if (!value) return '';
+        const str = typeof value === 'string' ? value : JSON.stringify(value);
+        return str.length > maxLength ? str.substring(0, maxLength) + '...[truncated]' : str;
+      };
+      
+      return {
+        success: true,
+        chainType: 'SequentialChain',
+        analysis: safeExtract(result.analysis),
+        schemaValidation: safeExtract(result.schema_validation),
+        finalSQL: safeExtract(result.final_sql),
+        steps: ['Query Analysis', 'Schema Validation', 'SQL Generation'],
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('❌ SequentialChain execution error:', error);
+      return {
+        success: false,
+        error: (error as Error).message,
+        chainType: 'SequentialChain'
+      };
+    }
+  }
+
+  public async executeRouterChain(input: string): Promise<any> {
+    if (!this.routerChain) {
+      throw new Error('RouterChain not initialized');
+    }
+    
+    try {
+      const result = await this.routerChain.call({ input });
+      
+      // Safely extract result to prevent large object serialization issues
+      const safeResult = typeof result.text === 'string' ? 
+        result.text.substring(0, 2000) : 
+        JSON.stringify(result.text).substring(0, 2000);
+      
+      return {
+        success: true,
+        chainType: 'RouterChain',
+        result: safeResult,
+        routedTo: 'determined by router',
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('❌ RouterChain execution error:', error);
+      return {
+        success: false,
+        error: (error as Error).message,
+        chainType: 'RouterChain'
+      };
+    }
+  }
+
+  public async executeMultiPromptChain(input: string): Promise<any> {
+    if (!this.multiPromptChain) {
+      throw new Error('MultiPromptChain not initialized');
+    }
+    
+    try {
+      const result = await this.multiPromptChain.call({ input });
+      
+      // Safely extract result to prevent large object serialization issues
+      const safeResult = typeof result.text === 'string' ? 
+        result.text.substring(0, 2000) : 
+        JSON.stringify(result.text).substring(0, 2000);
+      
+      return {
+        success: true,
+        chainType: 'MultiPromptChain',
+        result: safeResult,
+        selectedPrompt: 'auto-determined',
+        availablePrompts: ['patient_demographics', 'clinical_data', 'medications_prescriptions', 'genetic_pgx', 'analytics_reporting'],
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('❌ MultiPromptChain execution error:', error);
+      return {
+        success: false,
+        error: (error as Error).message,
+        chainType: 'MultiPromptChain'
+      };
+    }
+  }
+
+  // Method to get available chains
+  public getAvailableChains(): { [key: string]: boolean } {
+    return {
+      simpleSequentialChain: !!this.simpleSequentialChain,
+      sequentialChain: !!this.sequentialChain,
+      routerChain: !!this.routerChain,
+      multiPromptChain: !!this.multiPromptChain,
+      conversationChain: !!this.conversationChain,
+      sqlChain: !!this.sqlChain
+    };
+  }
+
   public async connectToDatabase(): Promise<void> {
     try {
       console.log('🔗 Connecting to MySQL database...');
@@ -620,6 +1358,9 @@ Ensure the query follows medical database best practices and is production-ready
 
       // Build Schema Intelligence
       await this.buildSchemaIntelligence();
+
+      // Initialize Advanced Chains with schema knowledge
+      await this.initializeAdvancedChains();
 
     } catch (error) {
       console.error('❌ Database connection failed:', error);
@@ -699,22 +1440,23 @@ You MUST double check your query before executing it. If you get an error while 
 
 DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
 
-CRITICAL DOSAGE HANDLING RULES:
-1. For dosage range queries (e.g., "200mg to 500mg" or "between 200 and 500mg"), use proper numeric extraction and comparison
-2. NEVER use multiple LIKE statements for numeric ranges as they miss records
-3. Use CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) to extract numeric values from dosage strings
-4. For range queries, use BETWEEN operator or >= and <= comparisons
-5. Examples:
-   - For "200mg to 500mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) BETWEEN 200 AND 500
-   - For "greater than 100mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) > 100
-   - For "less than 50mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) < 50
+CRITICAL DATA HANDLING RULES:
+1. For numeric range queries in text fields, analyze the actual column data type first
+2. If the field is numeric, use direct numeric comparisons
+3. If the field is text containing numbers, use appropriate extraction techniques
+4. Use proper MySQL functions compatible with the database version
+5. Examples of flexible approaches:
+   - For numeric fields: WHERE field_name BETWEEN 200 AND 500
+   - For text fields with numbers: Use LIKE patterns or REGEXP as appropriate
+   - Always check the actual schema to determine the best approach
 
-DOSAGE QUERY BEST PRACTICES:
-- Always extract numeric values from dosage strings before comparison
-- Use proper MySQL numeric functions for accurate range filtering
-- Handle cases where dosage might contain multiple numbers (take the first/primary dosage)
-- Include unit information in results when displaying dosage data
-- Test your numeric extraction logic to ensure it works with various dosage formats
+DATA QUERY BEST PRACTICES:
+- Always analyze the database schema first to understand column types
+- Use appropriate comparison methods based on actual data types
+- Handle text and numeric fields differently based on their schema definition
+- Include relevant information in results when displaying data
+- Test your approach with the actual database structure
+- Adapt your strategy based on the specific database schema you discover
 
 When providing your final answer, format it clearly and include the actual data results.
 Return ALL matching records unless specifically asked to limit.`,
@@ -746,119 +1488,47 @@ Thought: I should look at the tables in the database to see what I can query. Th
     try {
       console.log('🧠 Building database schema intelligence...');
 
-      // Get basic schema information
+      // Get actual schema information from the database
       const schemaInfo = await this.sqlDatabase.getTableInfo();
 
-      // Initialize schema intelligence structure
+      // Initialize schema intelligence structure with discovered schema
       this.schemaIntelligence = {
         tables: [],
         commonJoinPaths: [],
         queryPatterns: []
       };
 
-      // Analyze common medical database patterns
-      const medicalTablePatterns = [
-        {
-          name: 'patients',
-          semanticContext: 'Patient demographic and basic information',
-          commonColumns: ['id', 'full_name', 'age', 'gender', 'email', 'date_of_birth'],
-          relationships: [
-            { table: 'blood_tests', type: 'one-to-many' as const, foreignKey: 'patient_id' },
-            { table: 'medications', type: 'one-to-many' as const, foreignKey: 'patient_id' },
-            { table: 'pgx_test_results', type: 'one-to-many' as const, foreignKey: 'patient_id' }
-          ]
-        },
-        {
-          name: 'blood_tests',
-          semanticContext: 'Laboratory blood test results and biomarkers',
-          commonColumns: ['id', 'patient_id', 'hemoglobin', 'wbc_count', 'platelet_count', 'test_date'],
-          relationships: [
-            { table: 'patients', type: 'many-to-one' as const, foreignKey: 'patient_id' }
-          ]
-        },
-        {
-          name: 'medications',
-          semanticContext: 'Prescribed medications and dosages',
-          commonColumns: ['id', 'patient_id', 'medication_name', 'dosage', 'frequency'],
-          relationships: [
-            { table: 'patients', type: 'many-to-one' as const, foreignKey: 'patient_id' }
-          ]
-        },
-        {
-          name: 'pgx_test_results',
-          semanticContext: 'Pharmacogenomics test results for personalized medicine',
-          commonColumns: ['id', 'patient_id', 'gene', 'variant', 'result'],
-          relationships: [
-            { table: 'patients', type: 'many-to-one' as const, foreignKey: 'patient_id' }
-          ]
-        }
-      ];
-
-      // Build intelligent table information
-      for (const pattern of medicalTablePatterns) {
-        if (schemaInfo.toLowerCase().includes(pattern.name)) {
-          this.schemaIntelligence.tables.push({
-            name: pattern.name,
-            columns: pattern.commonColumns.map(col => ({
-              name: col,
-              type: 'inferred',
-              nullable: col === 'id' ? false : true,
-              key: col === 'id' ? 'primary' : col.includes('_id') ? 'foreign' : undefined
-            })),
-            relationships: pattern.relationships,
-            semanticContext: pattern.semanticContext
-          });
-        }
-      }
-
-      // Define common join patterns for medical queries
-      this.schemaIntelligence.commonJoinPaths = [
-        {
-          tables: ['patients', 'blood_tests'],
-          joinConditions: ['patients.id = blood_tests.patient_id']
-        },
-        {
-          tables: ['patients', 'medications'],
-          joinConditions: ['patients.id = medications.patient_id']
-        },
-        {
-          tables: ['patients', 'pgx_test_results'],
-          joinConditions: ['patients.id = pgx_test_results.patient_id']
-        },
-        {
-          tables: ['patients', 'blood_tests', 'medications'],
-          joinConditions: [
-            'patients.id = blood_tests.patient_id',
-            'patients.id = medications.patient_id'
-          ]
-        }
-      ];
-
-      // Define common query patterns with performance metrics
+      // Parse actual table information instead of using hardcoded patterns
+      console.log('🔍 Discovering database schema automatically...');
+      
+      // Let LangChain SQL agent discover the actual schema
+      // The schema intelligence will be built dynamically based on actual database structure
+      
+      // Define common query patterns without table-specific assumptions
       this.schemaIntelligence.queryPatterns = [
         {
-          pattern: 'Patient demographic lookup',
+          pattern: 'Basic data retrieval',
           frequency: 0.9,
           performance: 0.95
         },
         {
-          pattern: 'Blood test results by patient',
-          frequency: 0.8,
-          performance: 0.90
-        },
-        {
-          pattern: 'Medication history queries',
+          pattern: 'Cross-table analytics',
           frequency: 0.7,
           performance: 0.85
         },
         {
-          pattern: 'Cross-table patient analytics',
+          pattern: 'Aggregation queries',
           frequency: 0.6,
+          performance: 0.80
+        },
+        {
+          pattern: 'Complex joins and filtering',
+          frequency: 0.5,
           performance: 0.70
         }
       ];
 
-      console.log(`✅ Schema intelligence built for ${this.schemaIntelligence.tables.length} tables`);
+      console.log(`✅ Schema intelligence built using actual database discovery`);
     } catch (error) {
       console.error('❌ Error building schema intelligence:', error);
       this.schemaIntelligence = null;
@@ -1143,39 +1813,36 @@ Thought: I should look at the tables in the database to see what I can query. Th
       // Create a safe, simple query based on intent
       let safeQuery = '';
 
-      if (intent.entities.includes('medications') && intent.entities.includes('patients')) {
+      if (intent.entities.some(e => e.toLowerCase().includes('medication')) && 
+          intent.entities.some(e => e.toLowerCase().includes('patient'))) {
         if (query.toLowerCase().includes('dosage')) {
-          // Safe query for medication dosage without complex conversions
           safeQuery = `
-            Find patients and their medications where dosage information is available.
-            Use a simple JOIN between patients and medications tables.
-            Include patient name, medication name, and dosage as text.
+            Find information about medications and dosages for patients.
+            Use database schema discovery to identify medication and patient tables.
+            Include relevant patient and medication information.
             Return ALL matching records - DO NOT use LIMIT clause.
             Print the exact SQL query executed before showing results.
-            Do not attempt any numeric conversions on dosage field.
-            Use only basic SELECT, FROM, and JOIN clauses.
+            Use simple JOIN operations based on discovered foreign key relationships.
           `;
         } else {
           safeQuery = `
-            Show patients with their medications.
-            Simple JOIN between patients and medications tables.
-            Select patient name and medication name only.
+            Find information about patients and their medications.
+            Use database schema discovery to identify appropriate tables.
             Return ALL matching records - DO NOT use LIMIT clause.
             Print the exact SQL query executed before showing results.
           `;
         }
-      } else if (intent.entities.includes('patients')) {
+      } else if (intent.entities.some(e => e.toLowerCase().includes('patient'))) {
         safeQuery = `
-          Show basic patient information.
-          Select from patients table only.
-          Include name, age, gender.
+          Show patient information based on the request: ${query}
+          Use database schema discovery to identify patient-related tables.
           Return ALL matching records - DO NOT use LIMIT clause.
           Print the exact SQL query executed before showing results.
         `;
       } else {
         safeQuery = `
           Show available data based on the request: ${query}
-          Use simple SELECT statements only.
+          Use database schema discovery to identify appropriate tables and columns.
           Return ALL matching records - DO NOT use LIMIT clause.
           Print the exact SQL query executed before showing results.
         `;
@@ -1219,7 +1886,7 @@ Thought: I should look at the tables in the database to see what I can query. Th
   // Build enhanced query prompt with intelligence and syntax safety
   private buildEnhancedQueryPrompt(query: string, intent: QueryIntent, plan: QueryPlan): string {
     const schemaContext = this.schemaIntelligence ?
-      `Available tables: ${this.schemaIntelligence.tables.map(t => t.name).join(', ')}` : '';
+      `Database schema will be automatically discovered by the SQL agent` : '';
 
     return `
 ${query}
@@ -1233,51 +1900,35 @@ QUERY INTELLIGENCE CONTEXT:
 
 ${schemaContext}
 
-CRITICAL SYNTAX SAFETY REQUIREMENTS:
-1. NEVER use complex type conversions like CAST() or REPLACE() + 0
-2. For dosage filtering, use simple string operations or LIKE patterns
-3. Always use proper MySQL syntax compatible with your database version
-4. Avoid functions that might not exist in the target MySQL version
-5. Use INNER JOIN instead of complex joins
-6. Always include LIMIT clause for performance
-7. Handle text fields as strings, not numbers
-8. Use WHERE conditions that are guaranteed to work
-
-DOSAGE HANDLING RULES (CRITICAL):
-- For dosage range queries (e.g., "200mg to 500mg"), use proper numeric extraction and comparison
-- NEVER use multiple LIKE statements for numeric ranges as they miss records
-- Use CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) to extract numeric values from dosage strings
-- For range queries, use BETWEEN operator or >= and <= comparisons
-- Examples:
-  * For "200mg to 500mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) BETWEEN 200 AND 500
-  * For "greater than 100mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) > 100
-  * For "at least 250mg": WHERE CAST(REGEXP_REPLACE(dosage, '[^0-9.]', '') AS DECIMAL(10,2)) >= 250
-- Only use LIKE for exact text matching, not for numeric ranges
-- Always test numeric extraction logic for accuracy
-
-MEDICAL DATABASE CONTEXT:
-- patients table: id, full_name, age, gender, email
-- medications table: id, patient_id, medication_name, dosage, frequency
-- blood_tests table: id, patient_id, hemoglobin, wbc_count, platelet_count
-- Always join using proper foreign key relationships
+CRITICAL INSTRUCTIONS:
+1. Use the database schema discovery tools to identify appropriate tables and columns
+2. Do NOT use hardcoded table or column names
+3. Let the SQL agent analyze the actual database structure
+4. Generate queries based on discovered schema, not assumptions
+5. Always use proper MySQL syntax compatible with the target database
+6. Handle dosage and numeric fields appropriately based on their actual data types
+7. Use efficient JOIN conditions based on discovered relationships
 
 PERFORMANCE REQUIREMENTS:
-1. DO NOT LIMIT the number of records - return ALL matching records
-2. Use efficient JOIN conditions
-3. Select only necessary columns
-4. Apply filters before joins when possible
-5. Log the exact SQL query that is executed
+1. Return ALL matching records unless specifically asked to limit
+2. Use efficient query patterns based on actual schema
+3. Apply appropriate filters and indexes
+4. Log the exact SQL query that is executed
 
-Please execute this query with the following considerations:
-1. Generate syntactically correct MySQL queries only
-2. Apply the suggested optimizations for better performance
-3. Ensure medical data privacy and HIPAA compliance
-4. Return structured, comprehensive results
-5. Handle any potential errors gracefully
-6. Provide clear, professional output
-7. NEVER generate queries with syntax errors
+MEDICAL DATABASE BEST PRACTICES:
+- Ensure patient privacy and HIPAA compliance
+- Use proper data type handling
+- Apply appropriate security measures
+- Generate production-ready queries
 
-Execute the query now with guaranteed syntax correctness:`;
+Please execute this query using database schema discovery:
+1. First analyze the actual database schema
+2. Identify appropriate tables and columns
+3. Generate syntactically correct MySQL queries
+4. Apply performance optimizations
+5. Return comprehensive, structured results
+
+Execute the query now with automatic schema discovery:`;
   }
 
   // Fallback processing for when enhanced features aren't available

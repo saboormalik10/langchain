@@ -9,6 +9,7 @@ This repository contains a sophisticated LangChain-powered API for medical datab
 - **SQL Query Generation** - LangChain-powered SQL generation with error recovery
 - **MySQL Version Compatibility** - Automatically adapts queries to MySQL version
 - **Database Intelligence** - Smart schema detection and query optimization
+- **File Import** - Upload Excel, CSV, and text files with intelligent schema mapping
 
 ## API Endpoints
 
@@ -25,6 +26,28 @@ Single-shot query endpoint for medical database operations.
   "context": "Optional context to guide the query"
 }
 ```
+
+### File Uploader API
+
+See [FILE_UPLOADER.md](FILE_UPLOADER.md) for complete documentation on the file uploader API.
+
+#### `POST /api/files/upload`
+
+Upload and import a file into the database.
+
+**Request (multipart/form-data):**
+- `file`: The file to upload (Excel, CSV, or text)
+- `tableName`: Target database table (optional)
+- `updateExisting`: Whether to update existing records (optional)
+- `skipErrors`: Continue import even if errors occur (optional)
+
+#### `POST /api/files/mappings`
+
+Analyze a file and get suggested column mappings.
+
+#### `POST /api/files/import-with-mappings`
+
+Import data using custom column mappings.
 
 ### Conversational SQL API
 

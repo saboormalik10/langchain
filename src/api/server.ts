@@ -11,6 +11,7 @@ import { promptRoutes } from './routes/prompts';
 import { parserRoutes } from './routes/parsers';
 import { healthRoutes } from './routes/health';
 import { jsonRoutes } from './routes/json';
+import fileUploaderRoutes from './routes/fileUploader';
 
 class MedicalLangChainAPI {
   private app: express.Application;
@@ -62,6 +63,7 @@ class MedicalLangChainAPI {
     this.app.use('/api/memory', memoryRoutes(this.langchainApp));
     this.app.use('/api/prompts', promptRoutes(this.langchainApp));
     this.app.use('/api/parsers', parserRoutes(this.langchainApp));
+    this.app.use('/api/files', fileUploaderRoutes);
 
     // API documentation endpoint
     this.app.get('/api/docs', (req, res) => {
@@ -94,6 +96,11 @@ class MedicalLangChainAPI {
             'GET /api/memory/conversation': 'Retrieve conversation history',
             'DELETE /api/memory/conversation': 'Clear conversation memory',
             'GET /api/memory/summary': 'Get conversation summary'
+          },
+          files: {
+            'POST /api/files/upload': 'Upload and import Excel, CSV, or text file to the database',
+            'POST /api/files/mappings': 'Analyze file and generate column mappings',
+            'POST /api/files/import-with-mappings': 'Import data with custom column mappings'
           },
           prompts: {
             'POST /api/prompts/medical': 'Generate medical prompts',
