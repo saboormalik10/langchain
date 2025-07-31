@@ -4,18 +4,16 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import { json, urlencoded } from 'express';
-import { MedicalDatabaseLangChainApp } from '../index';
 import { medicalRoutes } from './routes/medical';
+import databaseService from '../services/databaseService';
 
 class MedicalLangChainAPI {
   private app: express.Application;
-  private langchainApp: MedicalDatabaseLangChainApp;
   private port: number;
 
   constructor() {
     this.app = express();
     this.port = parseInt(process.env.PORT || '3000');
-    this.langchainApp = new MedicalDatabaseLangChainApp();
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -50,19 +48,42 @@ class MedicalLangChainAPI {
   }
 
   private setupRoutes(): void {
-    // Pass langchainApp instance to routes
-    this.app.use('/api/medical', medicalRoutes(this.langchainApp));
+    // Medical routes now use multi-tenant approach
+    this.app.use('/api/medical', medicalRoutes());
+
+    // Health check endpoint
+    this.app.get('/api/health', (req, res) => {
+      const dbStatus = databaseService.isMainDatabaseConnected();
+      res.json({
+        status: dbStatus ? 'healthy' : 'degraded',
+        timestamp: new Date().toISOString(),
+        version: '1.0.0',
+        mode: 'multi-tenant',
+        database: {
+          main: dbStatus ? 'connected' : 'disconnected'
+        },
+        message: 'API server is running. LangChain instances are created per organization on-demand.'
+      });
+    });
 
     // API documentation endpoint
     this.app.get('/api/docs', (req, res) => {
       res.json({
         title: 'Medical LangChain API',
         version: '1.0.0',
-        description: 'REST API for medical database operations using LangChain',
+        description: 'REST API for medical database operations using LangChain with multi-tenant support',
+        mode: 'Multi-tenant',
         endpoints: {
           medical: {
-            'POST /api/medical/query-sql-manual': 'Manual SQL query with optional conversational capabilities'
+            'POST /api/medical/query-sql-manual': 'Manual SQL query with organizationId parameter - creates LangChain instance on-demand'
+          },
+          system: {
+            'GET /api/health': 'API health status',
+            'GET /api/docs': 'API documentation'
           }
+        },
+        requirements: {
+          organizationId: 'Required parameter for all medical endpoints to determine database connection'
         }
       });
     });
@@ -72,6 +93,7 @@ class MedicalLangChainAPI {
       res.json({
         message: 'Medical LangChain API is running',
         version: '1.0.0',
+        mode: 'Multi-tenant',
         documentation: '/api/docs',
         health: '/api/health'
       });
@@ -103,31 +125,20 @@ class MedicalLangChainAPI {
 
   public async start(): Promise<void> {
     try {
-      // Initialize LangChain application (continue even if database fails)
-      console.log('🔧 Initializing LangChain application...');
+      console.log('🚀 Starting Medical LangChain API server...');
+      
+      // Initialize main database connection first
+      console.log('📊 Initializing main PostgreSQL database connection...');
+      await databaseService.initializeMainDatabase();
+      
+      console.log('📋 Multi-tenant mode: LangChain instances will be initialized on-demand per organization');
 
-      try {
-        await this.langchainApp.connectToDatabase();
-        console.log('✅ Database connected successfully');
-      } catch (dbError) {
-        console.warn('⚠️  Database connection failed, but API will still start:', (dbError as Error).message);
-      }
-
-      try {
-        await this.langchainApp.initializeChains();
-        await this.langchainApp.initializeTools();
-        await this.langchainApp.initializeAgents();
-        console.log('✅ LangChain components initialized');
-      } catch (initError) {
-        console.warn('⚠️  Some LangChain components failed to initialize:', (initError as Error).message);
-      }
-
-      // Start server regardless of database/LangChain initialization status
+      // Start server after database initialization
       this.app.listen(this.port, () => {
         console.log(`🚀 Medical LangChain API is running on port ${this.port}`);
         console.log(`📚 API Documentation: http://localhost:${this.port}/api/docs`);
         console.log(`❤️  Health Check: http://localhost:${this.port}/api/health`);
-        console.log(`🔍 Database Status: ${process.env.DB_HOST} - Check /api/health/database for details`);
+        console.log(`🏢 Multi-tenant: Each organization gets its own LangChain instance on first API call`);
       });
     } catch (error) {
       console.error('❌ Failed to start API server:', error);

@@ -362,8 +362,8 @@ class MedicalDatabaseLangChainApp {
   private queryOptimizerChain: LLMChain | null = null;
   private contextMemory: BufferWindowMemory | null = null;
 
-  constructor() {
-    this.initializeConfig();
+  constructor(organizationDbConfig?: DatabaseConfig) {
+    this.initializeConfig(organizationDbConfig);
     this.initializeLLM();
     this.initializeMemory();
     this.initializeOutputParsers();
@@ -392,17 +392,23 @@ class MedicalDatabaseLangChainApp {
     }
   }
 
-  private initializeConfig(): void {
-    // Database configuration
-    this.dbConfig = {
-      host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || '3306'),
-      username: process.env.DB_USER || '',
-      password: process.env.DB_PASSWORD || '',
-      database: process.env.DB_NAME || ''
-    };
+  private initializeConfig(organizationDbConfig?: DatabaseConfig): void {
+    // Database configuration - use provided config or fall back to environment variables
+    if (organizationDbConfig) {
+      this.dbConfig = organizationDbConfig;
+      console.log('✅ Using organization-specific database configuration');
+    } else {
+      this.dbConfig = {
+        host: process.env.DB_HOST || 'localhost',
+        port: parseInt(process.env.DB_PORT || '3306'),
+        username: process.env.DB_USER || '',
+        password: process.env.DB_PASSWORD || '',
+        database: process.env.DB_NAME || ''
+      };
+      console.log('⚠️ Using fallback environment variable configuration');
+    }
 
-    // LangChain configuration
+    // LangChain configuration - always from environment variables
     this.langchainConfig = {
       azureOpenAIApiKey: process.env.AZURE_OPENAI_API_KEY || '',
       azureOpenAIEndpoint: process.env.AZURE_OPENAI_ENDPOINT || '',

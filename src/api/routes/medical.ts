@@ -4,6 +4,8 @@ import mysql from 'mysql2/promise';
 import { MedicalDatabaseLangChainApp } from '../../index';
 import { BufferMemory } from 'langchain/memory';
 import { v4 as uuidv4 } from 'uuid';
+import databaseService from '../../services/databaseService';
+import multiTenantLangChainService from '../../services/multiTenantLangChainService';
 
 interface ConversationSession {
     memory: BufferMemory;
@@ -51,7 +53,7 @@ setInterval(() => {
 
 
 
-export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router {
+export function medicalRoutes(): Router {
     const router = Router();
 
     // Enhanced endpoint for manual SQL execution with complete query extraction
@@ -60,6 +62,7 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
     // Now includes conversational capabilities with session management
     router.post('/query-sql-manual',
         [
+            body('organizationId').isString().isLength({ min: 1, max: 100 }).withMessage('Organization ID is required and must be 1-100 characters'),
             body('query').isString().isLength({ min: 1, max: 500 }).withMessage('Query must be 1-500 characters'),
             body('context').optional().isString().isLength({ max: 1000 }).withMessage('Context must be less than 1000 characters'),
             body('sessionId').optional().isString().withMessage('Session ID must be a string'),
@@ -104,6 +107,7 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
                 }
 
                 const {
+                    organizationId,
                     query,
                     context = 'Medical database query',
                     conversational = false,
@@ -128,7 +132,41 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
                 // Make useChains mutable so we can reset it if chains fail
                 let useChains = req.body.useChains || false;
 
-                console.log(`🚀 Processing SQL manual query: "${query}" ${conversational ? 'with conversation' : ''}`);
+                console.log(`🚀 Processing SQL manual query for organization ${organizationId}: "${query}" ${conversational ? 'with conversation' : ''}`);
+
+                // Test organization database connection first
+                try {
+                    const connectionTest = await databaseService.testOrganizationConnection(organizationId);
+                    if (!connectionTest) {
+                        return res.status(400).json({
+                            error: 'Database connection failed',
+                            message: `Unable to connect to database for organization: ${organizationId}`,
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+                    console.log(`✅ Database connection verified for organization: ${organizationId}`);
+                } catch (connectionError: any) {
+                    console.error(`❌ Database connection error for organization ${organizationId}:`, connectionError.message);
+                    return res.status(500).json({
+                        error: 'Database connection error',
+                        message: connectionError.message,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+
+                // Get organization-specific LangChain app
+                let langchainApp: MedicalDatabaseLangChainApp;
+                try {
+                    langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
+                    console.log(`✅ LangChain app initialized for organization: ${organizationId}`);
+                } catch (langchainError: any) {
+                    console.error(`❌ LangChain initialization error for organization ${organizationId}:`, langchainError.message);
+                    return res.status(500).json({
+                        error: 'LangChain initialization error',
+                        message: langchainError.message,
+                        timestamp: new Date().toISOString()
+                    });
+                }
 
                 // Get or create conversation memory for this session if using conversational mode
                 let sessionData = null;
@@ -187,20 +225,15 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
 
                 // Get minimal database information to guide the agent
                 try {
-                    connection = await mysql.createConnection({
-                        host: process.env.DB_HOST!,
-                        port: parseInt(process.env.DB_PORT!),
-                        user: process.env.DB_USER!,
-                        password: process.env.DB_PASSWORD!,
-                        database: process.env.DB_NAME!,
-                    });
+                    connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                    const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
 
                     // Just get a list of tables to verify they exist
                     // The sqlAgent will get detailed schema information using its own tools
                     console.log('📊 Getting high-level database structure');
                     const [tables] = await connection.execute(
                         "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                        [process.env.DB_NAME]
+                        [dbConfig.database]
                     );
 
                     if (Array.isArray(tables) && tables.length > 0) {
@@ -239,19 +272,11 @@ export function medicalRoutes(langchainApp: MedicalDatabaseLangChainApp): Router
 
                         try {
                             // Get MySQL version information
-                            const mysql = require('mysql2/promise');
-                            const versionConnection = await mysql.createConnection({
-                                host: process.env.DB_HOST!,
-                                port: parseInt(process.env.DB_PORT!),
-                                user: process.env.DB_USER!,
-                                password: process.env.DB_PASSWORD!,
-                                database: process.env.DB_NAME!,
-                                connectTimeout: 8000,
-                            });
+                            const versionConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
 
                             const [rows] = await versionConnection.execute('SELECT VERSION() as version');
-                            if (rows && rows[0] && rows[0].version) {
-                                mySQLVersionString = rows[0].version;
+                            if (rows && Array.isArray(rows) && rows[0] && (rows[0] as any).version) {
+                                mySQLVersionString = (rows[0] as any).version;
 
                                 // Parse version string
                                 const versionMatch = mySQLVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
@@ -480,19 +505,11 @@ CRITICAL INSTRUCTIONS FOR CHAINS:
                         let mysqlVersionInfo = null;
 
                         try {
-                            const mysql = require('mysql2/promise');
-                            const versionConnection = await mysql.createConnection({
-                                host: process.env.DB_HOST!,
-                                port: parseInt(process.env.DB_PORT!),
-                                user: process.env.DB_USER!,
-                                password: process.env.DB_PASSWORD!,
-                                database: process.env.DB_NAME!,
-                                connectTimeout: 8000,
-                            });
+                            const versionConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
 
                             const [rows] = await versionConnection.execute('SELECT VERSION() as version');
-                            if (rows && rows[0] && rows[0].version) {
-                                mySQLVersionString = rows[0].version;
+                            if (rows && Array.isArray(rows) && rows[0] && (rows[0] as any).version) {
+                                mySQLVersionString = (rows[0] as any).version;
 
                                 // Parse version string
                                 const versionMatch = mySQLVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
@@ -818,13 +835,8 @@ Query request: ${query}
 
                 // Quick syntax validation without repeating schema analysis that sqlAgent already did
                 try {
-                    connection = await mysql.createConnection({
-                        host: process.env.DB_HOST!,
-                        port: parseInt(process.env.DB_PORT!),
-                        user: process.env.DB_USER!,
-                        password: process.env.DB_PASSWORD!,
-                        database: process.env.DB_NAME!,
-                    });
+                    connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                    const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
 
                     // Extract table names from the query
                     const tableMatch = finalSQL.match(/\bFROM\s+`?(\w+)`?|JOIN\s+`?(\w+)`?/gi);
@@ -847,7 +859,7 @@ Query request: ${query}
                             // Just check if the table exists with a simple query
                             const [result] = await connection.execute(
                                 "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-                                [process.env.DB_NAME, tableName]
+                                [dbConfig.database, tableName]
                             );
 
                             if (Array.isArray(result) && result.length > 0) {
@@ -856,7 +868,7 @@ Query request: ${query}
                                 // If table exists, get a sample of column names to verify query correctness
                                 const [columns] = await connection.execute(
                                     "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
-                                    [process.env.DB_NAME, tableName]
+                                    [dbConfig.database, tableName]
                                 );
 
                                 if (Array.isArray(columns) && columns.length > 0) {
@@ -900,7 +912,7 @@ Query request: ${query}
                                 // First get all tables in the database
                                 const [allTables] = await connection.execute(
                                     "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                    [process.env.DB_NAME]
+                                    [dbConfig.database]
                                 );
 
                                 if (Array.isArray(allTables) && allTables.length > 0) {
@@ -939,7 +951,7 @@ Query request: ${query}
                                         // Also get sample columns from this corrected table
                                         const [correctedColumns] = await connection.execute(
                                             "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
-                                            [process.env.DB_NAME, correctedTableName]
+                                            [dbConfig.database, correctedTableName]
                                         );
 
                                         if (Array.isArray(correctedColumns) && correctedColumns.length > 0) {
@@ -1011,13 +1023,7 @@ Query request: ${query}
                 console.log('📊 Step 4: Executing SQL query manually...');
 
                 try {
-                    connection = await mysql.createConnection({
-                        host: process.env.DB_HOST!,
-                        port: parseInt(process.env.DB_PORT!),
-                        user: process.env.DB_USER!,
-                        password: process.env.DB_PASSWORD!,
-                        database: process.env.DB_NAME!,
-                    });
+                    connection = await databaseService.createOrganizationMySQLConnection(organizationId);
 
                     console.log('✅ Database connection established');
                     console.log('🔧 Executing SQL:', finalSQL);
@@ -1084,9 +1090,10 @@ Query request: ${query}
                         intermediate_steps: intermediateSteps,
                         debug_info: debugInfo,
                         database_info: {
-                            host: process.env.DB_HOST,
-                            database: process.env.DB_NAME,
-                            port: process.env.DB_PORT,
+                            organization_id: organizationId,
+                            host: (await databaseService.getOrganizationDatabaseConnection(organizationId)).host,
+                            database: (await databaseService.getOrganizationDatabaseConnection(organizationId)).database,
+                            port: (await databaseService.getOrganizationDatabaseConnection(organizationId)).port,
                             mysql_version: mySQLVersionString,
                             version_details: mysqlVersionInfo,
                             query_adapted_to_version: !!mysqlVersionInfo
@@ -1120,17 +1127,20 @@ Query request: ${query}
                         try {
                             // If we have a connection, try to find a similar column
                             if (connection && tableName && columnName) {
+                                // Get database configuration for error handling
+                                const dbConfigForError = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                                
                                 // First verify the table exists
                                 const [tableResult] = await connection.execute(
                                     "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-                                    [process.env.DB_NAME, tableName]
+                                    [dbConfigForError.database, tableName]
                                 );
 
                                 if (Array.isArray(tableResult) && tableResult.length > 0) {
                                     // Table exists, get all its columns
                                     const [columns] = await connection.execute(
                                         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-                                        [process.env.DB_NAME, tableName]
+                                        [dbConfigForError.database, tableName]
                                     );
 
                                     if (Array.isArray(columns) && columns.length > 0) {
@@ -1177,7 +1187,7 @@ Query request: ${query}
                                     // Table doesn't exist, look for similar table names
                                     const [allTables] = await connection.execute(
                                         "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                        [process.env.DB_NAME]
+                                        [dbConfigForError.database]
                                     );
 
                                     if (Array.isArray(allTables) && allTables.length > 0) {
@@ -1230,9 +1240,12 @@ Query request: ${query}
                         try {
                             // Try to find a similar table name
                             if (connection) {
+                                // Get database configuration for error handling
+                                const dbConfigForTableError = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                                
                                 const [allTables] = await connection.execute(
                                     "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                    [process.env.DB_NAME]
+                                    [dbConfigForTableError.database]
                                 );
 
                                 if (Array.isArray(allTables) && allTables.length > 0) {
@@ -1267,7 +1280,7 @@ Query request: ${query}
                                         // Get column names for the suggested table
                                         const [columns] = await connection.execute(
                                             "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
-                                            [process.env.DB_NAME, suggestedTable]
+                                            [dbConfigForTableError.database, suggestedTable]
                                         );
 
                                         let columnInfo = '';

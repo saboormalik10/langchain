@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
+import * as dotenv from 'dotenv';
 import { MedicalLangChainAPI } from './server';
+
+// Load environment variables
+dotenv.config();
 
 // Start the API server
 const api = new MedicalLangChainAPI();
