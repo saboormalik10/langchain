@@ -6,12 +6,6 @@ import rateLimit from 'express-rate-limit';
 import { json, urlencoded } from 'express';
 import { MedicalDatabaseLangChainApp } from '../index';
 import { medicalRoutes } from './routes/medical';
-import { memoryRoutes } from './routes/memory';
-import { promptRoutes } from './routes/prompts';
-import { parserRoutes } from './routes/parsers';
-import { healthRoutes } from './routes/health';
-import { jsonRoutes } from './routes/json';
-import fileUploaderRoutes from './routes/fileUploader';
 
 class MedicalLangChainAPI {
   private app: express.Application;
@@ -22,7 +16,7 @@ class MedicalLangChainAPI {
     this.app = express();
     this.port = parseInt(process.env.PORT || '3000');
     this.langchainApp = new MedicalDatabaseLangChainApp();
-    
+
     this.setupMiddleware();
     this.setupRoutes();
     this.setupErrorHandling();
@@ -57,13 +51,7 @@ class MedicalLangChainAPI {
 
   private setupRoutes(): void {
     // Pass langchainApp instance to routes
-    this.app.use('/api/health', healthRoutes(this.langchainApp));
     this.app.use('/api/medical', medicalRoutes(this.langchainApp));
-    this.app.use('/api/json', jsonRoutes(this.langchainApp));
-    this.app.use('/api/memory', memoryRoutes(this.langchainApp));
-    this.app.use('/api/prompts', promptRoutes(this.langchainApp));
-    this.app.use('/api/parsers', parserRoutes(this.langchainApp));
-    this.app.use('/api/files', fileUploaderRoutes);
 
     // API documentation endpoint
     this.app.get('/api/docs', (req, res) => {
@@ -72,46 +60,8 @@ class MedicalLangChainAPI {
         version: '1.0.0',
         description: 'REST API for medical database operations using LangChain',
         endpoints: {
-          health: {
-            'GET /api/health': 'Check API health status',
-            'GET /api/health/database': 'Check database connectivity',
-            'GET /api/health/llm': 'Check LLM connectivity'
-          },
           medical: {
-            'POST /api/medical/query': 'Query medical database with natural language',
-            'POST /api/medical/query-sql-manual': 'Manual SQL query with optional conversational capabilities',
-            'GET /api/medical/conversation/sessions': 'List all active conversation sessions',
-            'DELETE /api/medical/conversation/sessions/:sessionId': 'Delete a specific conversation session',
-            'POST /api/medical/diagnosis': 'Get AI-powered diagnosis suggestions',
-            'POST /api/medical/treatment': 'Get treatment recommendations',
-            'GET /api/medical/patients': 'List patients (demo data)',
-            'GET /api/medical/tables': 'List available database tables'
-          },
-          json: {
-            'POST /api/json/blood-tests': 'Get blood test records as JSON array',
-            'POST /api/json/patients': 'Get patient records as JSON array'
-          },
-          memory: {
-            'POST /api/memory/conversation': 'Save conversation to memory',
-            'GET /api/memory/conversation': 'Retrieve conversation history',
-            'DELETE /api/memory/conversation': 'Clear conversation memory',
-            'GET /api/memory/summary': 'Get conversation summary'
-          },
-          files: {
-            'POST /api/files/upload': 'Upload and import Excel, CSV, or text file to the database',
-            'POST /api/files/mappings': 'Analyze file and generate column mappings',
-            'POST /api/files/import-with-mappings': 'Import data with custom column mappings'
-          },
-          prompts: {
-            'POST /api/prompts/medical': 'Generate medical prompts',
-            'POST /api/prompts/fewshot': 'Create few-shot prompts',
-            'POST /api/prompts/chat': 'Format chat prompts',
-            'POST /api/prompts/system': 'Create system prompts'
-          },
-          parsers: {
-            'POST /api/parsers/structured': 'Parse structured medical data',
-            'POST /api/parsers/list': 'Parse comma-separated lists',
-            'POST /api/parsers/validate': 'Validate and sanitize output'
+            'POST /api/medical/query-sql-manual': 'Manual SQL query with optional conversational capabilities'
           }
         }
       });
@@ -141,7 +91,7 @@ class MedicalLangChainAPI {
     // Global error handler
     this.app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
       console.error('API Error:', error);
-      
+
       res.status(error.status || 500).json({
         error: error.message || 'Internal server error',
         timestamp: new Date().toISOString(),
@@ -155,14 +105,14 @@ class MedicalLangChainAPI {
     try {
       // Initialize LangChain application (continue even if database fails)
       console.log('🔧 Initializing LangChain application...');
-      
+
       try {
         await this.langchainApp.connectToDatabase();
         console.log('✅ Database connected successfully');
       } catch (dbError) {
         console.warn('⚠️  Database connection failed, but API will still start:', (dbError as Error).message);
       }
-      
+
       try {
         await this.langchainApp.initializeChains();
         await this.langchainApp.initializeTools();
@@ -171,7 +121,7 @@ class MedicalLangChainAPI {
       } catch (initError) {
         console.warn('⚠️  Some LangChain components failed to initialize:', (initError as Error).message);
       }
-      
+
       // Start server regardless of database/LangChain initialization status
       this.app.listen(this.port, () => {
         console.log(`🚀 Medical LangChain API is running on port ${this.port}`);
