@@ -67,6 +67,7 @@ export function medicalRoutes(): Router {
             body('context').optional().isString().isLength({ max: 1000 }).withMessage('Context must be less than 1000 characters'),
             body('sessionId').optional().isString().withMessage('Session ID must be a string'),
             body('conversational').optional().isBoolean().withMessage('Conversational flag must be a boolean'),
+            body('generateDescription').optional().isBoolean().withMessage('Generate description flag must be a boolean'),
             // New parameters for enhanced features
             body('autoRetry').optional().isBoolean().withMessage('Auto-retry flag must be a boolean'),
             body('generateSummary').optional().isBoolean().withMessage('Generate summary flag must be a boolean'),
@@ -111,6 +112,7 @@ export function medicalRoutes(): Router {
                     query,
                     context = 'Medical database query',
                     conversational = false,
+                    generateDescription = true, // Default to true for better user experience
                     sessionId = uuidv4(),
                     // Enhanced parameters
                     enableAutoCorrect = false,
@@ -1035,12 +1037,88 @@ Query request: ${query}
 
                     const processingTime = performance.now() - startTime;
 
+                    // Generate description/explanation of the query and results
+                    console.log('📝 Step 5: Generating query description and result explanation...');
+                    let queryDescription = '';
+                    let resultExplanation = '';
+
+                    if (generateDescription) {
+                        try {
+                            // Get the LangChain app to access the LLM
+                            const langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
+                            const llm = (langchainApp as any).llm; // Access the Azure OpenAI LLM instance
+
+                            if (llm) {
+                                // Generate query description
+                                const queryDescriptionPrompt = `You are a medical database expert. Analyze this SQL query and provide a clear, professional explanation of what it does.
+
+SQL Query: ${finalSQL}
+
+Original User Question: ${query}
+
+Provide a concise explanation (2-3 sentences) of:
+1. What data this query retrieves
+2. What conditions/filters are applied
+3. How the results are organized
+
+Keep it professional and easy to understand for both technical and non-technical users.`;
+
+                                const queryDescResponse = await llm.invoke(queryDescriptionPrompt);
+                                queryDescription = typeof queryDescResponse === 'string' ? queryDescResponse : queryDescResponse.content || '';
+                                console.log('✅ Generated query description');
+
+                                // Generate result explanation if we have results
+                                if (Array.isArray(rows) && rows.length > 0) {
+                                    const resultSample = rows.slice(0, 3); // Show first 3 rows as sample
+                                    const resultExplanationPrompt = `You are a medical data analyst. Analyze these SQL query results and return a professional HTML summary.
+
+Original Question: ${query}
+SQL Query: ${finalSQL}
+Total Results Found: ${rows.length}
+Sample Results: ${JSON.stringify(resultSample, null, 2)}
+
+Generate a clear, high-level explanation using HTML markup. Format the response as follows:
+- A <h3> heading summarizing the result
+- A short <p> paragraph (2–4 sentences) explaining:
+  1. What was generally found in the data (without any individual-level detail)
+  2. Key patterns or trends
+  3. What this means in response to the user's question
+
+Do NOT include any personal or sensitive data.
+Avoid technical SQL details.
+Keep the focus on medical/business relevance only.
+Return only valid, semantic HTML.`;
+
+
+
+                                    const resultExpResponse = await llm.invoke(resultExplanationPrompt);
+                                    resultExplanation = typeof resultExpResponse === 'string' ? resultExpResponse : resultExpResponse.content || '';
+                                    console.log('✅ Generated result explanation');
+                                } else {
+                                    resultExplanation = 'No results were found matching your query criteria.';
+                                }
+                            } else {
+                                console.log('⚠️ LLM not available for description generation');
+                                queryDescription = 'Query description not available';
+                                resultExplanation = 'Result explanation not available';
+                            }
+                        } catch (descError: any) {
+                            console.error('❌ Error generating descriptions:', descError.message);
+                            queryDescription = 'Unable to generate query description';
+                            resultExplanation = 'Unable to generate result explanation';
+                        }
+                    } else {
+                        console.log('📝 Description generation disabled');
+                        queryDescription = 'Description generation disabled';
+                        resultExplanation = 'Result explanation disabled';
+                    }
+
                     // Save conversation if in conversational mode
                     if (conversational && sessionData) {
                         try {
                             // Prepare a user-friendly summary of the SQL results for the conversation
                             const resultCount = Array.isArray(rows) ? rows.length : 0;
-                            const resultSummary = `Found ${resultCount} results for your query. SQL: ${finalSQL}`;
+                            const resultSummary = `${resultExplanation} Found ${resultCount} results. SQL: ${finalSQL}`;
 
                             // Save the conversation exchange to memory
                             await sessionData.memory.saveContext(
@@ -1054,12 +1132,12 @@ Query request: ${query}
                         }
                     }
 
-                    // Return the raw SQL results
+                    // Return the raw SQL results with descriptions
                     const response = {
                         success: true,
                         query_processed: query,
                         sql_extracted: extractedSQL,
-                        sql_final: finalSQL,
+                        sql_final: { resultExplanation, finalSQL, processing_time: `${processingTime.toFixed(2)}ms` },
                         sql_results: rows, // Raw SQL results
                         result_count: Array.isArray(rows) ? rows.length : 0,
                         field_info: fields ? fields.map((field: any) => ({
@@ -1068,7 +1146,11 @@ Query request: ${query}
                             table: field.table
                         })) : [],
                         processing_time: `${processingTime.toFixed(2)}ms`,
-                        agent_response: agentResult ? agentResult.output : '',
+                        // agent_response: agentResult ? agentResult.output : '',
+
+                        // New description fields
+                        query_description: queryDescription,
+                        // result_explanation: resultExplanation,
 
                         // Add chain information if chains were used
                         ...(useChains && Object.keys(chainMetadata).length > 0 ? {
@@ -1129,7 +1211,7 @@ Query request: ${query}
                             if (connection && tableName && columnName) {
                                 // Get database configuration for error handling
                                 const dbConfigForError = await databaseService.getOrganizationDatabaseConnection(organizationId);
-                                
+
                                 // First verify the table exists
                                 const [tableResult] = await connection.execute(
                                     "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
@@ -1242,7 +1324,7 @@ Query request: ${query}
                             if (connection) {
                                 // Get database configuration for error handling
                                 const dbConfigForTableError = await databaseService.getOrganizationDatabaseConnection(organizationId);
-                                
+
                                 const [allTables] = await connection.execute(
                                     "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
                                     [dbConfigForTableError.database]
@@ -1338,10 +1420,46 @@ Query request: ${query}
 
                     const processingTime = performance.now() - startTime;
 
+                    // Generate error description to help users understand what went wrong
+                    let errorDescription = '';
+                    if (generateDescription) {
+                        try {
+                            const langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
+                            const llm = (langchainApp as any).llm;
+
+                            if (llm) {
+                                const errorDescriptionPrompt = `You are a helpful database assistant. A user's SQL query failed with an error. Explain what went wrong in simple, non-technical terms and suggest how to fix it.
+
+User's Original Question: ${query}
+Generated SQL: ${finalSQL}
+Error Message: ${sqlError.message}
+Error Type: ${(errorDetails as any).error_type || 'unknown'}
+
+Provide a brief, user-friendly explanation (2-3 sentences) that:
+1. Explains what went wrong in simple terms
+2. Suggests how the user could rephrase their question
+3. Is encouraging and helpful
+
+Avoid technical jargon and focus on helping the user get the information they need.`;
+
+                                const errorDescResponse = await llm.invoke(errorDescriptionPrompt);
+                                errorDescription = typeof errorDescResponse === 'string' ? errorDescResponse : errorDescResponse.content || '';
+                                console.log('✅ Generated error description');
+                            } else {
+                                errorDescription = 'An error occurred while processing your query. Please try rephrasing your question or contact support.';
+                            }
+                        } catch (descError) {
+                            console.error('❌ Error generating error description:', descError);
+                            errorDescription = 'An error occurred while processing your query. Please try rephrasing your question.';
+                        }
+                    } else {
+                        errorDescription = 'Error description generation disabled';
+                    }
+
                     // If in conversational mode, still save the error to conversation history
                     if (conversational && sessionData) {
                         try {
-                            const errorSummary = `Error executing SQL: ${sqlError.message}`;
+                            const errorSummary = `Error executing SQL: ${errorDescription}`;
                             await sessionData.memory.saveContext(
                                 { input: query },
                                 { output: errorSummary }
@@ -1362,6 +1480,10 @@ Query request: ${query}
                         sql_final: finalSQL,
                         processing_time: `${processingTime.toFixed(2)}ms`,
                         agent_response: agentResult.output,
+
+                        // User-friendly error description
+                        error_description: errorDescription,
+
                         // Add conversation information if in conversational mode
                         ...(conversational ? {
                             conversation: {
