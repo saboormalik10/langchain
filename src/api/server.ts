@@ -13,7 +13,7 @@ class MedicalLangChainAPI {
 
   constructor() {
     this.app = express();
-    this.port = parseInt(process.env.PORT || '3000');
+    this.port = parseInt(process.env.PORT || '3001');
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -126,20 +126,23 @@ class MedicalLangChainAPI {
   public async start(): Promise<void> {
     try {
       console.log('🚀 Starting Medical LangChain API server...');
-      
+
       // Initialize main database connection first
       console.log('📊 Initializing main PostgreSQL database connection...');
       await databaseService.initializeMainDatabase();
-      
+
       console.log('📋 Multi-tenant mode: LangChain instances will be initialized on-demand per organization');
 
       // Start server after database initialization
-      this.app.listen(this.port, () => {
+      this.app.listen(this.port, '0.0.0.0', () => {
+        console.log(`Server running on port ${this.port}`);
         console.log(`🚀 Medical LangChain API is running on port ${this.port}`);
         console.log(`📚 API Documentation: http://localhost:${this.port}/api/docs`);
         console.log(`❤️  Health Check: http://localhost:${this.port}/api/health`);
         console.log(`🏢 Multi-tenant: Each organization gets its own LangChain instance on first API call`);
+
       });
+
     } catch (error) {
       console.error('❌ Failed to start API server:', error);
       process.exit(1);
