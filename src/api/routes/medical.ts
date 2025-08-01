@@ -1137,8 +1137,8 @@ Return only valid, semantic HTML.`;
                         success: true,
                         query_processed: query,
                         sql_extracted: extractedSQL,
-                        sql_final: { resultExplanation, finalSQL, processing_time: `${processingTime.toFixed(2)}ms` },
-                        sql_results: rows, // Raw SQL results
+                        sql_final: finalSQL,
+                        sql_results: { resultExplanation, sql_final: rows, processing_time: `${processingTime.toFixed(2)}ms` }, // Raw SQL results
                         result_count: Array.isArray(rows) ? rows.length : 0,
                         field_info: fields ? fields.map((field: any) => ({
                             name: field.name,
