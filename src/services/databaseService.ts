@@ -34,6 +34,7 @@ class DatabaseService {
     private pgPool: Pool;
     private encryptionKey: string;
     private isMainDbConnected: boolean = false;
+    private organizationConnections: Map<string, any[]> = new Map(); // Track active connections per organization
 
     constructor() {
         // Initialize PostgreSQL connection pool for main database
@@ -185,24 +186,22 @@ class DatabaseService {
     async createOrganizationMySQLConnection(organizationId: string): Promise<mysql.Connection> {
         try {
             const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
-
-            if (dbConfig.type.toLocaleLowerCase() !== 'mysql' && dbConfig.type.toLocaleLowerCase() !== 'mariadb') {
-                throw new Error(`Database type mismatch: expected 'mysql' or 'mariadb' but got '${dbConfig.type.toLocaleLowerCase()}'`);
-            }
-
+            
             console.log(`🔌 Creating MySQL connection for organization ${organizationId} to ${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`);
 
             const connection = await mysql.createConnection({
                 host: dbConfig.host,
                 port: dbConfig.port,
-                database: dbConfig.database,
                 user: dbConfig.username,
                 password: dbConfig.password,
-                charset: 'utf8mb4',
-                connectTimeout: 60000,
+                database: dbConfig.database,
+                connectTimeout: 10000,
+                charset: 'utf8mb4'
             });
 
-            console.log(`✅ MySQL connection established for organization ${organizationId}`);
+            // Track the connection for cleanup
+            this.trackConnection(organizationId, connection);
+
             return connection;
         } catch (error) {
             console.error(`❌ Failed to create MySQL connection for organization ${organizationId}:`, error);
@@ -238,6 +237,10 @@ class DatabaseService {
             });
 
             await client.connect();
+            
+            // Track the connection for cleanup
+            this.trackConnection(organizationId, client);
+            
             console.log(`✅ PostgreSQL connection established for organization ${organizationId}`);
             return client;
         } catch (error) {
@@ -448,6 +451,42 @@ class DatabaseService {
      */
     async close(): Promise<void> {
         await this.pgPool.end();
+    }
+
+    /**
+     * Track a connection for an organization
+     */
+    private trackConnection(organizationId: string, connection: any): void {
+        if (!this.organizationConnections.has(organizationId)) {
+            this.organizationConnections.set(organizationId, []);
+        }
+        this.organizationConnections.get(organizationId)!.push(connection);
+    }
+
+    /**
+     * Close all connections for an organization
+     */
+    async closeOrganizationConnections(organizationId: string): Promise<void> {
+        const connections = this.organizationConnections.get(organizationId);
+        if (connections && connections.length > 0) {
+            console.log(`🔌 Closing ${connections.length} connections for organization: ${organizationId}`);
+            for (const connection of connections) {
+                try {
+                    await connection.end();
+                } catch (error) {
+                    console.error(`❌ Error closing connection for organization ${organizationId}:`, error);
+                }
+            }
+            this.organizationConnections.delete(organizationId);
+        }
+    }
+
+    /**
+     * Get connection count for an organization
+     */
+    getOrganizationConnectionCount(organizationId: string): number {
+        const connections = this.organizationConnections.get(organizationId);
+        return connections ? connections.length : 0;
     }
 }
 

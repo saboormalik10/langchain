@@ -41,6 +41,7 @@
     "@types/morgan": "^1.9.10",
     "@types/multer": "^2.0.0",
     "@types/pg": "^8.15.5",
+    "axios": "^1.11.0",
     "cors": "^2.8.5",
     "crypto-js": "^4.2.0",
     "csv-parse": "^6.1.0",

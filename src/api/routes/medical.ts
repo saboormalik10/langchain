@@ -7,6 +7,89 @@ import { v4 as uuidv4 } from 'uuid';
 import databaseService from '../../services/databaseService';
 import multiTenantLangChainService from '../../services/multiTenantLangChainService';
 
+// Graph Types Enum
+enum GraphType {
+    BAR_CHART = 'bar_chart',
+    LINE_CHART = 'line_chart',
+    PIE_CHART = 'pie_chart',
+    SCATTER_PLOT = 'scatter_plot',
+    HISTOGRAM = 'histogram',
+    BOX_PLOT = 'box_plot',
+    HEATMAP = 'heatmap',
+    TIMELINE = 'timeline',
+    TREE_MAP = 'tree_map',
+    RADAR_CHART = 'radar_chart',
+    FUNNEL_CHART = 'funnel_chart',
+    GAUGE_CHART = 'gauge_chart',
+    BUBBLE_CHART = 'bubble_chart',
+    AREA_CHART = 'area_chart',
+    STACKED_BAR = 'stacked_bar',
+    GROUPED_BAR = 'grouped_bar',
+    MULTI_LINE = 'multi_line',
+    DONUT_CHART = 'donut_chart',
+    WATERFALL = 'waterfall',
+    SANKEY_DIAGRAM = 'sankey_diagram'
+}
+
+// Medical Data Categories for Graph Context
+enum MedicalDataCategory {
+    PATIENT_DEMOGRAPHICS = 'patient_demographics',
+    LABORATORY_RESULTS = 'laboratory_results',
+    MEDICATIONS = 'medications',
+    VITAL_SIGNS = 'vital_signs',
+    DIAGNOSES = 'diagnoses',
+    TREATMENTS = 'treatments',
+    PROCEDURES = 'procedures',
+    GENETIC_DATA = 'genetic_data',
+    PHARMACOGENOMICS = 'pharmacogenomics',
+    CLINICAL_TRIALS = 'clinical_trials',
+    EPIDEMIOLOGY = 'epidemiology',
+    OUTCOMES = 'outcomes',
+    COST_ANALYSIS = 'cost_analysis',
+    QUALITY_METRICS = 'quality_metrics',
+    PATIENT_FLOW = 'patient_flow'
+}
+
+// Graph Configuration Interface
+interface GraphConfig {
+    type: GraphType;
+    category?: MedicalDataCategory;
+    xAxis?: string;
+    yAxis?: string;
+    colorBy?: string;
+    sizeBy?: string;
+    groupBy?: string;
+    sortBy?: string;
+    limit?: number;
+    aggregation?: 'count' | 'sum' | 'avg' | 'min' | 'max' | 'median';
+    timeFormat?: string;
+    showTrends?: boolean;
+    showOutliers?: boolean;
+    includeNulls?: boolean;
+    customColors?: string[];
+    title?: string;
+    subtitle?: string;
+    description?: string;
+}
+
+// Graph Data Interface
+interface GraphData {
+    type: GraphType;
+    data: any[];
+    config: GraphConfig;
+    metadata: {
+        totalRecords: number;
+        processedAt: string;
+        dataQuality: {
+            completeness: number;
+            accuracy: number;
+            consistency: number;
+        };
+        insights: string[];
+        recommendations: string[];
+    };
+}
+
 interface ConversationSession {
     memory: BufferMemory;
     lastAccess: Date;
@@ -49,7 +132,686 @@ setInterval(() => {
     }
 }, 60 * 60 * 1000); // Check every hour
 
+// Graph Processing Functions
+class GraphProcessor {
+    /**
+     * Convert SQL results to graph data based on configuration
+     */
+    static processGraphData(sqlResults: any[], graphConfig: GraphConfig): GraphData {
+        console.log(`📊 Processing graph data for type: ${graphConfig.type}`);
+        
+        let processedData = this.transformData(sqlResults, graphConfig);
+        let insights = this.generateInsights(processedData, graphConfig);
+        let recommendations = this.generateRecommendations(processedData, graphConfig);
+        
+        return {
+            type: graphConfig.type,
+            data: processedData,
+            config: graphConfig,
+            metadata: {
+                totalRecords: sqlResults.length,
+                processedAt: new Date().toISOString(),
+                dataQuality: this.assessDataQuality(sqlResults),
+                insights,
+                recommendations
+            }
+        };
+    }
 
+    /**
+     * Transform SQL results into graph-specific format
+     */
+    private static transformData(data: any[], config: GraphConfig): any[] {
+        if (!data || data.length === 0) return [];
+
+        switch (config.type) {
+            case GraphType.BAR_CHART:
+                return this.transformForBarChart(data, config);
+            case GraphType.LINE_CHART:
+                return this.transformForLineChart(data, config);
+            case GraphType.PIE_CHART:
+                return this.transformForPieChart(data, config);
+            case GraphType.SCATTER_PLOT:
+                return this.transformForScatterPlot(data, config);
+            case GraphType.HISTOGRAM:
+                return this.transformForHistogram(data, config);
+            case GraphType.BOX_PLOT:
+                return this.transformForBoxPlot(data, config);
+            case GraphType.HEATMAP:
+                return this.transformForHeatmap(data, config);
+            case GraphType.TIMELINE:
+                return this.transformForTimeline(data, config);
+            case GraphType.STACKED_BAR:
+                return this.transformForStackedBar(data, config);
+            case GraphType.GROUPED_BAR:
+                return this.transformForGroupedBar(data, config);
+            case GraphType.MULTI_LINE:
+                return this.transformForMultiLine(data, config);
+            case GraphType.AREA_CHART:
+                return this.transformForAreaChart(data, config);
+            case GraphType.BUBBLE_CHART:
+                return this.transformForBubbleChart(data, config);
+            case GraphType.DONUT_CHART:
+                return this.transformForDonutChart(data, config);
+            case GraphType.WATERFALL:
+                return this.transformForWaterfall(data, config);
+            default:
+                return this.transformForGenericChart(data, config);
+        }
+    }
+
+    /**
+     * Combine data with same labels to prevent duplicates
+     */
+    private static combineDataByLabel(data: any[], labelKey: string = 'label', valueKey: string = 'y', aggregation: string = 'sum'): any[] {
+        const grouped = new Map<string, any>();
+        
+        data.forEach(item => {
+            const label = item[labelKey];
+            if (!label) return;
+            
+            if (!grouped.has(label)) {
+                grouped.set(label, { ...item });
+            } else {
+                const existing = grouped.get(label);
+                const existingValue = this.parseNumericValue(existing[valueKey]);
+                const newValue = this.parseNumericValue(item[valueKey]);
+                
+                let combinedValue: number;
+                switch (aggregation) {
+                    case 'sum':
+                        combinedValue = existingValue + newValue;
+                        break;
+                    case 'avg':
+                        // For average, we need to track count and sum
+                        const count = existing.count || 1;
+                        const sum = existing.sum || existingValue;
+                        combinedValue = (sum + newValue) / (count + 1);
+                        existing.count = count + 1;
+                        existing.sum = sum + newValue;
+                        break;
+                    case 'max':
+                        combinedValue = Math.max(existingValue, newValue);
+                        break;
+                    case 'min':
+                        combinedValue = Math.min(existingValue, newValue);
+                        break;
+                    default:
+                        combinedValue = existingValue + newValue;
+                }
+                
+                existing[valueKey] = combinedValue;
+                
+                // Merge additional properties if they exist
+                if (item.color && !existing.color) {
+                    existing.color = item.color;
+                }
+                if (item.group && !existing.group) {
+                    existing.group = item.group;
+                }
+            }
+        });
+        
+        return Array.from(grouped.values());
+    }
+
+    /**
+     * Transform data for bar charts
+     */
+    private static transformForBarChart(data: any[], config: GraphConfig): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        
+        console.log(`📊 Bar chart transformation: xAxis=${xAxis}, yAxis=${yAxis}`);
+        
+        if (config.aggregation) {
+            return this.aggregateData(data, xAxis, yAxis, config.aggregation);
+        }
+        
+        // Transform data first
+        const transformedData = data.map(item => ({
+            x: item[xAxis],
+            y: this.parseNumericValue(item[yAxis]),
+            label: item[xAxis],
+            color: config.colorBy ? item[config.colorBy] : undefined
+        }));
+        
+        // Combine data with same labels to prevent duplicates
+        return this.combineDataByLabel(transformedData, 'label', 'y', config.aggregation || 'sum');
+    }
+
+    /**
+     * Transform data for line charts
+     */
+    private static transformForLineChart(data: any[], config: GraphConfig): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        
+        return data.map(item => ({
+            x: this.parseDateValue(item[xAxis]),
+            y: this.parseNumericValue(item[yAxis]),
+            label: item[xAxis],
+            group: config.colorBy ? item[config.colorBy] : undefined
+        })).sort((a, b) => a.x - b.x);
+    }
+
+    /**
+     * Transform data for pie charts
+     */
+    private static transformForPieChart(data: any[], config: GraphConfig): any[] {
+        const labelField = config.xAxis || Object.keys(data[0] || {})[0];
+        const valueField = config.yAxis || Object.keys(data[0] || {})[1];
+        
+        if (config.aggregation) {
+            return this.aggregateData(data, labelField, valueField, config.aggregation);
+        }
+        
+        // Transform data first
+        const transformedData = data.map(item => ({
+            label: item[labelField],
+            value: this.parseNumericValue(item[valueField]),
+            color: config.colorBy ? item[config.colorBy] : undefined
+        }));
+        
+        // Combine data with same labels to prevent duplicates
+        return this.combineDataByLabel(transformedData, 'label', 'value', config.aggregation || 'sum');
+    }
+
+    /**
+     * Transform data for scatter plots
+     */
+    private static transformForScatterPlot(data: any[], config: GraphConfig): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        
+        return data.map(item => ({
+            x: this.parseNumericValue(item[xAxis]),
+            y: this.parseNumericValue(item[yAxis]),
+            size: config.sizeBy ? this.parseNumericValue(item[config.sizeBy]) : 10,
+            color: config.colorBy ? item[config.colorBy] : undefined,
+            label: item[xAxis]
+        }));
+    }
+
+    /**
+     * Transform data for histograms
+     */
+    private static transformForHistogram(data: any[], config: GraphConfig): any[] {
+        const valueField = config.xAxis || Object.keys(data[0] || {})[0];
+        const values = data.map(item => this.parseNumericValue(item[valueField])).filter(v => !isNaN(v));
+        
+        if (values.length === 0) return [];
+        
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const binCount = Math.min(10, Math.ceil(Math.sqrt(values.length)));
+        const binSize = (max - min) / binCount;
+        
+        const bins = Array(binCount).fill(0).map((_, i) => ({
+            start: min + i * binSize,
+            end: min + (i + 1) * binSize,
+            count: 0
+        }));
+        
+        values.forEach(value => {
+            const binIndex = Math.min(Math.floor((value - min) / binSize), binCount - 1);
+            bins[binIndex].count++;
+        });
+        
+        return bins.map(bin => ({
+            x: `${bin.start.toFixed(2)}-${bin.end.toFixed(2)}`,
+            y: bin.count,
+            start: bin.start,
+            end: bin.end
+        }));
+    }
+
+    /**
+     * Transform data for box plots
+     */
+    private static transformForBoxPlot(data: any[], config: GraphConfig): any[] {
+        const valueField = config.xAxis || Object.keys(data[0] || {})[0];
+        const groupField = config.groupBy || config.colorBy;
+        
+        if (groupField) {
+            const groups = this.groupData(data, groupField);
+            return Object.entries(groups).map(([group, groupData]) => {
+                const values = groupData.map(item => this.parseNumericValue(item[valueField])).filter(v => !isNaN(v));
+                return this.calculateBoxPlotStats(values, group);
+            });
+        } else {
+            const values = data.map(item => this.parseNumericValue(item[valueField])).filter(v => !isNaN(v));
+            return [this.calculateBoxPlotStats(values, 'all')];
+        }
+    }
+
+    /**
+     * Transform data for heatmaps
+     */
+    private static transformForHeatmap(data: any[], config: GraphConfig): any[] {
+        const xField = config.xAxis || Object.keys(data[0] || {})[0];
+        const yField = config.yAxis || Object.keys(data[0] || {})[1];
+        const valueField = config.sizeBy || Object.keys(data[0] || {})[2];
+        
+        return data.map(item => ({
+            x: item[xField],
+            y: item[yField],
+            value: this.parseNumericValue(item[valueField]),
+            color: this.getHeatmapColor(this.parseNumericValue(item[valueField]))
+        }));
+    }
+
+    /**
+     * Transform data for timelines
+     */
+    private static transformForTimeline(data: any[], config: GraphConfig): any[] {
+        const timeField = config.xAxis || Object.keys(data[0] || {})[0];
+        const eventField = config.yAxis || Object.keys(data[0] || {})[1];
+        
+        return data.map(item => ({
+            time: this.parseDateValue(item[timeField]),
+            event: item[eventField],
+            description: config.colorBy ? item[config.colorBy] : undefined,
+            category: config.groupBy ? item[config.groupBy] : undefined
+        })).sort((a, b) => a.time - b.time);
+    }
+
+    /**
+     * Transform data for stacked bar charts
+     */
+    private static transformForStackedBar(data: any[], config: GraphConfig): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        const stackBy = config.groupBy || config.colorBy;
+        
+        if (!stackBy) return this.transformForBarChart(data, config);
+        
+        const groups = this.groupData(data, xAxis);
+        return Object.entries(groups).map(([xValue, groupData]) => {
+            const stacks = this.groupData(groupData, stackBy);
+            return {
+                x: xValue,
+                stacks: Object.entries(stacks).map(([stackName, stackData]) => ({
+                    name: stackName,
+                    value: stackData.reduce((sum, item) => sum + this.parseNumericValue(item[yAxis]), 0)
+                }))
+            };
+        });
+    }
+
+    /**
+     * Transform data for grouped bar charts
+     */
+    private static transformForGroupedBar(data: any[], config: GraphConfig): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        const groupBy = config.groupBy || config.colorBy;
+        
+        if (!groupBy) return this.transformForBarChart(data, config);
+        
+        const groups = this.groupData(data, groupBy);
+        return Object.entries(groups).map(([groupName, groupData]) => ({
+            group: groupName,
+            bars: groupData.map(item => ({
+                x: item[xAxis],
+                y: this.parseNumericValue(item[yAxis]),
+                label: item[xAxis]
+            }))
+        }));
+    }
+
+    /**
+     * Transform data for multi-line charts
+     */
+    private static transformForMultiLine(data: any[], config: GraphConfig): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        const lineBy = config.groupBy || config.colorBy;
+        
+        if (!lineBy) return this.transformForLineChart(data, config);
+        
+        const lines = this.groupData(data, lineBy);
+        return Object.entries(lines).map(([lineName, lineData]) => ({
+            name: lineName,
+            data: lineData.map(item => ({
+                x: this.parseDateValue(item[xAxis]),
+                y: this.parseNumericValue(item[yAxis])
+            })).sort((a, b) => a.x - b.x)
+        }));
+    }
+
+    /**
+     * Transform data for area charts
+     */
+    private static transformForAreaChart(data: any[], config: GraphConfig): any[] {
+        const result = this.transformForLineChart(data, config);
+        return result.map(item => ({
+            ...item,
+            area: true
+        }));
+    }
+
+    /**
+     * Transform data for bubble charts
+     */
+    private static transformForBubbleChart(data: any[], config: GraphConfig): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        const sizeField = config.sizeBy || Object.keys(data[0] || {})[2];
+        
+        return data.map(item => ({
+            x: this.parseNumericValue(item[xAxis]),
+            y: this.parseNumericValue(item[yAxis]),
+            size: this.parseNumericValue(item[sizeField]),
+            color: config.colorBy ? item[config.colorBy] : undefined,
+            label: item[xAxis]
+        }));
+    }
+
+    /**
+     * Transform data for donut charts
+     */
+    private static transformForDonutChart(data: any[], config: GraphConfig): any[] {
+        return this.transformForPieChart(data, config);
+    }
+
+    /**
+     * Transform data for waterfall charts
+     */
+    private static transformForWaterfall(data: any[], config: GraphConfig): any[] {
+        const labelField = config.xAxis || Object.keys(data[0] || {})[0];
+        const valueField = config.yAxis || Object.keys(data[0] || {})[1];
+        
+        let runningTotal = 0;
+        return data.map(item => {
+            const value = this.parseNumericValue(item[valueField]);
+            const start = runningTotal;
+            runningTotal += value;
+            return {
+                label: item[labelField],
+                value: value,
+                start: start,
+                end: runningTotal,
+                color: value >= 0 ? 'positive' : 'negative'
+            };
+        });
+    }
+
+    /**
+     * Generic chart transformation
+     */
+    private static transformForGenericChart(data: any[], config: GraphConfig): any[] {
+        return data.map(item => ({
+            ...item,
+            processed: true
+        }));
+    }
+
+    /**
+     * Aggregate data based on specified function
+     */
+    private static aggregateData(data: any[], groupBy: string, valueField: string, aggregation: string): any[] {
+        const groups = this.groupData(data, groupBy);
+        
+        return Object.entries(groups).map(([group, groupData]) => {
+            const values = groupData.map(item => this.parseNumericValue(item[valueField])).filter(v => !isNaN(v));
+            let aggregatedValue = 0;
+            
+            switch (aggregation) {
+                case 'count':
+                    aggregatedValue = groupData.length;
+                    break;
+                case 'sum':
+                    aggregatedValue = values.reduce((sum, val) => sum + val, 0);
+                    break;
+                case 'avg':
+                    aggregatedValue = values.length > 0 ? values.reduce((sum, val) => sum + val, 0) / values.length : 0;
+                    break;
+                case 'min':
+                    aggregatedValue = values.length > 0 ? Math.min(...values) : 0;
+                    break;
+                case 'max':
+                    aggregatedValue = values.length > 0 ? Math.max(...values) : 0;
+                    break;
+                case 'median':
+                    aggregatedValue = this.calculateMedian(values);
+                    break;
+                default:
+                    aggregatedValue = values.reduce((sum, val) => sum + val, 0);
+            }
+            
+            return {
+                label: group,
+                value: aggregatedValue,
+                count: groupData.length
+            };
+        });
+    }
+
+    /**
+     * Group data by a specific field
+     */
+    private static groupData(data: any[], groupBy: string): Record<string, any[]> {
+        return data.reduce((groups, item) => {
+            const key = item[groupBy] || 'Unknown';
+            if (!groups[key]) groups[key] = [];
+            groups[key].push(item);
+            return groups;
+        }, {} as Record<string, any[]>);
+    }
+
+    /**
+     * Calculate box plot statistics
+     */
+    private static calculateBoxPlotStats(values: number[], group: string): any {
+        if (values.length === 0) return { group, min: 0, q1: 0, median: 0, q3: 0, max: 0 };
+        
+        values.sort((a, b) => a - b);
+        const min = values[0];
+        const max = values[values.length - 1];
+        const q1 = this.calculatePercentile(values, 25);
+        const median = this.calculatePercentile(values, 50);
+        const q3 = this.calculatePercentile(values, 75);
+        
+        return { group, min, q1, median, q3, max };
+    }
+
+    /**
+     * Calculate percentile
+     */
+    private static calculatePercentile(values: number[], percentile: number): number {
+        const index = (percentile / 100) * (values.length - 1);
+        const lower = Math.floor(index);
+        const upper = Math.ceil(index);
+        const weight = index - lower;
+        
+        if (upper === lower) return values[lower];
+        return values[lower] * (1 - weight) + values[upper] * weight;
+    }
+
+    /**
+     * Calculate median
+     */
+    private static calculateMedian(values: number[]): number {
+        if (values.length === 0) return 0;
+        values.sort((a, b) => a - b);
+        const mid = Math.floor(values.length / 2);
+        return values.length % 2 === 0 ? (values[mid - 1] + values[mid]) / 2 : values[mid];
+    }
+
+    /**
+     * Parse numeric value safely
+     */
+    private static parseNumericValue(value: any): number {
+        if (value === null || value === undefined) return 0;
+        const parsed = parseFloat(value);
+        return isNaN(parsed) ? 0 : parsed;
+    }
+
+    /**
+     * Parse date value safely
+     */
+    private static parseDateValue(value: any): number {
+        if (value === null || value === undefined) return 0;
+        const date = new Date(value);
+        return isNaN(date.getTime()) ? 0 : date.getTime();
+    }
+
+
+
+    /**
+     * Get heatmap color based on value
+     */
+    private static getHeatmapColor(value: number): string {
+        // Simple color scale from blue (low) to red (high)
+        const normalized = Math.max(0, Math.min(1, value / 100));
+        const r = Math.round(255 * normalized);
+        const b = Math.round(255 * (1 - normalized));
+        return `rgb(${r}, 0, ${b})`;
+    }
+
+    /**
+     * Assess data quality
+     */
+    private static assessDataQuality(data: any[]): { completeness: number; accuracy: number; consistency: number } {
+        if (data.length === 0) return { completeness: 0, accuracy: 0, consistency: 0 };
+        
+        const totalFields = Object.keys(data[0] || {}).length;
+        let totalNulls = 0;
+        let totalValues = 0;
+        
+        data.forEach(item => {
+            Object.values(item).forEach(value => {
+                totalValues++;
+                if (value === null || value === undefined || value === '') {
+                    totalNulls++;
+                }
+            });
+        });
+        
+        const completeness = ((totalValues - totalNulls) / totalValues) * 100;
+        const accuracy = Math.min(100, Math.max(0, 100 - (totalNulls / data.length) * 10));
+        const consistency = Math.min(100, Math.max(0, 100 - (totalNulls / totalValues) * 20));
+        
+        return { completeness, accuracy, consistency };
+    }
+
+    /**
+     * Generate insights from data
+     */
+    private static generateInsights(data: any[], config: GraphConfig): string[] {
+        const insights: string[] = [];
+        
+        if (data.length === 0) {
+            insights.push('No data available for visualization');
+            return insights;
+        }
+        
+        // Basic insights based on data type
+        switch (config.type) {
+            case GraphType.BAR_CHART:
+            case GraphType.PIE_CHART:
+                const maxValue = Math.max(...data.map(d => d.value || d.y || 0));
+                const minValue = Math.min(...data.map(d => d.value || d.y || 0));
+                insights.push(`Highest value: ${maxValue}`);
+                insights.push(`Lowest value: ${minValue}`);
+                insights.push(`Data range: ${maxValue - minValue}`);
+                break;
+            case GraphType.LINE_CHART:
+            case GraphType.TIMELINE:
+                insights.push(`Time span: ${data.length} data points`);
+                if (data.length > 1) {
+                    const trend = data[data.length - 1].y > data[0].y ? 'increasing' : 'decreasing';
+                    insights.push(`Overall trend: ${trend}`);
+                }
+                break;
+            case GraphType.SCATTER_PLOT:
+                insights.push(`Correlation analysis available`);
+                insights.push(`Outlier detection possible`);
+                break;
+        }
+        
+        // Medical-specific insights
+        if (config.category) {
+            switch (config.category) {
+                case MedicalDataCategory.PATIENT_DEMOGRAPHICS:
+                    insights.push('Demographic distribution analysis');
+                    break;
+                case MedicalDataCategory.LABORATORY_RESULTS:
+                    insights.push('Lab result trends and ranges');
+                    break;
+                case MedicalDataCategory.MEDICATIONS:
+                    insights.push('Medication usage patterns');
+                    break;
+                case MedicalDataCategory.VITAL_SIGNS:
+                    insights.push('Vital sign monitoring trends');
+                    break;
+            }
+        }
+        
+        return insights;
+    }
+
+    /**
+     * Generate recommendations based on data and graph type
+     */
+    private static generateRecommendations(data: any[], config: GraphConfig): string[] {
+        const recommendations: string[] = [];
+        
+        if (data.length === 0) {
+            recommendations.push('Consider expanding the data query to include more records');
+            return recommendations;
+        }
+        
+        // Recommendations based on data quality
+        const quality = this.assessDataQuality(data);
+        if (quality.completeness < 80) {
+            recommendations.push('Data completeness is low - consider data cleaning');
+        }
+        if (quality.accuracy < 90) {
+            recommendations.push('Data accuracy could be improved - verify data sources');
+        }
+        
+        // Recommendations based on graph type
+        switch (config.type) {
+            case GraphType.BAR_CHART:
+                if (data.length > 20) {
+                    recommendations.push('Consider grouping categories for better readability');
+                }
+                break;
+            case GraphType.LINE_CHART:
+                if (data.length < 5) {
+                    recommendations.push('More data points recommended for trend analysis');
+                }
+                break;
+            case GraphType.PIE_CHART:
+                if (data.length > 8) {
+                    recommendations.push('Consider combining smaller segments into "Other" category');
+                }
+                break;
+            case GraphType.SCATTER_PLOT:
+                recommendations.push('Consider adding trend lines for pattern analysis');
+                break;
+        }
+        
+        // Medical-specific recommendations
+        if (config.category) {
+            switch (config.category) {
+                case MedicalDataCategory.LABORATORY_RESULTS:
+                    recommendations.push('Consider adding normal range indicators');
+                    break;
+                case MedicalDataCategory.MEDICATIONS:
+                    recommendations.push('Consider drug interaction analysis');
+                    break;
+                case MedicalDataCategory.VITAL_SIGNS:
+                    recommendations.push('Consider adding alert thresholds');
+                    break;
+            }
+        }
+        
+        return recommendations;
+    }
+}
 
 
 
@@ -82,7 +844,27 @@ export function medicalRoutes(): Router {
             // Chain parameters
             body('useChains').optional().isBoolean().withMessage('Use chains flag must be a boolean'),
             body('chainType').optional().isIn(['simple', 'sequential', 'router', 'multiprompt']).withMessage('Invalid chain type'),
-            body('preferredChain').optional().isString().withMessage('Preferred chain must be a string')
+            body('preferredChain').optional().isString().withMessage('Preferred chain must be a string'),
+            // Graph parameters
+            body('generateGraph').optional().isBoolean().withMessage('Generate graph flag must be a boolean'),
+            body('graphType').optional().isIn(Object.values(GraphType)).withMessage('Invalid graph type'),
+            body('graphCategory').optional().isIn(Object.values(MedicalDataCategory)).withMessage('Invalid medical data category'),
+            body('graphConfig').optional().isObject().withMessage('Graph configuration must be an object'),
+            body('graphConfig.xAxis').optional().isString().withMessage('X-axis field must be a string'),
+            body('graphConfig.yAxis').optional().isString().withMessage('Y-axis field must be a string'),
+            body('graphConfig.colorBy').optional().isString().withMessage('Color by field must be a string'),
+            body('graphConfig.sizeBy').optional().isString().withMessage('Size by field must be a string'),
+            body('graphConfig.groupBy').optional().isString().withMessage('Group by field must be a string'),
+            body('graphConfig.sortBy').optional().isString().withMessage('Sort by field must be a string'),
+            body('graphConfig.limit').optional().isInt({ min: 1, max: 1000 }).withMessage('Graph limit must be between 1 and 1000'),
+            body('graphConfig.aggregation').optional().isIn(['count', 'sum', 'avg', 'min', 'max', 'median']).withMessage('Invalid aggregation type'),
+            body('graphConfig.showTrends').optional().isBoolean().withMessage('Show trends flag must be a boolean'),
+            body('graphConfig.showOutliers').optional().isBoolean().withMessage('Show outliers flag must be a boolean'),
+            body('graphConfig.includeNulls').optional().isBoolean().withMessage('Include nulls flag must be a boolean'),
+            body('graphConfig.customColors').optional().isArray().withMessage('Custom colors must be an array'),
+            body('graphConfig.title').optional().isString().withMessage('Graph title must be a string'),
+            body('graphConfig.subtitle').optional().isString().withMessage('Graph subtitle must be a string'),
+            body('graphConfig.description').optional().isString().withMessage('Graph description must be a string')
         ],
         async (req: Request, res: Response) => {
             const startTime = performance.now();
@@ -128,7 +910,12 @@ export function medicalRoutes(): Router {
                     returnSQLExplanation = false,
                     // Chain parameters
                     chainType = 'simple',
-                    preferredChain = ''
+                    preferredChain = '',
+                    // Graph parameters
+                    generateGraph = false,
+                    graphType = GraphType.BAR_CHART,
+                    graphCategory = undefined,
+                    graphConfig = {}
                 } = req.body;
 
                 // Make useChains mutable so we can reset it if chains fail
@@ -623,141 +1410,165 @@ CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase(
                         }
 
                         const enhancedQuery = `
-You are a medical database SQL expert. Follow this strict process to write an accurate SQL query:
+You are an expert medical database SQL analyst with deep understanding of healthcare data structures. Your task is to understand the user's query intent and generate precise, accurate SQL queries.
 
-1. ANALYZE: First, ALWAYS explore the complete database schema using the sql_db_schema tool to understand available tables and columns.
-   - Pay special attention to actual table names (e.g., 'pgxtest_results' not 'pgxtestresults')
-   - Note that many column names use snake_case format (e.g., 'full_name' not 'fullname')
+QUERY ANALYSIS PROCESS:
 
-2. VALIDATE: Double-check the exact spelling and format of ALL column and table names:
-   - Use ONLY tables that actually exist in the schema (verify with sql_db_list_tables)
-   - Use ONLY column names that actually exist (check with sql_db_schema)
-   - Respect snake_case naming (e.g., 'patient_id', not 'patientid' or 'PatientID')
+1. UNDERSTAND THE SCOPE: 
+   - Analyze what the user is actually asking for
+   - Identify the core entities involved (patients, medications, tests, etc.)
+   - Determine if this is a count, summary, detailed list, or analysis query
+   - Consider time ranges, filters, and grouping requirements
 
-3. PLAN: Consider the relationships between tables and how to join them properly:
-   - Identify the correct foreign key relationships
-   - Ensure join columns exist in both tables
+2. EXPLORE SCHEMA INTELLIGENTLY:
+   - Use sql_db_schema to understand available tables and their relationships
+   - Identify the most relevant tables for the query scope
+   - Understand column data types and constraints
+   - Look for foreign key relationships between tables
 
-4. EXECUTE: Create a SQL query that correctly addresses the request using verified table and column names.
+3. SELECT APPROPRIATE COLUMNS:
+   - Choose columns that directly answer the user's question
+   - For patient queries: include relevant patient identifiers and demographics
+   - For medication queries: include drug names, dosages, dates, patient info
+   - For lab queries: include test names, results, dates, patient info
+   - For counts/summaries: use appropriate aggregation functions
+   - Avoid selecting unnecessary columns that don't serve the query purpose
 
+4. APPLY INTELLIGENT FILTERING:
+   - Add WHERE clauses only when the query implies specific conditions
+   - Use appropriate operators (>, <, =, LIKE, IN, etc.) based on data types
+   - Consider date ranges, value thresholds, or categorical filters as needed
+   - Don't add filters unless the user's query suggests them
+
+5. STRUCTURE THE QUERY LOGICALLY:
+   - Use appropriate JOINs when multiple tables are needed
+   - Apply GROUP BY when aggregations are required
+   - Use ORDER BY for meaningful result sorting
+   - Limit results if the query suggests a subset is needed
+
+CRITICAL GUIDELINES:
+- ALWAYS verify table and column names exist in the schema before using them
+- Use snake_case naming convention (e.g., 'patient_id', 'full_name')
+- Focus on answering the user's specific question, not providing extra data
+- Ensure the query will return results that directly address the user's intent
+- Test your understanding by asking: "Does this query answer exactly what the user asked?"
 ${versionSpecificInstructions}
 
-CRITICAL: This database uses snake_case for most identifiers. NEVER assume column or table names - always verify them first.
-${conversationalContext ? conversationalContext : ''}
-Query request: ${query}
+USER QUERY: ${query}
+
+Generate a SQL query that precisely answers this request using verified schema information.
 `;
                         console.log('📝 Enhanced query with schema information:', enhancedQuery.substring(0, 200) + '...');
 
-                        // Configure the sqlAgent to prioritize schema exploration before query generation
+                        // Configure the sqlAgent for intelligent query understanding and generation
                         const agentConfig = {
                             input: enhancedQuery,
-                            // Force the agent to always check schema first
-                            forceSchema: true
+                            // Allow intelligent decision-making about schema exploration
+                            // The agent will decide when schema exploration is needed based on query complexity
                         };
 
-                        // Enhanced callback system to capture ALL agent actions and encourage schema exploration
+                        // Enhanced callback system to track intelligent query understanding and generation
                         agentResult = await sqlAgent.call(agentConfig, {
                             callbacks: [{
                                 handleAgentAction: (action: any) => {
-                                    // Log ALL actions for debugging
-                                    console.log('🔍 Agent action:', JSON.stringify(action, null, 2));
+                                    // Log agent's decision-making process
+                                    console.log('🧠 Agent action:', action.tool);
+                                    console.log('🔍 Action input:', typeof action.toolInput === 'string' ? 
+                                        action.toolInput.substring(0, 100) + '...' : 
+                                        JSON.stringify(action.toolInput).substring(0, 100) + '...');
 
-                                    // Encourage schema exploration first
+                                    // Track schema exploration for complex queries
                                     if (action.tool === 'sql_db_schema') {
-                                        console.log('✅ Agent is checking database schema - good practice!');
-                                        debugInfo.sqlCorrections.push('Agent checked database schema first');
-
-                                        // Store this important step
+                                        console.log('✅ Agent intelligently exploring schema for query understanding');
+                                        debugInfo.sqlCorrections.push('Schema exploration for query scope analysis');
                                         intermediateSteps.push({
                                             tool: 'sql_db_schema',
                                             toolInput: action.toolInput,
-                                            note: 'Schema exploration is critical for accurate queries'
+                                            note: 'Intelligent schema exploration for query understanding'
                                         });
                                     }
 
-                                    // Capture any SQL-related actions, including query-checker and query-sql
+                                    // Track table listing for query scope
+                                    if (action.tool === 'sql_db_list_tables') {
+                                        console.log('📋 Agent checking available tables for query scope');
+                                        debugInfo.sqlCorrections.push('Table availability check for query scope');
+                                        intermediateSteps.push({
+                                            tool: 'sql_db_list_tables',
+                                            toolInput: action.toolInput,
+                                            note: 'Understanding available tables for query scope'
+                                        });
+                                    }
+
+                                    // Capture SQL generation with understanding
                                     if (action.tool === 'query-checker' || action.tool === 'query-sql') {
                                         const sql = String(action.toolInput);
-                                        // Store raw SQL before any cleaning
+                                        console.log('💡 Agent generating SQL based on query understanding');
                                         debugInfo.originalQueries.push(sql);
 
-                                        // Clean the SQL to extract only valid SQL
                                         const cleanedSql = cleanSQLQuery(sql);
                                         if (cleanedSql) {
                                             capturedSQLQueries.push(cleanedSql);
-                                            console.log(`✅ Captured SQL from ${action.tool}:`, cleanedSql);
+                                            console.log('✅ Generated intelligent SQL:', cleanedSql);
                                         }
                                     }
 
-                                    // Also capture SQL from standard SQL tools
+                                    // Track all SQL-related actions for comprehensive understanding
                                     if (action.tool === 'sql_db_query' ||
                                         action.tool === 'query_sql_db' ||
                                         action.tool === 'sql_db_schema' ||
                                         action.tool === 'sql_db_list_tables') {
 
-                                        console.log('🔍 Captured tool action:', action.tool);
-                                        console.log('🔍 Tool input:', action.toolInput);
-
-                                        // Store original query
-                                        if (typeof action.toolInput === 'string') {
-                                            debugInfo.originalQueries.push(action.toolInput);
-                                        }
-
+                                        console.log('🔧 Tool action for query understanding:', action.tool);
                                         intermediateSteps.push({
                                             tool: action.tool,
-                                            toolInput: action.toolInput
+                                            toolInput: action.toolInput,
+                                            note: 'Part of intelligent query understanding process'
                                         });
 
-                                        // If this looks like SQL, add it to our collection
+                                        // Capture SQL queries that demonstrate understanding
                                         if (typeof action.toolInput === 'string' &&
                                             (action.toolInput.toLowerCase().includes('select') ||
                                                 action.toolInput.toLowerCase().includes('from'))) {
 
-                                            // Clean the SQL to extract only valid SQL
                                             const cleanedSql = cleanSQLQuery(action.toolInput);
                                             if (cleanedSql) {
                                                 capturedSQLQueries.push(cleanedSql);
-                                                console.log('✅ Captured SQL from tool action:', cleanedSql);
+                                                console.log('✅ Captured intelligent SQL:', cleanedSql);
                                             }
                                         }
                                     }
                                     return action;
                                 },
                                 handleChainStart: (chain: any) => {
-                                    console.log('🔄 Chain started:', chain.name);
+                                    console.log('🧠 Starting intelligent query analysis:', chain.name);
                                 },
                                 handleChainEnd: (output: any) => {
-                                    console.log('🔄 Chain ended with output:', typeof output === 'string' ?
+                                    console.log('✅ Intelligent query analysis completed');
+                                    console.log('📊 Analysis output:', typeof output === 'string' ?
                                         output.substring(0, 200) + '...' :
                                         JSON.stringify(output).substring(0, 200) + '...');
                                 },
                                 handleToolStart: (tool: any) => {
-                                    console.log('🔧 Tool started:', tool.name);
-
-                                    // If we're about to run a SQL query, make sure we've checked schema first
-                                    if ((tool.name === 'sql_db_query' || tool.name === 'query_sql_db') &&
-                                        !intermediateSteps.some(s => s.tool === 'sql_db_schema')) {
-                                        console.log('⚠️ Warning: About to run SQL query without checking schema first');
-                                    }
+                                    console.log('🔧 Starting tool for query understanding:', tool.name);
                                 },
                                 handleToolEnd: (output: any) => {
-                                    console.log('🔧 Tool ended with output:', typeof output === 'string' ?
+                                    console.log('✅ Tool completed for query understanding');
+                                    console.log('📊 Tool output:', typeof output === 'string' ?
                                         output.substring(0, 200) + '...' :
                                         JSON.stringify(output).substring(0, 200) + '...');
 
-                                    // If this is schema output, save it for debugging
+                                    // Validate schema understanding
                                     if (output && typeof output === 'string' && output.includes('COLUMN_NAME')) {
-                                        console.log('📊 Schema information detected in output');
-                                        debugInfo.sqlCorrections.push('Schema examined before query generation');
+                                        console.log('📊 Schema information captured for intelligent query generation');
+                                        debugInfo.sqlCorrections.push('Schema understood for intelligent query generation');
                                     }
 
-                                    // Check if the tool output contains SQL results
+                                    // Capture SQL from intelligent analysis
                                     if (typeof output === 'string' && output.toLowerCase().includes('select')) {
-                                        // Clean the SQL to extract only valid SQL
                                         const cleanedSql = cleanSQLQuery(output);
                                         if (cleanedSql) {
                                             capturedSQLQueries.push(cleanedSql);
-                                            console.log('✅ Captured SQL from tool output:', cleanedSql);
+                                            console.log('✅ Captured SQL from intelligent analysis:', cleanedSql);
                                         }
                                     }
                                 }
@@ -1263,13 +2074,143 @@ Return only valid, semantic HTML.`;
                         await connection.end();
                     }
 
+                    // Process graph data if requested
+                    let graphData = null;
+                    const hasExplicitGraphConfig = graphType && graphConfig && Object.keys(graphConfig).length > 0;
+                    const shouldGenerateGraph = generateGraph || hasExplicitGraphConfig;
+                    let detectedGraphType: GraphType = GraphType.BAR_CHART;
+                    let detectedCategory: MedicalDataCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                    
+                    console.log(`🔍 Graph processing check: generateGraph=${generateGraph}, hasExplicitConfig=${hasExplicitGraphConfig}, shouldGenerate=${shouldGenerateGraph}`);
+                    console.log(`🔍 Rows data: ${Array.isArray(rows) ? rows.length : 'not array'} rows`);
+                    
+                    if (shouldGenerateGraph && Array.isArray(rows) && rows.length > 0) {
+                        try {
+                            let fullGraphConfig: GraphConfig;
+                            let detectedGraphType: GraphType;
+                            let detectedCategory: MedicalDataCategory;
+
+                            if (hasExplicitGraphConfig) {
+                                // Use explicit configuration
+                                console.log(`📊 Using explicit graph configuration`);
+                                fullGraphConfig = {
+                                    type: graphType,
+                                    category: graphCategory,
+                                    xAxis: graphConfig.xAxis,
+                                    yAxis: graphConfig.yAxis,
+                                    colorBy: graphConfig.colorBy,
+                                    sizeBy: graphConfig.sizeBy,
+                                    groupBy: graphConfig.groupBy,
+                                    sortBy: graphConfig.sortBy,
+                                    limit: graphConfig.limit,
+                                    aggregation: graphConfig.aggregation,
+                                    timeFormat: graphConfig.timeFormat,
+                                    showTrends: graphConfig.showTrends,
+                                    showOutliers: graphConfig.showOutliers,
+                                    includeNulls: graphConfig.includeNulls,
+                                    customColors: graphConfig.customColors,
+                                    title: graphConfig.title,
+                                    subtitle: graphConfig.subtitle,
+                                    description: graphConfig.description
+                                };
+                                detectedGraphType = graphType;
+                                detectedCategory = graphCategory || MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                            } else {
+                                // Use AI to analyze data structure
+                                console.log(`🤖 Using AI to analyze data structure for graph generation`);
+                                const analysis = await AIGraphAnalyzer.analyzeDataWithAI(rows, langchainApp.getLLM());
+                                fullGraphConfig = analysis.config;
+                                detectedGraphType = analysis.type;
+                                detectedCategory = analysis.category;
+                            }
+
+                            // Process the graph data
+                            console.log(`📊 Processing ${rows.length} rows with config:`, JSON.stringify(fullGraphConfig, null, 2));
+                            graphData = GraphProcessor.processGraphData(rows, fullGraphConfig);
+                            console.log(`✅ Graph data processed successfully: ${graphData.data.length} data points`);
+                            console.log(`📊 Sample graph data:`, JSON.stringify(graphData.data.slice(0, 3), null, 2));
+                        } catch (graphError: any) {
+                            console.error('❌ Graph processing failed:', graphError.message);
+                            graphData = {
+                                type: graphType || GraphType.BAR_CHART,
+                                data: [],
+                                config: { type: graphType || GraphType.BAR_CHART },
+                                metadata: {
+                                    totalRecords: 0,
+                                    processedAt: new Date().toISOString(),
+                                    dataQuality: { completeness: 0, accuracy: 0, consistency: 0 },
+                                    insights: ['Graph processing failed'],
+                                    recommendations: ['Check data format and graph configuration']
+                                }
+                            };
+                        }
+                    }
+
+                    // Always include graph data structure if graph parameters are present, even if processing failed
+                    if (shouldGenerateGraph && !graphData) {
+                        console.log(`⚠️ Graph processing was requested but failed or no data available`);
+                        
+                        let fallbackType = GraphType.BAR_CHART;
+                        let fallbackCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                        let fallbackConfig: GraphConfig;
+
+                        if (hasExplicitGraphConfig) {
+                            fallbackType = graphType;
+                            fallbackCategory = graphCategory || MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                            fallbackConfig = {
+                                type: graphType,
+                                category: graphCategory,
+                                xAxis: graphConfig?.xAxis,
+                                yAxis: graphConfig?.yAxis,
+                                colorBy: graphConfig?.colorBy,
+                                title: graphConfig?.title || 'Graph Analysis'
+                            };
+                        } else {
+                            // Use AI for fallback analysis
+                            try {
+                                const analysis = await AIGraphAnalyzer.analyzeDataWithAI(rows, langchainApp.getLLM());
+                                fallbackType = analysis.type;
+                                fallbackCategory = analysis.category;
+                                fallbackConfig = analysis.config;
+                            } catch (error) {
+                                console.error('❌ AI fallback analysis failed:', error);
+                                fallbackType = GraphType.BAR_CHART;
+                                fallbackCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                                fallbackConfig = {
+                                    type: GraphType.BAR_CHART,
+                                    category: MedicalDataCategory.PATIENT_DEMOGRAPHICS,
+                                    title: 'Data Analysis'
+                                };
+                            }
+                        }
+
+                        graphData = {
+                            type: fallbackType,
+                            data: [],
+                            config: fallbackConfig,
+                            metadata: {
+                                totalRecords: 0,
+                                processedAt: new Date().toISOString(),
+                                dataQuality: { completeness: 0, accuracy: 0, consistency: 0 },
+                                insights: ['No data available for graph processing'],
+                                recommendations: ['Check if the query returned data and graph configuration is correct']
+                            }
+                        };
+                    }
+
                     // Return the raw SQL results with descriptions
                     const response = {
                         success: true,
                         query_processed: query,
                         sql_extracted: extractedSQL,
                         sql_final: finalSQL,
-                        sql_results: { resultExplanation, sql_final: rows, processing_time: `${processingTime.toFixed(2)}ms` }, // Raw SQL results
+                        sql_results: { 
+                            resultExplanation, 
+                            sql_final: rows, 
+                            processing_time: `${processingTime.toFixed(2)}ms`,
+                            // Add graph data to sql_results if available
+                            ...(graphData ? { graph_data: graphData } : {})
+                        }, // Raw SQL results with optional graph data
                         result_count: Array.isArray(rows) ? rows.length : 0,
                         field_info: fields ? fields.map((field: any) => ({
                             name: field.name,
@@ -1311,13 +2252,48 @@ Return only valid, semantic HTML.`;
                             version_details: mysqlVersionInfo,
                             query_adapted_to_version: !!mysqlVersionInfo
                         },
+                        // Add graph processing info if graphs were requested
+                        ...(shouldGenerateGraph ? {
+                            graph_processing: {
+                                requested: shouldGenerateGraph,
+                                type: detectedGraphType || graphType,
+                                category: detectedCategory || graphCategory,
+                                success: !!graphData && graphData.data.length > 0,
+                                data_points: graphData ? graphData.data.length : 0,
+                                explicit_generate_graph: generateGraph,
+                                auto_detected: !hasExplicitGraphConfig,
+                                auto_analyzed: !hasExplicitGraphConfig,
+                                debug_info: {
+                                    should_generate: shouldGenerateGraph,
+                                    has_explicit_config: hasExplicitGraphConfig,
+                                    rows_count: Array.isArray(rows) ? rows.length : 0,
+                                    analysis_method: hasExplicitGraphConfig ? 'explicit_config' : 'auto_analysis'
+                                }
+                            }
+                        } : {}),
                         timestamp: new Date().toISOString()
                     };
 
                     res.json(response);
 
+                    // Cleanup: Close database connections to prevent "Too many connections" errors
+                    try {
+                        await databaseService.closeOrganizationConnections(organizationId);
+                        console.log(`🔌 Closed database connections for organization: ${organizationId}`);
+                    } catch (cleanupError) {
+                        console.error(`❌ Error closing database connections for organization ${organizationId}:`, cleanupError);
+                    }
+
                 } catch (sqlError: any) {
                     console.error('❌ SQL execution failed:', sqlError.message);
+
+                    // Cleanup: Close database connections to prevent "Too many connections" errors
+                    try {
+                        await databaseService.closeOrganizationConnections(organizationId);
+                        console.log(`🔌 Closed database connections for organization: ${organizationId}`);
+                    } catch (cleanupError) {
+                        console.error(`❌ Error closing database connections for organization ${organizationId}:`, cleanupError);
+                    }
 
                     // Enhanced error analysis and suggestions
                     const suggestedFixes: string[] = [];
@@ -1738,6 +2714,9 @@ Avoid technical jargon and focus on helping the user get the information they ne
                 const processingTime = performance.now() - startTime;
                 console.error('❌ Manual SQL query processing error:', error);
 
+                // Cleanup: Log connection management for debugging
+                console.log(`🔌 API request failed with general error`);
+
                 // Ensure these variables are accessible in the error handler
                 const conversational = req.body.conversational === true;
                 const sessionId = req.body.sessionId || uuidv4();
@@ -1954,4 +2933,409 @@ Avoid technical jargon and focus on helping the user get the information they ne
     // Its functionality has been integrated into /query-sql-manual
 
     return router;
+}
+
+
+
+// AI-Powered Graph Configuration Analyzer
+class AIGraphAnalyzer {
+    /**
+     * Use OpenAI to analyze data structure and determine optimal graph configuration
+     */
+    static async analyzeDataWithAI(data: any[], llm: any): Promise<{ type: GraphType; config: GraphConfig; category: MedicalDataCategory }> {
+        console.log("🤖 AI analyzing data with AI", data);
+        if (!data || data.length === 0) {
+            return {
+                type: GraphType.BAR_CHART,
+                config: { type: GraphType.BAR_CHART, title: 'No Data Available' },
+                category: MedicalDataCategory.PATIENT_DEMOGRAPHICS
+            };
+        }
+
+        try {
+            // Take a sample of data for analysis (max 10 rows to avoid token limits)
+            const sampleData = data.slice(0, Math.min(10, data.length));
+            const columns = Object.keys(sampleData[0] || {});
+            
+            console.log(`🤖 AI analyzing ${sampleData.length} sample rows with ${columns.length} columns`);
+            console.log(`🤖 Sample data:`, JSON.stringify(sampleData.slice(0, 3), null, 2));
+
+            // Create analysis prompt for OpenAI
+            const analysisPrompt = this.createAnalysisPrompt(sampleData, columns);
+            console.log(`🤖 Analysis prompt (first 500 chars):`, analysisPrompt.substring(0, 500) + '...');
+            
+            // Get AI analysis
+            const aiResponse = await llm.invoke(analysisPrompt);
+            console.log(`🤖 AI Response:`, aiResponse);
+            console.log(`🤖 AI Response length:`, aiResponse.length);
+
+            // Parse AI response to extract graph configuration
+            const graphConfig = this.parseAIResponse(aiResponse, columns, data.length);
+            
+            console.log(`🎯 AI determined: ${graphConfig.type} for ${graphConfig.category}`);
+            console.log(`🎯 AI config:`, JSON.stringify(graphConfig.config, null, 2));
+            
+            return graphConfig;
+        } catch (error: any) {
+            console.error('❌ AI analysis failed:', error.message);
+            console.error('❌ Full error:', error);
+            // Fallback to basic analysis
+            return this.fallbackAnalysis(data);
+        }
+    }
+
+    /**
+     * Analyze data types dynamically
+     */
+    private static analyzeDataTypes(data: any[], columns: string[]): { numeric: string[], categorical: string[], date: string[] } {
+        const numeric: string[] = [];
+        const categorical: string[] = [];
+        const date: string[] = [];
+
+        for (const column of columns) {
+            const values = data.map(row => row[column]).filter(v => v !== null && v !== undefined);
+            if (values.length === 0) continue;
+
+            // Check if column contains dates
+            const datePattern = /^\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}|\d{2}-\d{2}-\d{4}/;
+            const isDate = values.some(v => datePattern.test(String(v)));
+            if (isDate) {
+                date.push(column);
+                continue;
+            }
+
+            // Check if column contains numeric values
+            const numericPattern = /^-?\d+(\.\d+)?$/;
+            const isNumeric = values.every(v => numericPattern.test(String(v)));
+            if (isNumeric) {
+                numeric.push(column);
+                continue;
+            }
+
+            // Check for numeric values with units (like "19MG", "100mg", "5.5kg")
+            const unitPattern = /^\d+(\.\d+)?[a-zA-Z]+$/;
+            const hasNumericWithUnits = values.some(v => unitPattern.test(String(v)));
+            if (hasNumericWithUnits) {
+                numeric.push(column);
+                continue;
+            }
+
+            // Default to categorical
+            categorical.push(column);
+        }
+
+        return { numeric, categorical, date };
+    }
+
+    /**
+     * Create analysis prompt for OpenAI
+     */
+    private static createAnalysisPrompt(sampleData: any[], columns: string[]): string {
+        const dataPreview = sampleData.map((row, index) => {
+            const preview = Object.entries(row).map(([key, value]) => `${key}: ${value}`).join(', ');
+            return `Row ${index + 1}: {${preview}}`;
+        }).join('\n');
+
+        // Analyze data types dynamically
+        const dataTypes = this.analyzeDataTypes(sampleData, columns);
+        const numericColumns = dataTypes.numeric;
+        const categoricalColumns = dataTypes.categorical;
+        const dateColumns = dataTypes.date;
+
+        return `You are a medical data visualization expert. Analyze the following sample data and determine the optimal graph configuration.
+
+SAMPLE DATA (First 3 records):
+${dataPreview}
+
+COLUMNS: ${columns.join(', ')}
+
+DATA TYPE ANALYSIS:
+- Numeric columns: ${numericColumns.join(', ') || 'None'}
+- Categorical columns: ${categoricalColumns.join(', ') || 'None'}
+- Date columns: ${dateColumns.join(', ') || 'None'}
+
+ANALYSIS REQUIREMENTS:
+1. Determine the medical data category based on column names and data content
+2. Identify the best graph type based on data structure and relationships
+3. Determine appropriate axis mappings (xAxis, yAxis, colorBy) based on data types
+4. Generate meaningful title and description that explains the visualization
+
+DYNAMIC ANALYSIS GUIDELINES:
+- Analyze the actual data structure and content to determine the most appropriate visualization
+- Consider the relationships between fields and what insights would be most valuable
+- For numeric values with units (like "19MG", "100mg", "5.5kg"), the system will automatically extract numeric parts
+- Choose graph types that best represent the data relationships and patterns
+- Consider aggregation if there are multiple records per category
+- Use categorical columns for x-axis, numeric columns for y-axis
+- Use date columns for time-series visualizations
+- Consider color coding for additional dimensions
+- The system automatically combines data with the same labels to prevent duplicates (e.g., multiple records for "Aspirin" will be summed/averaged)
+- For charts with categorical data, consider whether you want to show individual records or aggregated values
+- Aggregation options: "sum" (default), "avg" (average), "count" (count of records), "max" (maximum value), "min" (minimum value)
+
+AVAILABLE GRAPH TYPES:
+- bar_chart: For categorical comparisons and distributions
+- line_chart: For time series, trends, and continuous data
+- pie_chart: For proportional data and percentages
+- scatter_plot: For correlation analysis between two numeric variables
+- histogram: For distribution analysis of single numeric variable
+- box_plot: For statistical distribution and outlier detection
+- heatmap: For matrix data and correlation matrices
+- timeline: For chronological events and time-based data
+- stacked_bar: For grouped categorical data with multiple series
+- grouped_bar: For multiple series comparison
+- multi_line: For multiple time series on same chart
+- area_chart: For cumulative data and filled areas
+- bubble_chart: For 3-dimensional data (x, y, size)
+- donut_chart: For proportional data with center space
+- waterfall: For cumulative impact analysis
+
+MEDICAL CATEGORIES:
+- patient_demographics: Age, gender, location, ethnicity data
+- laboratory_results: Test results, lab values, measurements
+- medications: Drug names, dosages, prescriptions
+- vital_signs: Blood pressure, heart rate, temperature, etc.
+- diagnoses: Medical conditions, diseases, diagnoses
+- treatments: Procedures, therapies, interventions
+- genetic_data: DNA, genetic markers, genomic data
+- pharmacogenomics: Drug-gene interactions, genetic drug responses
+
+RESPONSE FORMAT (JSON only):
+{
+  "type": "graph_type",
+  "category": "medical_category",
+  "config": {
+    "xAxis": "column_name",
+    "yAxis": "column_name",
+    "colorBy": "column_name",
+    "aggregation": "sum|avg|count|max|min",
+    "title": "Graph Title",
+    "subtitle": "Graph Subtitle",
+    "description": "Graph Description"
+  }
+}
+
+Analyze the data structure, content, and relationships to determine the optimal visualization configuration. Respond with JSON format only.`;
+    }
+
+    /**
+     * Parse AI response to extract graph configuration
+     */
+    private static parseAIResponse(aiResponse: any, columns: string[], totalRecords: number): { type: GraphType; config: GraphConfig; category: MedicalDataCategory } {
+        try {
+            console.log(`🔍 Parsing AI response...`);
+            
+            // Handle both string and AIMessage objects
+            let responseContent: string;
+            if (typeof aiResponse === 'string') {
+                responseContent = aiResponse;
+            } else if (aiResponse && typeof aiResponse === 'object' && aiResponse.content) {
+                responseContent = aiResponse.content;
+            } else {
+                console.error('❌ Invalid AI response format:', aiResponse);
+                throw new Error('Invalid AI response format');
+            }
+            
+            console.log(`🔍 AI Response content:`, responseContent);
+            
+            // Extract JSON from AI response
+            const jsonMatch = responseContent.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+                console.error('❌ No JSON found in AI response');
+                throw new Error('No JSON found in AI response');
+            }
+
+            const jsonStr = jsonMatch[0];
+            console.log(`🔍 Extracted JSON:`, jsonStr);
+            
+            const parsed = JSON.parse(jsonStr);
+            console.log(`🔍 Parsed config:`, parsed);
+            
+            // Validate and map the response
+            const graphType = this.validateGraphType(parsed.type);
+            const category = this.validateMedicalCategory(parsed.category);
+            
+            console.log(`🔍 Validated: type=${graphType}, category=${category}`);
+            
+            const config: GraphConfig = {
+                type: graphType,
+                category,
+                xAxis: parsed.config?.xAxis,
+                yAxis: parsed.config?.yAxis,
+                colorBy: parsed.config?.colorBy,
+                title: parsed.config?.title || 'AI-Generated Analysis',
+                subtitle: parsed.config?.subtitle || `Auto-generated from ${totalRecords} records`,
+                description: parsed.config?.description || `AI-determined ${graphType} visualization for ${category} data`
+            };
+
+            console.log(`🔍 Final config:`, config);
+            return { type: graphType, config, category };
+        } catch (error: any) {
+            console.error('❌ Failed to parse AI response:', error.message);
+            console.error('❌ AI Response was:', aiResponse);
+            return this.fallbackAnalysis([]);
+        }
+    }
+
+    /**
+     * Validate and map graph type
+     */
+    private static validateGraphType(type: string): GraphType {
+        const validTypes = Object.values(GraphType);
+        const normalizedType = type.toLowerCase().replace(/[^a-z]/g, '_');
+        
+        if (validTypes.includes(normalizedType as GraphType)) {
+            return normalizedType as GraphType;
+        }
+        
+        // Map common variations
+        const typeMapping: Record<string, GraphType> = {
+            'bar': GraphType.BAR_CHART,
+            'line': GraphType.LINE_CHART,
+            'pie': GraphType.PIE_CHART,
+            'scatter': GraphType.SCATTER_PLOT,
+            'histogram': GraphType.HISTOGRAM,
+            'box': GraphType.BOX_PLOT,
+            'heatmap': GraphType.HEATMAP,
+            'timeline': GraphType.TIMELINE,
+            'stacked': GraphType.STACKED_BAR,
+            'grouped': GraphType.GROUPED_BAR,
+            'multi_line': GraphType.MULTI_LINE,
+            'area': GraphType.AREA_CHART,
+            'bubble': GraphType.BUBBLE_CHART,
+            'donut': GraphType.DONUT_CHART,
+            'waterfall': GraphType.WATERFALL
+        };
+
+        for (const [key, value] of Object.entries(typeMapping)) {
+            if (normalizedType.includes(key)) {
+                return value;
+            }
+        }
+
+        return GraphType.BAR_CHART; // Default fallback
+    }
+
+    /**
+     * Validate and map medical category
+     */
+    private static validateMedicalCategory(category: string): MedicalDataCategory {
+        const validCategories = Object.values(MedicalDataCategory);
+        const normalizedCategory = category.toLowerCase().replace(/[^a-z]/g, '_');
+        
+        if (validCategories.includes(normalizedCategory as MedicalDataCategory)) {
+            return normalizedCategory as MedicalDataCategory;
+        }
+        
+        // Map common variations
+        const categoryMapping: Record<string, MedicalDataCategory> = {
+            'patient': MedicalDataCategory.PATIENT_DEMOGRAPHICS,
+            'demographics': MedicalDataCategory.PATIENT_DEMOGRAPHICS,
+            'lab': MedicalDataCategory.LABORATORY_RESULTS,
+            'laboratory': MedicalDataCategory.LABORATORY_RESULTS,
+            'medication': MedicalDataCategory.MEDICATIONS,
+            'drug': MedicalDataCategory.MEDICATIONS,
+            'vital': MedicalDataCategory.VITAL_SIGNS,
+            'diagnosis': MedicalDataCategory.DIAGNOSES,
+            'treatment': MedicalDataCategory.TREATMENTS,
+            'genetic': MedicalDataCategory.GENETIC_DATA,
+            'pharmacogenomic': MedicalDataCategory.PHARMACOGENOMICS,
+            'pgx': MedicalDataCategory.PHARMACOGENOMICS
+        };
+
+        for (const [key, value] of Object.entries(categoryMapping)) {
+            if (normalizedCategory.includes(key)) {
+                return value;
+            }
+        }
+
+        return MedicalDataCategory.PATIENT_DEMOGRAPHICS; // Default fallback
+    }
+
+    /**
+     * Fallback analysis when AI fails - Dynamic approach
+     */
+    private static fallbackAnalysis(data: any[]): { type: GraphType; config: GraphConfig; category: MedicalDataCategory } {
+        if (data.length === 0) {
+            return {
+                type: GraphType.BAR_CHART,
+                config: {
+                    type: GraphType.BAR_CHART,
+                    title: 'No Data Available',
+                    subtitle: 'Fallback analysis',
+                    description: 'No data to visualize'
+                },
+                category: MedicalDataCategory.PATIENT_DEMOGRAPHICS
+            };
+        }
+
+        const sampleRow = data[0];
+        const columns = Object.keys(sampleRow);
+        
+        console.log(`🔍 Dynamic fallback analysis - Columns:`, columns);
+        console.log(`🔍 Dynamic fallback analysis - Sample row:`, sampleRow);
+        
+        // Dynamic analysis based on data structure
+        const numericColumns = columns.filter(col => {
+            const sampleValue = sampleRow[col];
+            return typeof sampleValue === 'number' || 
+                   (typeof sampleValue === 'string' && /^\d+/.test(sampleValue));
+        });
+        
+        const categoricalColumns = columns.filter(col => {
+            const sampleValue = sampleRow[col];
+            return typeof sampleValue === 'string' && !numericColumns.includes(col);
+        });
+        
+        console.log(`🔍 Dynamic analysis - Numeric columns:`, numericColumns);
+        console.log(`🔍 Dynamic analysis - Categorical columns:`, categoricalColumns);
+        
+        // Choose best visualization based on data structure
+        if (numericColumns.length >= 2) {
+            // Multiple numeric columns - good for scatter plot or correlation
+            return {
+                type: GraphType.SCATTER_PLOT,
+                config: {
+                    type: GraphType.SCATTER_PLOT,
+                    category: MedicalDataCategory.PATIENT_DEMOGRAPHICS,
+                    xAxis: numericColumns[0],
+                    yAxis: numericColumns[1],
+                    title: 'Data Correlation Analysis',
+                    subtitle: 'Dynamic correlation analysis',
+                    description: 'Analysis of relationships between numeric fields'
+                },
+                category: MedicalDataCategory.PATIENT_DEMOGRAPHICS
+            };
+        } else if (categoricalColumns.length > 0 && numericColumns.length > 0) {
+            // Categorical vs numeric - good for bar chart
+            return {
+                type: GraphType.BAR_CHART,
+                config: {
+                    type: GraphType.BAR_CHART,
+                    category: MedicalDataCategory.PATIENT_DEMOGRAPHICS,
+                    xAxis: categoricalColumns[0],
+                    yAxis: numericColumns[0],
+                    title: 'Data Distribution Analysis',
+                    subtitle: 'Dynamic distribution analysis',
+                    description: 'Analysis of categorical vs numeric data'
+                },
+                category: MedicalDataCategory.PATIENT_DEMOGRAPHICS
+            };
+        } else {
+            // Generic fallback
+            return {
+                type: GraphType.BAR_CHART,
+                config: {
+                    type: GraphType.BAR_CHART,
+                    category: MedicalDataCategory.PATIENT_DEMOGRAPHICS,
+                    xAxis: columns[0],
+                    yAxis: columns[1],
+                    title: 'Data Analysis',
+                    subtitle: 'Dynamic fallback analysis',
+                    description: 'Dynamic chart visualization'
+                },
+                category: MedicalDataCategory.PATIENT_DEMOGRAPHICS
+            };
+        }
+    }
 }

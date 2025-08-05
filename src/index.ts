@@ -2520,6 +2520,10 @@ Execute the query now with automatic schema discovery:`;
     return this.sqlDatabase;
   }
 
+  public getLLM() {
+    return this.llm;
+  }
+
   // ========== PUBLIC ENHANCED QUERY INTELLIGENCE METHODS ==========
 
   // Parse SQL Agent response into JSON array of records using enhanced parser
