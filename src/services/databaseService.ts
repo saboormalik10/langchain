@@ -1,5 +1,5 @@
 import * as dotenv from 'dotenv';
-import { Pool } from 'pg';
+import { Pool, QueryResult } from 'pg';
 import mysql from 'mysql2/promise';
 import CryptoJS from 'crypto-js';
 
@@ -186,6 +186,9 @@ class DatabaseService {
         try {
             const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
 
+            if (dbConfig.type.toLocaleLowerCase() !== 'mysql' && dbConfig.type.toLocaleLowerCase() !== 'mariadb') {
+                throw new Error(`Database type mismatch: expected 'mysql' or 'mariadb' but got '${dbConfig.type.toLocaleLowerCase()}'`);
+            }
 
             console.log(`🔌 Creating MySQL connection for organization ${organizationId} to ${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`);
 
@@ -208,53 +211,101 @@ class DatabaseService {
     }
 
     /**
-     * Test organization database connection
+     * Create PostgreSQL connection for organization
      */
-    async testOrganizationConnection(organizationId: string): Promise<boolean> {
-        let connection: mysql.Connection | null = null;
+    async createOrganizationPostgreSQLConnection(organizationId: string): Promise<any> {
         try {
-            connection = await this.createOrganizationMySQLConnection(organizationId);
+            const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
 
-            // Test the connection with a simple query
-            await connection.execute('SELECT 1 as test');
-
-            console.log(`✅ Database connection test successful for organization ${organizationId}`);
-            return true;
-        } catch (error) {
-            console.error(`❌ Database connection test failed for organization ${organizationId}:`, error);
-            return false;
-        } finally {
-            if (connection) {
-                await connection.end();
+            if (dbConfig.type.toLocaleLowerCase() !== 'postgresql') {
+                throw new Error(`Database type mismatch: expected 'postgresql' but got '${dbConfig.type.toLocaleLowerCase()}'`);
             }
+
+            console.log(`🔌 Creating PostgreSQL connection for organization ${organizationId} to ${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`);
+
+            const { Client } = require('pg');
+            const client = new Client({
+                host: dbConfig.host,
+                port: dbConfig.port,
+                database: dbConfig.database,
+                user: dbConfig.username,
+                password: dbConfig.password,
+                connectionTimeoutMillis: 60000,
+                ssl: {
+                    rejectUnauthorized: false,
+                    sslmode: 'require'
+                }
+            });
+
+            await client.connect();
+            console.log(`✅ PostgreSQL connection established for organization ${organizationId}`);
+            return client;
+        } catch (error) {
+            console.error(`❌ Failed to create PostgreSQL connection for organization ${organizationId}:`, error);
+            throw new Error(`Failed to create PostgreSQL connection for organization ${organizationId}: ${(error as Error).message}`);
         }
     }
 
     /**
-     * Get all tables from organization database
+     * Test organization database connection
+     */
+    async testOrganizationConnection(organizationId: string): Promise<boolean> {
+        try {
+            const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
+            console.log('dbConfig', dbConfig);
+            if (dbConfig.type.toLocaleLowerCase() === 'mysql' || dbConfig.type.toLocaleLowerCase() === 'mariadb') {
+                console.log('HI');       
+                const connection = await this.createOrganizationMySQLConnection(organizationId);
+                await connection.ping();
+                await connection.end();
+                console.log(`✅ MySQL connection test successful for organization ${organizationId}`);
+                return true;
+            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                const client = await this.createOrganizationPostgreSQLConnection(organizationId);
+                await client.query('SELECT 1');
+                await client.end();
+                console.log(`✅ PostgreSQL connection test successful for organization ${organizationId}`);
+                return true;
+            } else {
+                throw new Error(`Unsupported database type: ${dbConfig.type.toLocaleLowerCase()}`);
+            }
+        } catch (error) {
+            console.error(`❌ Database connection test failed for organization ${organizationId}:`, error);
+            return false;
+        }
+    }
+
+    /**
+     * Get organization tables based on database type
      */
     async getOrganizationTables(organizationId: string): Promise<string[]> {
-        let connection: mysql.Connection | null = null;
         try {
-            connection = await this.createOrganizationMySQLConnection(organizationId);
             const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
-
-            const [rows] = await connection.execute(
-                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                [dbConfig.database]
-            );
-
-            if (Array.isArray(rows)) {
-                return rows.map((row: any) => row.TABLE_NAME);
+            
+            if (dbConfig.type.toLocaleLowerCase() === 'mysql' || dbConfig.type.toLocaleLowerCase() === 'mariadb') {
+                const connection = await this.createOrganizationMySQLConnection(organizationId);
+                const [tables] = await connection.execute(
+                    "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                    [dbConfig.database]
+                );
+                await connection.end();
+                
+                return (tables as any[]).map((table: any) => table.TABLE_NAME);
+            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                const client = await this.createOrganizationPostgreSQLConnection(organizationId);
+                const result = await client.query(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                );
+                await client.end();
+                
+                const rows = (result as any).rows || [];
+                return rows.map((row: any) => row.tablename);
+            } else {
+                throw new Error(`Unsupported database type: ${dbConfig.type.toLocaleLowerCase()}`);
             }
-            return [];
         } catch (error) {
             console.error(`❌ Failed to get tables for organization ${organizationId}:`, error);
-            throw error;
-        } finally {
-            if (connection) {
-                await connection.end();
-            }
+            throw new Error(`Failed to get tables for organization ${organizationId}: ${(error as Error).message}`);
         }
     }
 
@@ -306,6 +357,89 @@ class DatabaseService {
             if (connection) {
                 await connection.end();
             }
+        }
+    }
+
+    /**
+     * Get PostgreSQL version for organization database
+     */
+    async getOrganizationPostgreSQLVersion(organizationId: string): Promise<{
+        full: string;
+        major: number;
+        minor: number;
+        patch: number;
+        supportsJSON: boolean;
+        supportsWindowFunctions: boolean;
+        supportsCTE: boolean;
+        supportsRegex: boolean;
+    } | null> {
+        let client: any = null;
+        try {
+            client = await this.createOrganizationPostgreSQLConnection(organizationId);
+
+            const result = await client.query('SELECT version() as version');
+            if (result && result.rows && result.rows[0] && result.rows[0].version) {
+                const versionString = result.rows[0].version;
+
+                // Parse version string (PostgreSQL format: "PostgreSQL 15.4 on x86_64-pc-linux-gnu...")
+                const versionMatch = versionString.match(/PostgreSQL (\d+)\.(\d+)(?:\.(\d+))?/);
+                if (versionMatch) {
+                    const major = parseInt(versionMatch[1]);
+                    const minor = parseInt(versionMatch[2]);
+                    const patch = parseInt(versionMatch[3] || '0');
+
+                    return {
+                        full: versionString,
+                        major,
+                        minor,
+                        patch,
+                        supportsJSON: major >= 9, // JSON support introduced in PostgreSQL 9.2
+                        supportsWindowFunctions: major >= 8, // Window functions available since PostgreSQL 8.4
+                        supportsCTE: major >= 8, // CTE support available since PostgreSQL 8.4
+                        supportsRegex: true
+                    };
+                }
+            }
+            return null;
+        } catch (error) {
+            console.error(`❌ Failed to get PostgreSQL version for organization ${organizationId}:`, error);
+            return null;
+        } finally {
+            if (client) {
+                await client.end();
+            }
+        }
+    }
+
+    /**
+     * Get database version for organization (supports both MySQL and PostgreSQL)
+     */
+    async getOrganizationDatabaseVersion(organizationId: string): Promise<{
+        full: string;
+        major: number;
+        minor: number;
+        patch: number;
+        supportsJSON: boolean;
+        supportsWindowFunctions: boolean;
+        supportsCTE: boolean;
+        supportsRegex: boolean;
+        databaseType: string;
+    } | null> {
+        try {
+            const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
+            
+            if (dbConfig.type.toLocaleLowerCase() === 'mysql' || dbConfig.type.toLocaleLowerCase() === 'mariadb') {
+                const mysqlVersion = await this.getOrganizationMySQLVersion(organizationId);
+                return mysqlVersion ? { ...mysqlVersion, databaseType: 'mysql' } : null;
+            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                const postgresVersion = await this.getOrganizationPostgreSQLVersion(organizationId);
+                return postgresVersion ? { ...postgresVersion, databaseType: 'postgresql' } : null;
+            } else {
+                throw new Error(`Unsupported database type: ${dbConfig.type.toLocaleLowerCase()}`);
+            }
+        } catch (error) {
+            console.error(`❌ Failed to get database version for organization ${organizationId}:`, error);
+            return null;
         }
     }
 

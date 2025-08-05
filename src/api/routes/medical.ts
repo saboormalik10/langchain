@@ -222,36 +222,61 @@ export function medicalRoutes(): Router {
                 // We'll just do minimal setup to ensure the agent understands the task
                 console.log('📊 Preparing to let sqlAgent explore database schema');
 
-                // Declare connection variable for later use
-                let connection;
+                // Get database configuration to determine type
+                const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                console.log(`📊 Database type: ${dbConfig.type.toLocaleLowerCase()}`);
 
                 // Get minimal database information to guide the agent
                 try {
-                    connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                    const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                    let tables: string[] = [];
 
-                    // Just get a list of tables to verify they exist
-                    // The sqlAgent will get detailed schema information using its own tools
-                    console.log('📊 Getting high-level database structure');
-                    const [tables] = await connection.execute(
-                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                        [dbConfig.database]
-                    );
+                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                        // MySQL connection and table discovery
+                        const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                        console.log('📊 Getting high-level MySQL database structure');
+                        
+                        const [tableResults] = await connection.execute(
+                            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                            [dbConfig.database]
+                        );
 
-                    if (Array.isArray(tables) && tables.length > 0) {
-                        const actualTables = tables.map((table: any) => table.TABLE_NAME);
-                        console.log('✅ Database contains these tables:', actualTables.join(', '));
-                        debugInfo.sqlCorrections.push(`Available tables: ${actualTables.join(', ')}`);
+                        if (Array.isArray(tableResults) && tableResults.length > 0) {
+                            tables = tableResults.map((table: any) => table.TABLE_NAME);
+                            console.log('✅ MySQL database contains these tables:', tables.join(', '));
+                            debugInfo.sqlCorrections.push(`Available tables: ${tables.join(', ')}`);
+                        } else {
+                            console.log('⚠️ No tables found in the MySQL database');
+                        }
+
+                        await connection.end();
+                        console.log('✅ Basic MySQL database structure check complete');
+
+                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                        // PostgreSQL connection and table discovery
+                        const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                        console.log('📊 Getting high-level PostgreSQL database structure');
+                        
+                        const result = await client.query(
+                            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                        );
+
+                        if (result.rows && result.rows.length > 0) {
+                            tables = result.rows.map((row: any) => row.tablename);
+                            console.log('✅ PostgreSQL database contains these tables:', tables.join(', '));
+                            debugInfo.sqlCorrections.push(`Available tables: ${tables.join(', ')}`);
+                        } else {
+                            console.log('⚠️ No tables found in the PostgreSQL database');
+                        }
+
+                        await client.end();
+                        console.log('✅ Basic PostgreSQL database structure check complete');
+
                     } else {
-                        console.log('⚠️ No tables found in the database');
+                        throw new Error(`Unsupported database type: ${dbConfig.type.toLocaleLowerCase()}`);
                     }
-
-                    await connection.end();
-                    console.log('✅ Basic database structure check complete');
 
                 } catch (schemaError: any) {
                     console.error('❌ Failed to get basic database structure:', schemaError.message);
-                    if (connection) await connection.end();
                 }
 
                 // ========== CHAIN EXECUTION LOGIC ==========
@@ -502,57 +527,91 @@ CRITICAL INSTRUCTIONS FOR CHAINS:
                 if (!chainSQLGenerated) {
                     try {
                         // Get MySQL version information to ensure compatibility
-                        console.log('🔍 Analyzing MySQL version before generating SQL...');
-                        let mySQLVersionString = "unknown";
-                        let mysqlVersionInfo = null;
+                        console.log('🔍 Analyzing database version before generating SQL...');
+                        let databaseVersionString = "unknown";
+                        let databaseVersionInfo = null;
+                        let databaseType = "unknown";
 
                         try {
-                            const versionConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                            // Get database configuration to determine type
+                            const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                            databaseType = dbConfig.type.toLocaleLowerCase();
 
-                            const [rows] = await versionConnection.execute('SELECT VERSION() as version');
-                            if (rows && Array.isArray(rows) && rows[0] && (rows[0] as any).version) {
-                                mySQLVersionString = (rows[0] as any).version;
+                            if (databaseType === 'mysql' || databaseType === 'mariadb') {
+                                const versionConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                const [rows] = await versionConnection.execute('SELECT VERSION() as version');
+                                if (rows && Array.isArray(rows) && rows[0] && (rows[0] as any).version) {
+                                    databaseVersionString = (rows[0] as any).version;
 
-                                // Parse version string
-                                const versionMatch = mySQLVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
-                                if (versionMatch) {
-                                    const major = parseInt(versionMatch[1]);
-                                    const minor = parseInt(versionMatch[2]);
-                                    const patch = parseInt(versionMatch[3]);
+                                    // Parse version string
+                                    const versionMatch = databaseVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
+                                    if (versionMatch) {
+                                        const major = parseInt(versionMatch[1]);
+                                        const minor = parseInt(versionMatch[2]);
+                                        const patch = parseInt(versionMatch[3]);
 
-                                    mysqlVersionInfo = {
-                                        full: mySQLVersionString,
-                                        major,
-                                        minor,
-                                        patch,
-                                        supportsJSON: major >= 5 && minor >= 7,
-                                        supportsWindowFunctions: major >= 8,
-                                        supportsCTE: major >= 8,
-                                        supportsRegex: true
-                                    };
+                                        databaseVersionInfo = {
+                                            full: databaseVersionString,
+                                            major,
+                                            minor,
+                                            patch,
+                                            supportsJSON: major >= 5 && minor >= 7,
+                                            supportsWindowFunctions: major >= 8,
+                                            supportsCTE: major >= 8,
+                                            supportsRegex: true
+                                        };
 
-                                    console.log(`✅ MySQL Version: ${mySQLVersionString} (${major}.${minor}.${patch})`);
-                                    console.log(`✅ Features: JSON=${mysqlVersionInfo.supportsJSON}, Windows=${mysqlVersionInfo.supportsWindowFunctions}, CTE=${mysqlVersionInfo.supportsCTE}`);
+                                        console.log(`✅ MySQL Version: ${databaseVersionString} (${major}.${minor}.${patch})`);
+                                        console.log(`✅ Features: JSON=${databaseVersionInfo.supportsJSON}, Windows=${databaseVersionInfo.supportsWindowFunctions}, CTE=${databaseVersionInfo.supportsCTE}`);
+                                    }
                                 }
-                            }
+                                await versionConnection.end();
+                            } else if (databaseType === 'postgresql') {
+                                const versionClient = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                const result = await versionClient.query('SELECT version() as version');
+                                if (result && result.rows && result.rows[0] && result.rows[0].version) {
+                                    databaseVersionString = result.rows[0].version;
 
-                            await versionConnection.end();
+                                    // Parse version string (PostgreSQL format: "PostgreSQL 15.4 on x86_64-pc-linux-gnu...")
+                                    const versionMatch = databaseVersionString.match(/PostgreSQL (\d+)\.(\d+)(?:\.(\d+))?/);
+                                    if (versionMatch) {
+                                        const major = parseInt(versionMatch[1]);
+                                        const minor = parseInt(versionMatch[2]);
+                                        const patch = parseInt(versionMatch[3] || '0');
+
+                                        databaseVersionInfo = {
+                                            full: databaseVersionString,
+                                            major,
+                                            minor,
+                                            patch,
+                                            supportsJSON: major >= 9, // JSON support introduced in PostgreSQL 9.2
+                                            supportsWindowFunctions: major >= 8, // Window functions available since PostgreSQL 8.4
+                                            supportsCTE: major >= 8, // CTE support available since PostgreSQL 8.4
+                                            supportsRegex: true
+                                        };
+
+                                        console.log(`✅ PostgreSQL Version: ${databaseVersionString} (${major}.${minor}.${patch})`);
+                                        console.log(`✅ Features: JSON=${databaseVersionInfo.supportsJSON}, Windows=${databaseVersionInfo.supportsWindowFunctions}, CTE=${databaseVersionInfo.supportsCTE}`);
+                                    }
+                                }
+                                await versionClient.end();
+                            }
                         } catch (versionError) {
-                            console.error('❌ Failed to get MySQL version:', versionError);
+                            console.error(`❌ Failed to get ${databaseType} version:`, versionError);
                             // Continue without version info
                         }
 
                         // Configure LangChain's sqlAgent with version-specific instructions
-                        const versionSpecificInstructions = mysqlVersionInfo ? `
-MySQL VERSION INFO: Your query will run on MySQL ${mysqlVersionInfo.full} (${mysqlVersionInfo.major}.${mysqlVersionInfo.minor}.${mysqlVersionInfo.patch})
+                        const versionSpecificInstructions = databaseVersionInfo ? `
+${databaseType.toUpperCase()} VERSION INFO: Your query will run on ${databaseType.toUpperCase()} ${databaseVersionInfo.full} (${databaseVersionInfo.major}.${databaseVersionInfo.minor}.${databaseVersionInfo.patch})
 
 VERSION-SPECIFIC COMPATIBILITY:
-- JSON Functions (e.g., JSON_EXTRACT): ${mysqlVersionInfo.supportsJSON ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
-- Window Functions (e.g., ROW_NUMBER()): ${mysqlVersionInfo.supportsWindowFunctions ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
-- Common Table Expressions (WITH): ${mysqlVersionInfo.supportsCTE ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
+- JSON Functions (e.g., JSON_EXTRACT): ${databaseVersionInfo.supportsJSON ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
+- Window Functions (e.g., ROW_NUMBER()): ${databaseVersionInfo.supportsWindowFunctions ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
+- Common Table Expressions (WITH): ${databaseVersionInfo.supportsCTE ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
 - Regular Expressions: AVAILABLE ✅
 
-CRITICAL: Use ONLY SQL features compatible with this MySQL version. Avoid any syntax not supported by ${mysqlVersionInfo.full}.
+CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase()} version. Avoid any syntax not supported by ${databaseVersionInfo.full}.
 ` : '';
 
                         // Add conversation context if in conversational mode
@@ -837,16 +896,19 @@ Query request: ${query}
 
                 // Quick syntax validation without repeating schema analysis that sqlAgent already did
                 try {
-                    connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                    const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                    let connection: any;
+                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                        connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                        connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                    }
 
                     // Extract table names from the query
-                    const tableMatch = finalSQL.match(/\bFROM\s+`?(\w+)`?|JOIN\s+`?(\w+)`?/gi);
-                    const tableNames = tableMatch ? tableMatch.map(match => {
-                        // Extract just the table name without FROM or JOIN
-                        const parts = match.split(/\s+/);
-                        return parts[parts.length - 1].replace(/`/g, '').replace(/;$/, '');
-                    }) : [];
+                    const tableNamePattern = /FROM\s+(\w+)|JOIN\s+(\w+)/gi;
+                    const tableMatches = [...finalSQL.matchAll(tableNamePattern)];
+                    const tableNames = tableMatches
+                        .map(match => match[1] || match[2])
+                        .filter(name => name && !['SELECT', 'WHERE', 'AND', 'OR', 'ORDER', 'GROUP', 'HAVING', 'LIMIT'].includes(name.toUpperCase()));
 
                     console.log('🔍 Query references these tables:', tableNames);
 
@@ -858,180 +920,267 @@ Query request: ${query}
                     // Do a simple check if these tables exist and find similar table names if not
                     for (const tableName of tableNames) {
                         try {
-                            // Just check if the table exists with a simple query
-                            const [result] = await connection.execute(
-                                "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-                                [dbConfig.database, tableName]
-                            );
-
-                            if (Array.isArray(result) && result.length > 0) {
-                                console.log(`✅ Table '${tableName}' exists`);
-
-                                // If table exists, get a sample of column names to verify query correctness
-                                const [columns] = await connection.execute(
-                                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
+                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                // MySQL table validation
+                                const [result] = await connection.execute(
+                                    "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
                                     [dbConfig.database, tableName]
                                 );
 
-                                if (Array.isArray(columns) && columns.length > 0) {
-                                    const sampleColumns = columns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
-                                    console.log(`📋 Table ${tableName} sample columns: ${sampleColumns}...`);
-                                    debugInfo.sqlCorrections.push(`Table ${tableName} exists with columns like: ${sampleColumns}...`);
+                                if (Array.isArray(result) && result.length > 0) {
+                                    console.log(`✅ Table '${tableName}' exists`);
 
-                                    // Check if the query uses column names that don't match the snake_case pattern in the database
-                                    // Extract column names from the query that are associated with this table
-                                    const columnPattern = new RegExp(`${tableName}\\.([\\w_]+)`, 'g');
-                                    let columnMatch;
-                                    const queriedColumns = [];
+                                    // If table exists, get a sample of column names to verify query correctness
+                                    const [columns] = await connection.execute(
+                                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
+                                        [dbConfig.database, tableName]
+                                    );
 
-                                    while ((columnMatch = columnPattern.exec(finalSQL)) !== null) {
-                                        queriedColumns.push(columnMatch[1]);
-                                    }
+                                    if (Array.isArray(columns) && columns.length > 0) {
+                                        const sampleColumns = columns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
+                                        console.log(`📋 Table ${tableName} sample columns: ${sampleColumns}...`);
+                                        debugInfo.sqlCorrections.push(`Table ${tableName} exists with columns like: ${sampleColumns}...`);
 
-                                    // Check each queried column against actual columns
-                                    const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
-                                    for (const queriedCol of queriedColumns) {
-                                        if (!actualColumns.includes(queriedCol)) {
-                                            // Try to find a similar column name (e.g., 'fullname' vs 'full_name')
-                                            const similarCol = actualColumns.find(col =>
-                                                col.replace(/_/g, '').toLowerCase() === queriedCol.toLowerCase() ||
-                                                col.toLowerCase() === queriedCol.replace(/_/g, '').toLowerCase()
-                                            );
+                                        // Check if the query uses column names that don't match the snake_case pattern in the database
+                                        // Extract column names from the query that are associated with this table
+                                        const columnPattern = new RegExp(`${tableName}\\.([\\w_]+)`, 'g');
+                                        let columnMatch;
+                                        const queriedColumns = [];
 
-                                            if (similarCol) {
-                                                console.log(`⚠️ Column correction needed: '${queriedCol}' should be '${similarCol}'`);
-                                                columnCorrections[queriedCol] = similarCol;
-                                                sqlNeedsCorrection = true;
+                                        while ((columnMatch = columnPattern.exec(finalSQL)) !== null) {
+                                            queriedColumns.push(columnMatch[1]);
+                                        }
+
+                                        // Check each queried column against actual columns
+                                        const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
+                                        for (const queriedCol of queriedColumns) {
+                                            if (!actualColumns.includes(queriedCol)) {
+                                                // Try to find a similar column name (e.g., 'fullname' vs 'full_name')
+                                                const similarCol = actualColumns.find(col =>
+                                                    col.replace(/_/g, '').toLowerCase() === queriedCol.toLowerCase() ||
+                                                    col.toLowerCase() === queriedCol.replace(/_/g, '').toLowerCase()
+                                                );
+
+                                                if (similarCol) {
+                                                    console.log(`⚠️ Column correction needed: '${queriedCol}' should be '${similarCol}'`);
+                                                    columnCorrections[queriedCol] = similarCol;
+                                                    sqlNeedsCorrection = true;
+                                                }
                                             }
                                         }
                                     }
-                                }
-                            } else {
-                                console.log(`⚠️ WARNING: Table '${tableName}' does not exist in the database`);
-                                debugInfo.sqlCorrections.push(`WARNING: Table '${tableName}' does not exist`);
+                                } else {
+                                    console.log(`⚠️ WARNING: Table '${tableName}' does not exist in the database`);
+                                    debugInfo.sqlCorrections.push(`WARNING: Table '${tableName}' does not exist`);
 
-                                // Find similar table names (e.g., 'pgxtestresults' vs 'pgxtest_results')
-                                // First get all tables in the database
-                                const [allTables] = await connection.execute(
-                                    "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                    [dbConfig.database]
-                                );
-
-                                if (Array.isArray(allTables) && allTables.length > 0) {
-                                    // Look for similar table names
-                                    const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
-
-                                    // Try different matching strategies
-                                    // 1. Remove underscores and compare
-                                    const similarTableNoUnderscores = allTableNames.find(t =>
-                                        t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase()
+                                    // Find similar table names (e.g., 'pgxtestresults' vs 'pgxtest_results')
+                                    // First get all tables in the database
+                                    const [allTables] = await connection.execute(
+                                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                        [dbConfig.database]
                                     );
 
-                                    // 2. Check for plural/singular variations
-                                    const singularName = tableName.endsWith('s') ? tableName.slice(0, -1) : tableName;
-                                    const pluralName = tableName.endsWith('s') ? tableName : tableName + 's';
+                                    if (Array.isArray(allTables) && allTables.length > 0) {
+                                        // Look for similar table names
+                                        const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
 
-                                    const similarTableByPlurality = allTableNames.find(t =>
-                                        t.toLowerCase() === singularName.toLowerCase() ||
-                                        t.toLowerCase() === pluralName.toLowerCase()
-                                    );
-
-                                    // 3. Check for table with similar prefix
-                                    const similarTableByPrefix = allTableNames.find(t =>
-                                        (t.toLowerCase().startsWith(tableName.toLowerCase()) ||
-                                            tableName.toLowerCase().startsWith(t.toLowerCase())) &&
-                                        t.length > 3
-                                    );
-
-                                    const correctedTableName = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
-
-                                    if (correctedTableName) {
-                                        console.log(`🔄 Found similar table: '${correctedTableName}' instead of '${tableName}'`);
-                                        tableCorrections[tableName] = correctedTableName;
-                                        sqlNeedsCorrection = true;
-
-                                        // Also get sample columns from this corrected table
-                                        const [correctedColumns] = await connection.execute(
-                                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
-                                            [dbConfig.database, correctedTableName]
+                                        // Try different matching strategies
+                                        // 1. Remove underscores and compare
+                                        const similarTableNoUnderscores = allTableNames.find((t: string) =>
+                                            t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase()
                                         );
 
-                                        if (Array.isArray(correctedColumns) && correctedColumns.length > 0) {
-                                            const sampleCorrectedColumns = correctedColumns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
-                                            console.log(`📋 Corrected table ${correctedTableName} columns: ${sampleCorrectedColumns}...`);
-                                            debugInfo.sqlCorrections.push(`Correction: Use '${correctedTableName}' with columns like: ${sampleCorrectedColumns}...`);
+                                        // 2. Check for plural/singular variations
+                                        const singularName = tableName.endsWith('s') ? tableName.slice(0, -1) : tableName;
+                                        const pluralName = tableName.endsWith('s') ? tableName : tableName + 's';
+
+                                        const similarTableByPlurality = allTableNames.find((t: string) =>
+                                            t.toLowerCase() === singularName.toLowerCase() ||
+                                            t.toLowerCase() === pluralName.toLowerCase()
+                                        );
+
+                                        // 3. Check for table with similar prefix
+                                        const similarTableByPrefix = allTableNames.find((t: string) =>
+                                            (t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                                tableName.toLowerCase().startsWith(t.toLowerCase())) &&
+                                            t.length > 3
+                                        );
+
+                                        const correctedTableName = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
+
+                                        if (correctedTableName) {
+                                            console.log(`🔄 Found similar table: '${correctedTableName}' instead of '${tableName}'`);
+                                            tableCorrections[tableName] = correctedTableName;
+                                            sqlNeedsCorrection = true;
                                         }
-                                    } else {
-                                        console.log(`❌ No similar table found for '${tableName}'`);
-                                        debugInfo.sqlCorrections.push(`No similar table found for '${tableName}'`);
+                                    }
+                                }
+                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                // PostgreSQL table validation
+                                const result = await connection.query(
+                                    "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
+                                    [tableName]
+                                );
+
+                                if (result.rows && result.rows.length > 0) {
+                                    console.log(`✅ Table '${tableName}' exists`);
+
+                                    // If table exists, get a sample of column names to verify query correctness
+                                    const columnsResult = await connection.query(
+                                        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 LIMIT 10",
+                                        [tableName]
+                                    );
+
+                                    if (columnsResult.rows && columnsResult.rows.length > 0) {
+                                        const sampleColumns = columnsResult.rows.map((col: any) => col.column_name).slice(0, 5).join(', ');
+                                        console.log(`📋 Table ${tableName} sample columns: ${sampleColumns}...`);
+                                        debugInfo.sqlCorrections.push(`Table ${tableName} exists with columns like: ${sampleColumns}...`);
+
+                                        // Check if the query uses column names that don't match the snake_case pattern in the database
+                                        // Extract column names from the query that are associated with this table
+                                        const columnPattern = new RegExp(`${tableName}\\.([\\w_]+)`, 'g');
+                                        let columnMatch;
+                                        const queriedColumns = [];
+
+                                        while ((columnMatch = columnPattern.exec(finalSQL)) !== null) {
+                                            queriedColumns.push(columnMatch[1]);
+                                        }
+
+                                        // Check each queried column against actual columns
+                                        const actualColumns = columnsResult.rows.map((col: any) => col.column_name);
+                                        for (const queriedCol of queriedColumns) {
+                                            if (!actualColumns.includes(queriedCol)) {
+                                                // Try to find a similar column name (e.g., 'fullname' vs 'full_name')
+                                                const similarCol = actualColumns.find((col: string) =>
+                                                    col.replace(/_/g, '').toLowerCase() === queriedCol.toLowerCase() ||
+                                                    col.toLowerCase() === queriedCol.replace(/_/g, '').toLowerCase()
+                                                );
+
+                                                if (similarCol) {
+                                                    console.log(`⚠️ Column correction needed: '${queriedCol}' should be '${similarCol}'`);
+                                                    columnCorrections[queriedCol] = similarCol;
+                                                    sqlNeedsCorrection = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    console.log(`⚠️ WARNING: Table '${tableName}' does not exist in the database`);
+                                    debugInfo.sqlCorrections.push(`WARNING: Table '${tableName}' does not exist`);
+
+                                    // Find similar table names (e.g., 'pgxtestresults' vs 'pgxtest_results')
+                                    // First get all tables in the database
+                                    const allTablesResult = await connection.query(
+                                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                                    );
+
+                                    if (allTablesResult.rows && allTablesResult.rows.length > 0) {
+                                        // Look for similar table names
+                                        const allTableNames = allTablesResult.rows.map((t: any) => t.tablename);
+
+                                        // Try different matching strategies
+                                        // 1. Remove underscores and compare
+                                        const similarTableNoUnderscores = allTableNames.find((t: string) =>
+                                            t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase()
+                                        );
+
+                                        // 2. Check for plural/singular variations
+                                        const singularName = tableName.endsWith('s') ? tableName.slice(0, -1) : tableName;
+                                        const pluralName = tableName.endsWith('s') ? tableName : tableName + 's';
+
+                                        const similarTableByPlurality = allTableNames.find((t: string) =>
+                                            t.toLowerCase() === singularName.toLowerCase() ||
+                                            t.toLowerCase() === pluralName.toLowerCase()
+                                        );
+
+                                        // 3. Check for table with similar prefix
+                                        const similarTableByPrefix = allTableNames.find((t: string) =>
+                                            (t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                                tableName.toLowerCase().startsWith(t.toLowerCase())) &&
+                                            t.length > 3
+                                        );
+
+                                        const correctedTableName = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
+
+                                        if (correctedTableName) {
+                                            console.log(`🔄 Found similar table: '${correctedTableName}' instead of '${tableName}'`);
+                                            tableCorrections[tableName] = correctedTableName;
+                                            sqlNeedsCorrection = true;
+                                        }
                                     }
                                 }
                             }
-                        } catch (err) {
-                            console.log(`❌ Error checking table '${tableName}':`, err);
+                        } catch (tableError: any) {
+                            console.error(`❌ Error validating table '${tableName}':`, tableError.message);
                         }
                     }
 
-                    // Apply corrections to SQL if needed
+                    // Apply corrections if needed
                     if (sqlNeedsCorrection) {
-                        console.log('🔧 Applying corrections to SQL query');
                         let correctedSQL = finalSQL;
 
                         // Apply table name corrections
-                        for (const [incorrectTable, correctTable] of Object.entries(tableCorrections)) {
-                            // Use regex to ensure we only replace table names, not substrings in other identifiers
-                            const tableRegex = new RegExp(`\\b${incorrectTable}\\b`, 'g');
-                            correctedSQL = correctedSQL.replace(tableRegex, correctTable);
-                            console.log(`🔄 Corrected table: '${incorrectTable}' → '${correctTable}'`);
+                        for (const [oldName, newName] of Object.entries(tableCorrections)) {
+                            const tableRegex = new RegExp(`\\b${oldName}\\b`, 'gi');
+                            correctedSQL = correctedSQL.replace(tableRegex, newName);
+                            console.log(`🔄 Corrected table name: '${oldName}' → '${newName}'`);
                         }
 
                         // Apply column name corrections
-                        for (const [incorrectCol, correctCol] of Object.entries(columnCorrections)) {
-                            // Need to be careful to only replace the column part in table.column patterns
-                            for (const tableName of [...tableNames, ...Object.values(tableCorrections)]) {
-                                const columnPattern = new RegExp(`${tableName}\\.${incorrectCol}\\b`, 'g');
-                                correctedSQL = correctedSQL.replace(columnPattern, `${tableName}.${correctCol}`);
-                            }
-                            console.log(`🔄 Corrected column: '${incorrectCol}' → '${correctCol}'`);
+                        for (const [oldName, newName] of Object.entries(columnCorrections)) {
+                            const columnRegex = new RegExp(`\\b${oldName}\\b`, 'gi');
+                            correctedSQL = correctedSQL.replace(columnRegex, newName);
+                            console.log(`🔄 Corrected column name: '${oldName}' → '${newName}'`);
                         }
 
-                        // Use the corrected SQL
                         if (correctedSQL !== finalSQL) {
-                            console.log('✅ SQL corrections applied:');
-                            console.log('🔸 Original: ' + finalSQL);
-                            console.log('🔸 Corrected: ' + correctedSQL);
+                            console.log('🔄 Applied SQL corrections');
                             finalSQL = correctedSQL;
-                            debugInfo.sqlCorrections.push(`Corrected SQL: ${finalSQL}`);
+                            debugInfo.sqlCorrections.push('Applied table/column name corrections');
                         }
                     }
 
-                    // Look for possible join issues in the query
-                    const joinMatch = finalSQL.match(/JOIN\s+`?(\w+)`?\s+(?:AS\s+)?(\w+)?\s+ON\s+(.*?)(?:WHERE|GROUP BY|ORDER BY|LIMIT|;|\s*$)/i);
-                    if (joinMatch) {
-                        console.log('🔍 Join condition found:', joinMatch[3]);
-                        debugInfo.sqlCorrections.push(`Join condition: ${joinMatch[3]}`);
+                    // Close connection
+                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                        await connection.end();
+                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                        await connection.end();
                     }
 
-                    // Close this connection before moving to the actual query execution
-                    await connection.end();
-                    console.log('🔌 Validation connection closed');
+                    console.log('✅ Database connection established');
 
                 } catch (validationError) {
                     console.error('❌ Error during query validation:', validationError);
-                    if (connection) await connection.end();
+                    // Connection is already closed in the try block
                 }
 
                 // Step 4: Execute the SQL query manually
                 console.log('📊 Step 4: Executing SQL query manually...');
 
                 try {
-                    connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                    let connection: any;
+                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                        connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                        connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                    }
 
                     console.log('✅ Database connection established');
                     console.log('🔧 Executing SQL:', finalSQL);
 
-                    // Execute the final SQL
-                    const [rows, fields] = await connection.execute(finalSQL);
+                    // Execute the final SQL based on database type
+                    let rows: any[] = [];
+                    let fields: any = null;
+
+                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                        const [mysqlRows, mysqlFields] = await connection.execute(finalSQL);
+                        rows = mysqlRows;
+                        fields = mysqlFields;
+                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                        const result = await connection.query(finalSQL);
+                        rows = result.rows;
+                        fields = result.fields;
+                    }
 
                     console.log(`✅ Query executed successfully, returned ${Array.isArray(rows) ? rows.length : 0} rows`);
 
@@ -1089,8 +1238,6 @@ Avoid technical SQL details.
 Keep the focus on medical/business relevance only.
 Return only valid, semantic HTML.`;
 
-
-
                                     const resultExpResponse = await llm.invoke(resultExplanationPrompt);
                                     resultExplanation = typeof resultExpResponse === 'string' ? resultExpResponse : resultExpResponse.content || '';
                                     console.log('✅ Generated result explanation');
@@ -1104,32 +1251,16 @@ Return only valid, semantic HTML.`;
                             }
                         } catch (descError: any) {
                             console.error('❌ Error generating descriptions:', descError.message);
-                            queryDescription = 'Unable to generate query description';
-                            resultExplanation = 'Unable to generate result explanation';
+                            queryDescription = 'Error generating query description';
+                            resultExplanation = 'Error generating result explanation';
                         }
-                    } else {
-                        console.log('📝 Description generation disabled');
-                        queryDescription = 'Description generation disabled';
-                        resultExplanation = 'Result explanation disabled';
                     }
 
-                    // Save conversation if in conversational mode
-                    if (conversational && sessionData) {
-                        try {
-                            // Prepare a user-friendly summary of the SQL results for the conversation
-                            const resultCount = Array.isArray(rows) ? rows.length : 0;
-                            const resultSummary = `${resultExplanation} Found ${resultCount} results. SQL: ${finalSQL}`;
-
-                            // Save the conversation exchange to memory
-                            await sessionData.memory.saveContext(
-                                { input: query },
-                                { output: resultSummary }
-                            );
-                            console.log('💾 Saved conversation context');
-                        } catch (saveError) {
-                            console.error('❌ Error saving conversation:', saveError);
-                            // Continue without saving if there's an error
-                        }
+                    // Close connection
+                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                        await connection.end();
+                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                        await connection.end();
                     }
 
                     // Return the raw SQL results with descriptions
@@ -1186,14 +1317,14 @@ Return only valid, semantic HTML.`;
                     res.json(response);
 
                 } catch (sqlError: any) {
-                    console.error('❌ SQL execution error:', sqlError.message);
+                    console.error('❌ SQL execution failed:', sqlError.message);
 
-                    // Enhanced error handling with better diagnostic information
-                    let errorDetails = {};
-                    let suggestedFixes = [];
+                    // Enhanced error analysis and suggestions
+                    const suggestedFixes: string[] = [];
+                    let errorDetails: any = {};
 
                     // Handle column not found errors
-                    if (sqlError.message.includes('Unknown column')) {
+                    if (sqlError.message.includes('Unknown column') || sqlError.message.includes('column') && sqlError.message.includes('doesn\'t exist')) {
                         // Extract the problematic column name
                         const columnMatch = sqlError.message.match(/Unknown column '([^']+)'/);
                         const badColumn = columnMatch ? columnMatch[1] : 'unknown';
@@ -1207,93 +1338,188 @@ Return only valid, semantic HTML.`;
                         }
 
                         try {
-                            // If we have a connection, try to find a similar column
-                            if (connection && tableName && columnName) {
+                            // Create a new connection for error analysis
+                            let errorConnection: any;
+                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                errorConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                errorConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                            }
+
+                            if (errorConnection && tableName && columnName) {
                                 // Get database configuration for error handling
                                 const dbConfigForError = await databaseService.getOrganizationDatabaseConnection(organizationId);
 
-                                // First verify the table exists
-                                const [tableResult] = await connection.execute(
-                                    "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-                                    [dbConfigForError.database, tableName]
-                                );
-
-                                if (Array.isArray(tableResult) && tableResult.length > 0) {
-                                    // Table exists, get all its columns
-                                    const [columns] = await connection.execute(
-                                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                                if (dbConfigForError.type === 'mysql') {
+                                    // First verify the table exists
+                                    const [tableResult] = await errorConnection.execute(
+                                        "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
                                         [dbConfigForError.database, tableName]
                                     );
 
-                                    if (Array.isArray(columns) && columns.length > 0) {
-                                        const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
-
-                                        // Look for similar column names
-                                        // 1. Check for snake_case vs camelCase
-                                        const similarByCase = actualColumns.find(col =>
-                                            col.replace(/_/g, '').toLowerCase() === columnName.toLowerCase()
+                                    if (Array.isArray(tableResult) && tableResult.length > 0) {
+                                        // Table exists, get all its columns
+                                        const [columns] = await errorConnection.execute(
+                                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                                            [dbConfigForError.database, tableName]
                                         );
 
-                                        // 2. Check for simple typos or close matches
-                                        const similarByPrefix = actualColumns.find(col =>
-                                            (col.toLowerCase().startsWith(columnName.toLowerCase()) ||
-                                                columnName.toLowerCase().startsWith(col.toLowerCase())) &&
-                                            col.length > 2
+                                        if (Array.isArray(columns) && columns.length > 0) {
+                                            const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
+
+                                            // Look for similar column names
+                                            // 1. Check for snake_case vs camelCase
+                                            const similarByCase = actualColumns.find((col: string) =>
+                                                col.replace(/_/g, '').toLowerCase() === columnName.toLowerCase()
+                                            );
+
+                                            // 2. Check for simple typos or close matches
+                                            const similarByPrefix = actualColumns.find((col: string) =>
+                                                (col.toLowerCase().startsWith(columnName.toLowerCase()) ||
+                                                    columnName.toLowerCase().startsWith(col.toLowerCase())) &&
+                                                col.length > 2
+                                            );
+
+                                            const suggestedColumn = similarByCase || similarByPrefix;
+
+                                            if (suggestedColumn) {
+                                                console.log(`🔄 Suggested column correction: '${columnName}' → '${suggestedColumn}'`);
+                                                suggestedFixes.push(`Use '${tableName}.${suggestedColumn}' instead of '${badColumn}'`);
+
+                                                errorDetails = {
+                                                    error_type: 'column_not_found',
+                                                    problematic_column: badColumn,
+                                                    suggested_column: `${tableName}.${suggestedColumn}`,
+                                                    suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Did you mean '${suggestedColumn}'?`
+                                                };
+                                            } else {
+                                                // No similar column found, show available columns
+                                                const availableColumns = actualColumns.slice(0, 10).join(', ');
+                                                errorDetails = {
+                                                    error_type: 'column_not_found',
+                                                    problematic_column: badColumn,
+                                                    available_columns: availableColumns,
+                                                    suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Available columns: ${availableColumns}...`
+                                                };
+                                                suggestedFixes.push(`Choose a column from: ${availableColumns}...`);
+                                            }
+                                        }
+                                    } else {
+                                        // Table doesn't exist, look for similar table names
+                                        const [allTables] = await errorConnection.execute(
+                                            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                            [dbConfigForError.database]
                                         );
 
-                                        const suggestedColumn = similarByCase || similarByPrefix;
+                                        if (Array.isArray(allTables) && allTables.length > 0) {
+                                            const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
 
-                                        if (suggestedColumn) {
-                                            console.log(`🔄 Suggested column correction: '${columnName}' → '${suggestedColumn}'`);
-                                            suggestedFixes.push(`Use '${tableName}.${suggestedColumn}' instead of '${badColumn}'`);
+                                            // Similar matching as before
+                                            const similarTable = allTableNames.find((t: string) =>
+                                                t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase() ||
+                                                t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                                tableName.toLowerCase().startsWith(t.toLowerCase())
+                                            );
 
-                                            errorDetails = {
-                                                error_type: 'column_not_found',
-                                                problematic_column: badColumn,
-                                                suggested_column: `${tableName}.${suggestedColumn}`,
-                                                suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Did you mean '${suggestedColumn}'?`
-                                            };
-                                        } else {
-                                            // No similar column found, show available columns
-                                            const availableColumns = actualColumns.slice(0, 10).join(', ');
-                                            errorDetails = {
-                                                error_type: 'column_not_found',
-                                                problematic_column: badColumn,
-                                                available_columns: availableColumns,
-                                                suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Available columns: ${availableColumns}...`
-                                            };
-                                            suggestedFixes.push(`Choose a column from: ${availableColumns}...`);
+                                            if (similarTable) {
+                                                console.log(`🔄 Table '${tableName}' doesn't exist, but found similar table '${similarTable}'`);
+                                                suggestedFixes.push(`Use table '${similarTable}' instead of '${tableName}'`);
+                                                errorDetails = {
+                                                    error_type: 'table_and_column_not_found',
+                                                    problematic_table: tableName,
+                                                    problematic_column: columnName,
+                                                    suggested_table: similarTable,
+                                                    suggestion: `Both table '${tableName}' and column '${columnName}' have issues. Try using table '${similarTable}' instead.`
+                                                };
+                                            }
                                         }
                                     }
-                                } else {
-                                    // Table doesn't exist, look for similar table names
-                                    const [allTables] = await connection.execute(
-                                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                        [dbConfigForError.database]
+                                } else if (dbConfigForError.type === 'postgresql') {
+                                    // PostgreSQL error analysis
+                                    const tableResult = await errorConnection.query(
+                                        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
+                                        [tableName]
                                     );
 
-                                    if (Array.isArray(allTables) && allTables.length > 0) {
-                                        const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
-
-                                        // Similar matching as before
-                                        const similarTable = allTableNames.find(t =>
-                                            t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase() ||
-                                            t.toLowerCase().startsWith(tableName.toLowerCase()) ||
-                                            tableName.toLowerCase().startsWith(t.toLowerCase())
+                                    if (tableResult.rows && tableResult.rows.length > 0) {
+                                        // Table exists, get all its columns
+                                        const columnsResult = await errorConnection.query(
+                                            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1",
+                                            [tableName]
                                         );
 
-                                        if (similarTable) {
-                                            console.log(`🔄 Table '${tableName}' doesn't exist, but found similar table '${similarTable}'`);
-                                            suggestedFixes.push(`Use table '${similarTable}' instead of '${tableName}'`);
-                                            errorDetails = {
-                                                error_type: 'table_and_column_not_found',
-                                                problematic_table: tableName,
-                                                problematic_column: columnName,
-                                                suggested_table: similarTable,
-                                                suggestion: `Both table '${tableName}' and column '${columnName}' have issues. Try using table '${similarTable}' instead.`
-                                            };
+                                        if (columnsResult.rows && columnsResult.rows.length > 0) {
+                                            const actualColumns = columnsResult.rows.map((col: any) => col.column_name);
+
+                                            // Look for similar column names
+                                            const similarByCase = actualColumns.find((col: string) =>
+                                                col.replace(/_/g, '').toLowerCase() === columnName.toLowerCase()
+                                            );
+
+                                            const similarByPrefix = actualColumns.find((col: string) =>
+                                                (col.toLowerCase().startsWith(columnName.toLowerCase()) ||
+                                                    columnName.toLowerCase().startsWith(col.toLowerCase())) &&
+                                                col.length > 2
+                                            );
+
+                                            const suggestedColumn = similarByCase || similarByPrefix;
+
+                                            if (suggestedColumn) {
+                                                console.log(`🔄 Suggested column correction: '${columnName}' → '${suggestedColumn}'`);
+                                                suggestedFixes.push(`Use '${tableName}.${suggestedColumn}' instead of '${badColumn}'`);
+
+                                                errorDetails = {
+                                                    error_type: 'column_not_found',
+                                                    problematic_column: badColumn,
+                                                    suggested_column: `${tableName}.${suggestedColumn}`,
+                                                    suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Did you mean '${suggestedColumn}'?`
+                                                };
+                                            } else {
+                                                const availableColumns = actualColumns.slice(0, 10).join(', ');
+                                                errorDetails = {
+                                                    error_type: 'column_not_found',
+                                                    problematic_column: badColumn,
+                                                    available_columns: availableColumns,
+                                                    suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Available columns: ${availableColumns}...`
+                                                };
+                                                suggestedFixes.push(`Choose a column from: ${availableColumns}...`);
+                                            }
+                                        }
+                                    } else {
+                                        // Table doesn't exist, look for similar table names
+                                        const allTablesResult = await errorConnection.query(
+                                            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                                        );
+
+                                        if (allTablesResult.rows && allTablesResult.rows.length > 0) {
+                                            const allTableNames = allTablesResult.rows.map((t: any) => t.tablename);
+
+                                            const similarTable = allTableNames.find((t: string) =>
+                                                t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase() ||
+                                                t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                                tableName.toLowerCase().startsWith(t.toLowerCase())
+                                            );
+
+                                            if (similarTable) {
+                                                console.log(`🔄 Table '${tableName}' doesn't exist, but found similar table '${similarTable}'`);
+                                                suggestedFixes.push(`Use table '${similarTable}' instead of '${tableName}'`);
+                                                errorDetails = {
+                                                    error_type: 'table_and_column_not_found',
+                                                    problematic_table: tableName,
+                                                    problematic_column: columnName,
+                                                    suggested_table: similarTable,
+                                                    suggestion: `Both table '${tableName}' and column '${columnName}' have issues. Try using table '${similarTable}' instead.`
+                                                };
+                                            }
                                         }
                                     }
+                                }
+
+                                // Close error analysis connection
+                                if (dbConfigForError.type === 'mysql') {
+                                    await errorConnection.end();
+                                } else if (dbConfigForError.type === 'postgresql') {
+                                    await errorConnection.end();
                                 }
                             }
                         } catch (analyzeError) {
@@ -1320,78 +1546,81 @@ Return only valid, semantic HTML.`;
                         console.log(`🚨 Table error detected: "${badTable}"`);
 
                         try {
-                            // Try to find a similar table name
-                            if (connection) {
+                            // Create a new connection for error analysis
+                            let errorConnection: any;
+                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                errorConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                errorConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                            }
+
+                            if (errorConnection) {
                                 // Get database configuration for error handling
                                 const dbConfigForTableError = await databaseService.getOrganizationDatabaseConnection(organizationId);
 
-                                const [allTables] = await connection.execute(
-                                    "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                    [dbConfigForTableError.database]
-                                );
-
-                                if (Array.isArray(allTables) && allTables.length > 0) {
-                                    const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
-                                    console.log(`📋 Available tables: ${allTableNames.join(', ')}`);
-
-                                    // Try different matching strategies as before
-                                    const similarTableNoUnderscores = allTableNames.find(t =>
-                                        t.replace(/_/g, '').toLowerCase() === badTable.toLowerCase()
+                                if (dbConfigForTableError.type === 'mysql') {
+                                    const [allTables] = await errorConnection.execute(
+                                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                        [dbConfigForTableError.database]
                                     );
 
-                                    const singularName = badTable.endsWith('s') ? badTable.slice(0, -1) : badTable;
-                                    const pluralName = badTable.endsWith('s') ? badTable : badTable + 's';
+                                    if (Array.isArray(allTables) && allTables.length > 0) {
+                                        const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
 
-                                    const similarTableByPlurality = allTableNames.find(t =>
-                                        t.toLowerCase() === singularName.toLowerCase() ||
-                                        t.toLowerCase() === pluralName.toLowerCase()
-                                    );
-
-                                    const similarTableByPrefix = allTableNames.find(t =>
-                                        (t.toLowerCase().startsWith(badTable.toLowerCase()) ||
-                                            badTable.toLowerCase().startsWith(t.toLowerCase())) &&
-                                        t.length > 3
-                                    );
-
-                                    const suggestedTable = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
-
-                                    if (suggestedTable) {
-                                        console.log(`🔄 Suggested table correction: '${badTable}' → '${suggestedTable}'`);
-                                        suggestedFixes.push(`Use table '${suggestedTable}' instead of '${badTable}'`);
-
-                                        // Get column names for the suggested table
-                                        const [columns] = await connection.execute(
-                                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
-                                            [dbConfigForTableError.database, suggestedTable]
+                                        // Similar matching as before
+                                        const similarTable = allTableNames.find((t: string) =>
+                                            t.replace(/_/g, '').toLowerCase() === badTable.toLowerCase() ||
+                                            t.toLowerCase().startsWith(badTable.toLowerCase()) ||
+                                            badTable.toLowerCase().startsWith(t.toLowerCase())
                                         );
 
-                                        let columnInfo = '';
-                                        if (Array.isArray(columns) && columns.length > 0) {
-                                            const sampleColumns = columns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
-                                            columnInfo = ` with columns like: ${sampleColumns}...`;
+                                        if (similarTable) {
+                                            console.log(`🔄 Found similar table: '${similarTable}' instead of '${badTable}'`);
+                                            suggestedFixes.push(`Use table '${similarTable}' instead of '${badTable}'`);
+                                            errorDetails = {
+                                                error_type: 'table_not_found',
+                                                problematic_table: badTable,
+                                                suggested_table: similarTable,
+                                                suggestion: `The table '${badTable}' does not exist. Did you mean '${similarTable}'?`
+                                            };
                                         }
-
-                                        errorDetails = {
-                                            error_type: 'table_not_found',
-                                            problematic_table: badTable,
-                                            suggested_table: suggestedTable,
-                                            suggestion: `Table '${badTable}' doesn't exist. Did you mean '${suggestedTable}'${columnInfo}?`
-                                        };
-                                    } else {
-                                        // No similar table found, show available tables
-                                        const availableTables = allTableNames.slice(0, 10).join(', ');
-                                        errorDetails = {
-                                            error_type: 'table_not_found',
-                                            problematic_table: badTable,
-                                            available_tables: availableTables,
-                                            suggestion: `Table '${badTable}' doesn't exist. Available tables: ${availableTables}...`
-                                        };
-                                        suggestedFixes.push(`Choose a table from: ${availableTables}...`);
                                     }
+                                } else if (dbConfigForTableError.type === 'postgresql') {
+                                    const allTablesResult = await errorConnection.query(
+                                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                                    );
+
+                                    if (allTablesResult.rows && allTablesResult.rows.length > 0) {
+                                        const allTableNames = allTablesResult.rows.map((t: any) => t.tablename);
+
+                                        const similarTable = allTableNames.find((t: string) =>
+                                            t.replace(/_/g, '').toLowerCase() === badTable.toLowerCase() ||
+                                            t.toLowerCase().startsWith(badTable.toLowerCase()) ||
+                                            badTable.toLowerCase().startsWith(t.toLowerCase())
+                                        );
+
+                                        if (similarTable) {
+                                            console.log(`🔄 Found similar table: '${similarTable}' instead of '${badTable}'`);
+                                            suggestedFixes.push(`Use table '${similarTable}' instead of '${badTable}'`);
+                                            errorDetails = {
+                                                error_type: 'table_not_found',
+                                                problematic_table: badTable,
+                                                suggested_table: similarTable,
+                                                suggestion: `The table '${badTable}' does not exist. Did you mean '${similarTable}'?`
+                                            };
+                                        }
+                                    }
+                                }
+
+                                // Close error analysis connection
+                                if (dbConfigForTableError.type === 'mysql') {
+                                    await errorConnection.end();
+                                } else if (dbConfigForTableError.type === 'postgresql') {
+                                    await errorConnection.end();
                                 }
                             }
                         } catch (analyzeError) {
-                            console.error('Error during error analysis:', analyzeError);
+                            console.error('Error during table error analysis:', analyzeError);
                         }
 
                         // Fallback if we couldn't provide better guidance
@@ -1399,7 +1628,7 @@ Return only valid, semantic HTML.`;
                             errorDetails = {
                                 error_type: 'table_not_found',
                                 problematic_table: badTable,
-                                suggestion: `Table '${badTable}' doesn't exist. Check for proper snake_case formatting or pluralization.`
+                                suggestion: `The table '${badTable}' does not exist in the database. Try using snake_case format (e.g., 'pgx_test_results' instead of 'pgxtestresults').`
                             };
                         }
 
@@ -1503,11 +1732,6 @@ Avoid technical jargon and focus on helping the user get the information they ne
                         },
                         timestamp: new Date().toISOString()
                     });
-                } finally {
-                    if (connection) {
-                        await connection.end();
-                        console.log('🔌 Database connection closed');
-                    }
                 }
 
             } catch (error) {

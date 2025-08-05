@@ -310,6 +310,7 @@ interface DatabaseConfig {
   username: string;
   password: string;
   database: string;
+  type?: 'mysql' | 'postgresql' | 'mariadb'; // Optional database type
 }
 
 interface LangChainConfig {
@@ -395,17 +396,21 @@ class MedicalDatabaseLangChainApp {
   private initializeConfig(organizationDbConfig?: DatabaseConfig): void {
     // Database configuration - use provided config or fall back to environment variables
     if (organizationDbConfig) {
-      this.dbConfig = organizationDbConfig;
-      console.log('✅ Using organization-specific database configuration');
+      this.dbConfig = {
+        ...organizationDbConfig,
+        type: (organizationDbConfig?.type?.toLocaleLowerCase() as 'mysql' | 'postgresql' | 'mariadb') || 'mysql' // Default to mysql if not specified
+      };
+      console.log(`✅ Using organization-specific database configuration (type: ${this.dbConfig.type?.toLocaleLowerCase()})`);
     } else {
       this.dbConfig = {
         host: process.env.DB_HOST || 'localhost',
         port: parseInt(process.env.DB_PORT || '3306'),
         username: process.env.DB_USER || '',
         password: process.env.DB_PASSWORD || '',
-        database: process.env.DB_NAME || ''
+        database: process.env.DB_NAME || '',
+        type: (process.env.DB_TYPE as 'mysql' | 'postgresql' | 'mariadb') || 'mysql'
       };
-      console.log('⚠️ Using fallback environment variable configuration');
+      console.log(`⚠️ Using fallback environment variable configuration (type: ${this.dbConfig.type?.toLocaleLowerCase()})`);
     }
 
     // LangChain configuration - always from environment variables
@@ -622,12 +627,13 @@ Ensure the query follows medical database best practices and is production-ready
       const schemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
       
       // Chain 1: SQL Generation with Database Schema
+      const dbType = this.dbConfig.type?.toLocaleLowerCase() || 'mysql';
       const sqlGenerationTemplate = `You are a medical database SQL expert with access to the database schema.
       
       Database Schema Information:
       {schema_info}
       
-      Generate a MySQL query for the following request: {input}
+      Generate a ${dbType.toUpperCase()} query for the following request: {input}
       
       CRITICAL SQL GENERATION RULES:
       - Use ONLY the tables and columns that exist in the schema above
@@ -636,13 +642,14 @@ Ensure the query follows medical database best practices and is production-ready
       - Use exact table and column names from the schema
       - Generate ONLY complete, executable SQL queries
       - Return ALL matching records unless specifically asked for a limit
-      - Ensure proper MySQL syntax with complete SELECT, FROM, and JOIN statements
+      - Ensure proper ${dbType.toUpperCase()} syntax with complete SELECT, FROM, and JOIN statements
+      ${dbType === 'postgresql' ? '- Use ILIKE for case-insensitive text matching' : '- Use LIKE for text pattern matching'}
       
       EXAMPLES OF PROPER QUERIES:
       - Single table: SELECT col1, col2 FROM table1 WHERE condition
       - Multiple tables: SELECT t1.col1, t2.col2 FROM table1 t1 JOIN table2 t2 ON t1.id = t2.table1_id
       
-      Generate a complete, executable MySQL query:`;
+      Generate a complete, executable ${dbType.toUpperCase()} query:`;
 
       const sqlGenerationPrompt = new PromptTemplate({
         template: sqlGenerationTemplate,
@@ -802,7 +809,8 @@ Ensure the query follows medical database best practices and is production-ready
       });
 
       // Chain 3: SQL Generation with Schema Knowledge
-      const sqlGenTemplate = `You are a MySQL expert. Generate a complete, executable SQL query based on:
+      const dbType = this.dbConfig.type?.toLocaleLowerCase() || 'mysql';
+      const sqlGenTemplate = `You are a ${dbType.toUpperCase()} expert. Generate a complete, executable SQL query based on:
       
       Original request: {input}
       Analysis: {analysis}
@@ -837,7 +845,9 @@ Ensure the query follows medical database best practices and is production-ready
       - medications table connects via medication_id or similar
       - Look for linking tables like prescriptions, patient_medications, etc.
       
-      Generate a complete, executable MySQL query with proper JOINs:`;
+      ${dbType === 'postgresql' ? 'POSTGRESQL SPECIFIC NOTES:\n- Use ILIKE for case-insensitive text matching\n- Use proper PostgreSQL data types\n- Use double quotes for identifiers if needed' : 'MYSQL SPECIFIC NOTES:\n- Use LIKE for text pattern matching\n- Use proper MySQL data types'}
+      
+      Generate a complete, executable ${dbType.toUpperCase()} query with proper JOINs:`;
 
       const sqlGenPrompt = new PromptTemplate({
         template: sqlGenTemplate,
@@ -908,6 +918,14 @@ Ensure the query follows medical database best practices and is production-ready
       const schemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
       
       // Define different prompt templates for different query types with schema knowledge
+      const dbType = this.dbConfig.type?.toLocaleLowerCase() || 'mysql';
+      const dbSpecificRules = dbType === 'postgresql' ? 
+        `- Use ILIKE for case-insensitive text matching
+- Use proper PostgreSQL data types and casting
+- Use double quotes for identifiers if needed` :
+        `- Use LIKE for text pattern matching
+- Use proper MySQL data types and casting`;
+
       const patientQueryTemplate = `You are a medical database expert specializing in patient queries.
       Handle this patient-related query: {input}
       
@@ -919,9 +937,10 @@ Ensure the query follows medical database best practices and is production-ready
       - If multiple tables needed, include proper JOIN clauses with foreign key relationships
       - Focus on patient demographics, medical history, and personal health information
       - Ensure HIPAA compliance in your query design
-      - Generate complete, executable SQL queries only
+      - Generate complete, executable ${dbType.toUpperCase()} queries only
+      ${dbSpecificRules}
       
-      Return ONLY a complete SQL query with proper JOINs if multiple tables are involved.`;
+      Return ONLY a complete ${dbType.toUpperCase()} query with proper JOINs if multiple tables are involved.`;
 
       const medicationQueryTemplate = `You are a medical database expert specializing in medication queries.
       Handle this medication-related query: {input}
@@ -933,9 +952,10 @@ Ensure the query follows medical database best practices and is production-ready
       - Use ONLY the tables and columns that exist in the schema above
       - If multiple tables needed, include proper JOIN clauses with foreign key relationships
       - Focus on drug information, prescription patterns, and therapeutic data
-      - Generate complete, executable SQL queries only
+      - Generate complete, executable ${dbType.toUpperCase()} queries only
+      ${dbSpecificRules}
       
-      Return ONLY a complete SQL query with proper JOINs if multiple tables are involved.`;
+      Return ONLY a complete ${dbType.toUpperCase()} query with proper JOINs if multiple tables are involved.`;
 
       const testResultQueryTemplate = `You are a medical database expert specializing in test result queries.
       Handle this test result query: {input}
@@ -947,9 +967,10 @@ Ensure the query follows medical database best practices and is production-ready
       - Use ONLY the tables and columns that exist in the schema above
       - If multiple tables needed, include proper JOIN clauses with foreign key relationships
       - Focus on laboratory values, diagnostic patterns, and trend analysis
-      - Generate complete, executable SQL queries only
+      - Generate complete, executable ${dbType.toUpperCase()} queries only
+      ${dbSpecificRules}
       
-      Return ONLY a complete SQL query with proper JOINs if multiple tables are involved.`;
+      Return ONLY a complete ${dbType.toUpperCase()} query with proper JOINs if multiple tables are involved.`;
 
       const generalQueryTemplate = `You are a medical database expert for general queries.
       Handle this general medical query: {input}
@@ -960,9 +981,10 @@ Ensure the query follows medical database best practices and is production-ready
       CRITICAL SQL RULES:
       - Use ONLY the tables and columns that exist in the schema above
       - If multiple tables needed, include proper JOIN clauses with foreign key relationships
-      - Generate complete, executable SQL queries only
+      - Generate complete, executable ${dbType.toUpperCase()} queries only
+      ${dbSpecificRules}
       
-      Return ONLY a complete SQL query with proper JOINs if multiple tables are involved.`;
+      Return ONLY a complete ${dbType.toUpperCase()} query with proper JOINs if multiple tables are involved.`;
 
       // Create a custom RouterChain with FRESH schema awareness
       this.routerChain = {
@@ -1024,6 +1046,14 @@ Ensure the query follows medical database best practices and is production-ready
       const schemaInfo = this.sqlDatabase ? await this.sqlDatabase.getTableInfo() : '';
       
       // Define prompts for different medical query scenarios with schema knowledge
+      const dbType = this.dbConfig.type?.toLocaleLowerCase() || 'mysql';
+      const dbSpecificRules = dbType === 'postgresql' ? 
+        `- Use ILIKE for case-insensitive text matching
+- Use proper PostgreSQL data types and casting
+- Use double quotes for identifiers if needed` :
+        `- Use LIKE for text pattern matching
+- Use proper MySQL data types and casting`;
+
       const promptInfos = [
         {
           name: "patient_demographics",
@@ -1038,10 +1068,11 @@ Ensure the query follows medical database best practices and is production-ready
           CRITICAL SQL RULES:
           - Use ONLY the tables and columns that exist in the schema above
           - If multiple tables needed, include proper JOIN clauses with foreign key relationships  
-          - Generate complete, executable MySQL queries
+          - Generate complete, executable ${dbType.toUpperCase()} queries
           - Return ALL matching records unless specifically asked for a limit
+          ${dbSpecificRules}
           
-          Generate a complete MySQL query to retrieve patient demographic information:
+          Generate a complete ${dbType.toUpperCase()} query to retrieve patient demographic information:
           
           SQL Query:`
         },
@@ -1058,10 +1089,11 @@ Ensure the query follows medical database best practices and is production-ready
           CRITICAL SQL RULES:
           - Use ONLY the tables and columns that exist in the schema above
           - If multiple tables needed, include proper JOIN clauses with foreign key relationships
-          - Generate complete, executable MySQL queries
+          - Generate complete, executable ${dbType.toUpperCase()} queries
           - Return ALL matching records unless specifically asked for a limit
+          ${dbSpecificRules}
           
-          Generate a complete MySQL query to retrieve clinical test data and measurements:
+          Generate a complete ${dbType.toUpperCase()} query to retrieve clinical test data and measurements:
           
           SQL Query:`
         },
@@ -1079,10 +1111,11 @@ Ensure the query follows medical database best practices and is production-ready
           - Use ONLY the tables and columns that exist in the schema above
           - If multiple tables needed, include proper JOIN clauses with foreign key relationships
           - For dosage comparisons, use proper numeric extraction techniques if needed
-          - Generate complete, executable MySQL queries
+          - Generate complete, executable ${dbType.toUpperCase()} queries
           - Return ALL matching records unless specifically asked for a limit
+          ${dbSpecificRules}
           
-          Generate a complete MySQL query to retrieve medication and prescription data:
+          Generate a complete ${dbType.toUpperCase()} query to retrieve medication and prescription data:
           
           SQL Query:`
         },
@@ -1099,10 +1132,11 @@ Ensure the query follows medical database best practices and is production-ready
           CRITICAL SQL RULES:
           - Use ONLY the tables and columns that exist in the schema above
           - If multiple tables needed, include proper JOIN clauses with foreign key relationships
-          - Generate complete, executable MySQL queries
+          - Generate complete, executable ${dbType.toUpperCase()} queries
           - Return ALL matching records unless specifically asked for a limit
+          ${dbSpecificRules}
           
-          Generate a complete MySQL query to retrieve genetic test data and pharmacogenomic results:
+          Generate a complete ${dbType.toUpperCase()} query to retrieve genetic test data and pharmacogenomic results:
           
           SQL Query:`
         },
@@ -1120,10 +1154,11 @@ Ensure the query follows medical database best practices and is production-ready
           - Use ONLY the tables and columns that exist in the schema above
           - If multiple tables needed, include proper JOIN clauses with foreign key relationships
           - Use functions like: COUNT, AVG, SUM, GROUP BY, HAVING as needed
-          - Generate complete, executable MySQL queries with proper aggregations
+          - Generate complete, executable ${dbType.toUpperCase()} queries with proper aggregations
           - Return ALL matching records unless specifically asked for a limit
+          ${dbSpecificRules}
           
-          Generate a complete MySQL query with appropriate aggregations and analytics:
+          Generate a complete ${dbType.toUpperCase()} query with appropriate aggregations and analytics:
           
           SQL Query:`
         }
@@ -1322,45 +1357,19 @@ Ensure the query follows medical database best practices and is production-ready
 
   public async connectToDatabase(): Promise<void> {
     try {
-      console.log('🔗 Connecting to MySQL database...');
+      console.log('🔗 Connecting to database...');
 
-      // Test basic connection first
-      const testConnection = await mysql.createConnection({
-        host: this.dbConfig.host,
-        port: this.dbConfig.port,
-        user: this.dbConfig.username,
-        password: this.dbConfig.password,
-        database: this.dbConfig.database,
-      });
-      await testConnection.ping();
-      console.log('✅ Basic MySQL connection established');
-      await testConnection.end();
+      // Determine database type from configuration
+      const dbType = this.dbConfig.type?.toLocaleLowerCase() || 'mysql'; // Default to mysql for backward compatibility
+      console.log(`📊 Database type: ${dbType}`);
 
-      // Create TypeORM DataSource for LangChain
-      const dataSource = new DataSource({
-        type: 'mysql',
-        host: this.dbConfig.host,
-        port: this.dbConfig.port,
-        username: this.dbConfig.username,
-        password: this.dbConfig.password,
-        database: this.dbConfig.database,
-        synchronize: false, // Don't modify existing database structure
-        logging: false,
-        entities: [], // No entities needed for SQL queries
-      });
-
-      console.log('🔗 Initializing TypeORM DataSource...');
-
-      // Initialize the data source
-      await dataSource.initialize();
-      console.log('✅ TypeORM DataSource initialized');
-
-      // Create LangChain SqlDatabase
-      this.sqlDatabase = await SqlDatabase.fromDataSourceParams({
-        appDataSource: dataSource,
-      });
-
-      console.log('✅ LangChain SqlDatabase created');
+      if (dbType === 'mysql' || dbType === 'mariadb') {
+        await this.connectToMySQL();
+      } else if (dbType === 'postgresql') {
+        await this.connectToPostgreSQL();
+      } else {
+        throw new Error(`Unsupported database type: ${dbType}`);
+      }
 
       // Build Schema Intelligence
       await this.buildSchemaIntelligence();
@@ -1375,6 +1384,105 @@ Ensure the query follows medical database best practices and is production-ready
     }
   }
 
+  private async connectToMySQL(): Promise<void> {
+    console.log('🔗 Connecting to MySQL database...');
+
+    // Test basic connection first
+    const testConnection = await mysql.createConnection({
+      host: this.dbConfig.host,
+      port: this.dbConfig.port,
+      user: this.dbConfig.username,
+      password: this.dbConfig.password,
+      database: this.dbConfig.database,
+    });
+    await testConnection.ping();
+    console.log('✅ Basic MySQL connection established');
+    await testConnection.end();
+
+    // Create TypeORM DataSource for LangChain
+    const dataSource = new DataSource({
+      type: 'mysql',
+      host: this.dbConfig.host,
+      port: this.dbConfig.port,
+      username: this.dbConfig.username,
+      password: this.dbConfig.password,
+      database: this.dbConfig.database,
+      synchronize: false, // Don't modify existing database structure
+      logging: false,
+      entities: [], // No entities needed for SQL queries
+    });
+
+    console.log('🔗 Initializing TypeORM DataSource for MySQL...');
+
+    // Initialize the data source
+    await dataSource.initialize();
+    console.log('✅ TypeORM DataSource initialized for MySQL');
+
+    // Create LangChain SqlDatabase
+    this.sqlDatabase = await SqlDatabase.fromDataSourceParams({
+      appDataSource: dataSource,
+    });
+
+    console.log('✅ LangChain SqlDatabase created for MySQL');
+  }
+
+  private async connectToPostgreSQL(): Promise<void> {
+    console.log('🔗 Connecting to PostgreSQL database...');
+
+    // Test basic connection first
+    const { Client } = require('pg');
+    const testClient = new Client({
+      host: this.dbConfig.host,
+      port: this.dbConfig.port,
+      database: this.dbConfig.database,
+      user: this.dbConfig.username,
+      password: this.dbConfig.password,
+      ssl: {
+        rejectUnauthorized: false,
+        sslmode: 'require'
+      }
+    });
+    
+    await testClient.connect();
+    await testClient.query('SELECT 1');
+    console.log('✅ Basic PostgreSQL connection established');
+    await testClient.end();
+
+    // Create TypeORM DataSource for LangChain
+    const dataSource = new DataSource({
+      type: 'postgres',
+      host: this.dbConfig.host,
+      port: this.dbConfig.port,
+      username: this.dbConfig.username,
+      password: this.dbConfig.password,
+      database: this.dbConfig.database,
+      ssl: {
+        rejectUnauthorized: false
+      },
+      extra: {
+        ssl: {
+          rejectUnauthorized: false
+        }
+      },
+      synchronize: false, // Don't modify existing database structure
+      logging: false,
+      entities: [], // No entities needed for SQL queries
+    });
+
+    console.log('🔗 Initializing TypeORM DataSource for PostgreSQL...');
+
+    // Initialize the data source
+    await dataSource.initialize();
+    console.log('✅ TypeORM DataSource initialized for PostgreSQL');
+
+    // Create LangChain SqlDatabase
+    this.sqlDatabase = await SqlDatabase.fromDataSourceParams({
+      appDataSource: dataSource,
+    });
+
+    console.log('✅ LangChain SqlDatabase created for PostgreSQL');
+  }
+
   public async initializeChains(): Promise<void> {
     if (!this.sqlDatabase) {
       throw new Error('Database must be connected before initializing chains');
@@ -1382,10 +1490,11 @@ Ensure the query follows medical database best practices and is production-ready
 
     try {
       // Create SQL Chain for database queries
+      const dbType = this.dbConfig.type?.toLocaleLowerCase() || 'mysql';
       this.sqlChain = new LLMChain({
         llm: this.llm,
         prompt: PromptTemplate.fromTemplate(`
-          You are a medical database expert. Given an input question, create a syntactically correct MySQL query.
+          You are a medical database expert. Given an input question, create a syntactically correct ${dbType.toUpperCase()} query.
           
           Use the following format:
           Question: {input}
@@ -1430,12 +1539,23 @@ Ensure the query follows medical database best practices and is production-ready
 
     try {
       // Create SQL Agent with custom configuration to return all results
+      const dbType = this.dbConfig.type?.toLocaleLowerCase() || 'mysql';
+      const dbSpecificInstructions = dbType === 'postgresql' ? 
+        `Given an input question, create a syntactically correct PostgreSQL query to run, then look at the results of the query and return the answer.
+Use proper PostgreSQL syntax and functions.
+For text pattern matching, use ILIKE instead of LIKE for case-insensitive matching.
+Use proper PostgreSQL data types and casting when needed.` :
+        `Given an input question, create a syntactically correct MySQL query to run, then look at the results of the query and return the answer.
+Use proper MySQL syntax and functions.
+For text pattern matching, use LIKE for case-sensitive matching.
+Use proper MySQL data types and casting when needed.`;
+
       this.sqlAgent = await createSqlAgent(
         this.llm,
         this.sqlToolkit,
         {
-          prefix: `You are an agent designed to interact with a SQL database.
-Given an input question, create a syntactically correct MySQL query to run, then look at the results of the query and return the answer.
+          prefix: `You are an agent designed to interact with a ${dbType.toUpperCase()} database.
+${dbSpecificInstructions}
 IMPORTANT: Unless the user specifically asks for a limited number of results, always return ALL matching records from the database.
 Do NOT automatically limit results - the user needs complete data for analysis.
 You can order the results by a relevant column to return the most interesting examples in the database.
@@ -1450,7 +1570,7 @@ CRITICAL DATA HANDLING RULES:
 1. For numeric range queries in text fields, analyze the actual column data type first
 2. If the field is numeric, use direct numeric comparisons
 3. If the field is text containing numbers, use appropriate extraction techniques
-4. Use proper MySQL functions compatible with the database version
+4. Use proper ${dbType.toUpperCase()} functions compatible with the database version
 5. Examples of flexible approaches:
    - For numeric fields: WHERE field_name BETWEEN 200 AND 500
    - For text fields with numbers: Use LIKE patterns or REGEXP as appropriate
