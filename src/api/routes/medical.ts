@@ -135,26 +135,28 @@ function getAzureOpenAIClient(): AzureOpenAI | null {
 }
 
 /**
- * Restructure SQL results using Azure OpenAI to create nested, non-redundant JSON structure
+ * Generate restructured SQL query using Azure OpenAI to produce structured, non-redundant results
  * 
- * This function takes the flat SQL results and uses Azure OpenAI to:
- * 1. Eliminate redundancy (e.g., same patient with multiple medications becomes one patient with medications array)
- * 2. Create meaningful hierarchical structure
- * 3. Group related data logically
- * 4. Provide structured explanation of the transformation
+ * This function takes the original SQL query and uses Azure OpenAI to:
+ * 1. Generate a new SQL query that eliminates redundancy using JSON aggregation
+ * 2. Create meaningful hierarchical structure directly in SQL
+ * 3. Group related data logically using GROUP BY and JSON functions
+ * 4. Provide structured explanation of the SQL transformation
  * 
- * Works with both MySQL and PostgreSQL databases
+ * Works with both MySQL and PostgreSQL databases using their JSON functions
  * 
- * @param sqlQuery - The SQL query that was executed
- * @param sqlResults - The flat results from SQL execution  
+ * @param originalSQL - The original SQL query that was executed
+ * @param sqlResults - Sample results from original SQL execution for analysis
  * @param userPrompt - The original user query for context
+ * @param dbType - Database type ('mysql' or 'postgresql') for appropriate JSON syntax
  * @param sampleSize - Number of sample records to send to Azure OpenAI for analysis
- * @returns Restructured data with success/failure information
+ * @returns Restructured SQL query with success/failure information
  */
-async function restructureSQLResults(
-    sqlQuery: string, 
+async function generateRestructuredSQL(
+    originalSQL: string, 
     sqlResults: any[], 
     userPrompt: string, 
+    dbType: string,
     sampleSize: number = 3
 ): Promise<any> {
     try {
@@ -170,63 +172,126 @@ async function restructureSQLResults(
         }
 
         const restructuringPrompt = `
-You are an expert data analyst. Your task is to restructure SQL query results into a more meaningful, hierarchical JSON format that eliminates redundancy and groups related data logically.
+You are an expert SQL developer specializing in transforming flat relational queries into structured, hierarchical queries that eliminate redundancy using JSON aggregation functions.
 
 USER PROMPT: "${userPrompt}"
 
-SQL QUERY EXECUTED:
+ORIGINAL SQL QUERY:
 \`\`\`sql
-${sqlQuery}
+${originalSQL}
 \`\`\`
 
-SAMPLE SQL RESULTS (first ${sampleSize} records):
+SAMPLE RESULTS FROM ORIGINAL QUERY (first ${sampleSize} records):
 \`\`\`json
 ${JSON.stringify(sampleResults, null, 2)}
 \`\`\`
 
-TOTAL RECORDS: ${sqlResults.length}
+DATABASE TYPE: ${dbType.toUpperCase()}
+
+TOTAL RECORDS IN ORIGINAL RESULT: ${sqlResults.length}
+
+TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database.
 
 RESTRUCTURING REQUIREMENTS:
-1. **ELIMINATE REDUNDANCY**: Group related data to avoid repetition (e.g., same patient with multiple medications should be one patient object with medications array)
-2. **CREATE HIERARCHY**: Structure data in nested objects/arrays that represent real-world relationships
-3. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original results
-4. **BE LOGICAL**: Structure should make business sense for medical data
-5. **USE MEANINGFUL KEYS**: Use descriptive property names that reflect the data content
+1. **ELIMINATE REDUNDANCY**: Use GROUP BY to group related entities (e.g., patients, medications, lab tests)
+2. **CREATE JSON HIERARCHY**: Use ${dbType === 'mysql' ? 'JSON_OBJECT() and JSON_ARRAYAGG()' : 'json_build_object() and json_agg()'} functions to create nested structures
+3. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original query
+4. **BE LOGICAL**: Structure should make business sense for medical data (group by patient, medication, test type, etc.)
+5. **USE APPROPRIATE GROUPING**: Identify the main entity (patient, medication, test, etc.) and group related data under it
+
+DATABASE-SPECIFIC JSON FUNCTIONS:
+${dbType === 'mysql' ? `
+- JSON_OBJECT('key', value, 'key2', value2) - creates JSON object
+- JSON_ARRAYAGG(JSON_OBJECT('key', value)) - creates array of JSON objects
+- GROUP_CONCAT(DISTINCT column) - concatenates values (alternative to JSON)
+` : `
+- json_build_object('key', value, 'key2', value2) - creates JSON object  
+- json_agg(json_build_object('key', value)) - creates array of JSON objects
+- array_agg(DISTINCT column) - creates array of values
+`}
+
+EXAMPLE TRANSFORMATIONS:
+
+Original flat query returning patient-medication pairs:
+\`\`\`sql
+SELECT p.name, p.age, m.medication_name, m.dosage 
+FROM patients p JOIN medications m ON p.id = m.patient_id
+\`\`\`
+
+Restructured query with hierarchy:
+${dbType === 'mysql' ? `
+\`\`\`sql
+SELECT 
+    JSON_OBJECT(
+        'patient', JSON_OBJECT(
+            'name', p.name,
+            'age', p.age,
+            'id', p.id
+        ),
+        'medications', JSON_ARRAYAGG(
+            JSON_OBJECT(
+                'medication_name', m.medication_name,
+                'dosage', m.dosage,
+                'frequency', m.frequency
+            )
+        ),
+        'total_medications', COUNT(m.id)
+    ) as structured_result
+FROM patients p 
+LEFT JOIN medications m ON p.id = m.patient_id 
+GROUP BY p.id, p.name, p.age
+\`\`\`
+` : `
+\`\`\`sql
+SELECT 
+    json_build_object(
+        'patient', json_build_object(
+            'name', p.name,
+            'age', p.age,
+            'id', p.id
+        ),
+        'medications', json_agg(
+            json_build_object(
+                'medication_name', m.medication_name,
+                'dosage', m.dosage,
+                'frequency', m.frequency
+            )
+        ),
+        'total_medications', count(m.id)
+    ) as structured_result
+FROM patients p 
+LEFT JOIN medications m ON p.id = m.patient_id 
+GROUP BY p.id, p.name, p.age
+\`\`\`
+`}
 
 EXPECTED OUTPUT FORMAT:
 Return a JSON object with this structure:
 {
-  "restructured_data": [
-    // Your restructured data here - make it deep and hierarchical
-    // Example for patient-medication data:
-    // {
-    //   "patient": {
-    //     "name": "John Doe",
-    //     "age": 45,
-    //     "demographics": {...}
-    //   },
-    //   "medications": [
-    //     {"name": "Drug A", "dosage": "10mg", "frequency": "daily"},
-    //     {"name": "Drug B", "dosage": "5mg", "frequency": "twice daily"}
-    //   ],
-    //   "lab_results": [...],
-    //   "risk_assessment": {...}
-    // }
-  ],
-  "structure_explanation": "Brief explanation of how you structured the data and why",
-  "grouping_logic": "Explanation of what entities you grouped together",
-  "eliminated_redundancy": "Description of what redundancy was eliminated"
+  "restructured_sql": "your_new_sql_query_here",
+  "explanation": "Brief explanation of how you restructured the query and why",
+  "grouping_logic": "Explanation of what entities you grouped together (e.g., 'Grouped by patient_id to eliminate patient duplication')",
+  "expected_structure": "Description of the JSON structure the new query will produce",
+  "main_entity": "The primary entity being grouped (e.g., 'patient', 'medication', 'lab_test')"
 }
 
-IMPORTANT: 
-- Focus on creating meaningful groups based on the user's query intent
-- If the data represents patients, group by patient
-- If it represents medications, group by medication type or category
-- If it represents lab results, group by patient or test type
-- Make the structure intuitive for the end user
-- Ensure the restructured data fully represents the original query results
+CRITICAL REQUIREMENTS:
+- Generate a complete, executable SQL query that uses JSON functions
+- The query should return fewer rows than the original (due to grouping)
+- Each row should contain a JSON object with hierarchical structure
+- Use appropriate GROUP BY clause to eliminate redundancy
+- Include all original data but organized hierarchically
+- Use LEFT JOIN if needed to preserve main entities even without related data
+- Test that your SQL syntax is correct for ${dbType.toUpperCase()}
 
-Return only valid JSON without any markdown formatting or explanations outside the JSON.
+IMPORTANT: 
+- Focus on the primary entity that appears most frequently in the sample data
+- If data shows patients with multiple medications, group by patient
+- If data shows medications with multiple effects, group by medication  
+- If data shows lab tests with multiple results, group by test or patient
+- Use the user's original query intent to determine the best grouping strategy
+
+Return only valid JSON without any markdown formatting, comments, or explanations outside the JSON.
 `;
 
         console.log('🤖 Sending restructuring request to Azure OpenAI...');
@@ -241,7 +306,7 @@ Return only valid JSON without any markdown formatting or explanations outside t
             messages: [
                 {
                     role: "system",
-                    content: "You are an expert data analyst specializing in restructuring relational database results into meaningful hierarchical JSON structures. Always return valid JSON."
+                    content: "You are an expert data analyst specializing in restructuring relational database results into meaningful hierarchical JSON structures. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse()."
                 },
                 {
                     role: "user",
@@ -258,44 +323,128 @@ Return only valid JSON without any markdown formatting or explanations outside t
             throw new Error('No response from OpenAI');
         }
 
-        // Parse the OpenAI response
+        console.log('🔍 Azure OpenAI response length:', openaiResponse.length);
+        console.log('🔍 Response preview:', openaiResponse.substring(0, 200) + '...');
+
+        // Parse the OpenAI response with robust error handling
         let restructuredResult;
         try {
-            // Clean the response (remove any markdown formatting)
-            const cleanedResponse = openaiResponse
+            // Clean the response (remove any markdown formatting and comments)
+            let cleanedResponse = openaiResponse
                 .replace(/```json\n?/g, '')
                 .replace(/```\n?/g, '')
+                .replace(/```/g, '')
                 .trim();
             
-            restructuredResult = JSON.parse(cleanedResponse);
+            // Remove any single-line comments (//)
+            cleanedResponse = cleanedResponse.replace(/\/\/.*$/gm, '');
+            
+            // Remove any multi-line comments (/* ... */)
+            cleanedResponse = cleanedResponse.replace(/\/\*[\s\S]*?\*\//g, '');
+            
+            // Remove any trailing commas before closing brackets/braces
+            cleanedResponse = cleanedResponse.replace(/,(\s*[\]}])/g, '$1');
+            
+            // First parsing attempt
+            try {
+                restructuredResult = JSON.parse(cleanedResponse);
+            } catch (firstParseError) {
+                console.log('🔄 First parse failed, trying to extract JSON object...');
+                
+                // Try to find the JSON object within the response
+                const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    const extractedJson = jsonMatch[0];
+                    
+                    // Clean the extracted JSON further
+                    const finalCleanedJson = extractedJson
+                        .replace(/\/\/.*$/gm, '')
+                        .replace(/\/\*[\s\S]*?\*\//g, '')
+                        .replace(/,(\s*[\]}])/g, '$1');
+                    
+                    restructuredResult = JSON.parse(finalCleanedJson);
+                } else {
+                    throw new Error('No valid JSON object found in response');
+                }
+            }
         } catch (parseError) {
             console.error('❌ Failed to parse Azure OpenAI response as JSON:', parseError);
+            console.error('❌ Raw response:', openaiResponse.substring(0, 1000) + '...');
+            console.error('❌ Error at position:', (parseError as any).message);
+            
             return {
-                restructured_data: sqlResults, // Fallback to original data
+                restructured_sql: originalSQL, // Fallback to original SQL
                 restructure_success: false,
                 restructure_message: `Azure OpenAI response parsing failed: ${parseError}`,
-                raw_openai_response: openaiResponse
+                raw_openai_response: openaiResponse.substring(0, 500) + '...',
+                error_details: `Parse error: ${parseError}. Response preview: ${openaiResponse.substring(0, 200)}...`,
+                explanation: "Error parsing AI response",
+                grouping_logic: "No grouping applied due to parsing error",
+                expected_structure: "Original flat structure maintained"
             };
         }
 
-        console.log('✅ Successfully restructured SQL results with Azure OpenAI');
+        // Validate the parsed result structure
+        if (!restructuredResult || typeof restructuredResult !== 'object') {
+            throw new Error('Parsed result is not a valid object');
+        }
+
+        if (!restructuredResult.restructured_sql || typeof restructuredResult.restructured_sql !== 'string') {
+            console.log('⚠️ Invalid structure, no restructured SQL found...');
+            
+            return {
+                restructured_sql: originalSQL, // Fallback to original SQL
+                restructure_success: false,
+                restructure_message: "No restructured SQL generated by AI, using original query",
+                explanation: "AI did not provide a restructured SQL query",
+                grouping_logic: "No grouping applied",
+                expected_structure: "Original flat structure maintained"
+            };
+        }
+
+        // Validate that the generated SQL is different from the original
+        const cleanedGeneratedSQL = restructuredResult.restructured_sql.trim().replace(/\s+/g, ' ');
+        const cleanedOriginalSQL = originalSQL.trim().replace(/\s+/g, ' ');
+        
+        if (cleanedGeneratedSQL.toLowerCase() === cleanedOriginalSQL.toLowerCase()) {
+            console.log('⚠️ Generated SQL is identical to original, no restructuring benefit...');
+            
+            return {
+                restructured_sql: originalSQL,
+                restructure_success: false,
+                restructure_message: "Generated SQL is identical to original query",
+                explanation: restructuredResult.explanation || "No restructuring applied",
+                grouping_logic: restructuredResult.grouping_logic || "No grouping applied",
+                expected_structure: restructuredResult.expected_structure || "Original structure maintained"
+            };
+        }
+
+        console.log('✅ Successfully generated restructured SQL query with Azure OpenAI');
         
         return {
-            ...restructuredResult,
+            restructured_sql: restructuredResult.restructured_sql,
             restructure_success: true,
-            restructure_message: "Successfully restructured data using Azure OpenAI",
-            original_record_count: sqlResults.length,
-            sample_size_used: sampleSize
+            restructure_message: "Successfully generated restructured SQL query using Azure OpenAI",
+            explanation: restructuredResult.explanation || "SQL query restructured for better data organization",
+            grouping_logic: restructuredResult.grouping_logic || "Applied intelligent grouping based on data analysis",
+            expected_structure: restructuredResult.expected_structure || "Hierarchical JSON structure with reduced redundancy",
+            main_entity: restructuredResult.main_entity || "Unknown",
+            original_sql: originalSQL,
+            sample_size_used: sampleSize,
+            database_type: dbType
         };
 
     } catch (error: any) {
-        console.error('❌ Error restructuring SQL results with Azure OpenAI:', error.message);
+        console.error('❌ Error generating restructured SQL with Azure OpenAI:', error.message);
         
         return {
-            restructured_data: sqlResults, // Fallback to original data
+            restructured_sql: originalSQL, // Fallback to original SQL
             restructure_success: false,
-            restructure_message: `Restructuring failed: ${error.message}`,
-            error_details: error.message
+            restructure_message: `SQL restructuring failed: ${error.message}`,
+            error_details: error.message,
+            explanation: "Error occurred during SQL restructuring",
+            grouping_logic: "No grouping applied due to error",
+            expected_structure: "Original flat structure maintained"
         };
     }
 }
@@ -1947,6 +2096,12 @@ STEP 2: IDENTIFY RELEVANT TABLES WITH STRICT ENTITY FOCUS
 - **CRITICAL: Related tables should provide columns used in filtering/conditions AND relevant context**
 - For each potentially relevant table, explicitly state why you believe it's needed
 - Document your table selection decisions with clear reasoning
+- **CRITICAL CONDITION-BASED TABLE SELECTION RULE:**
+  * **If multiple tables have similar or overlapping meanings/purposes, ALWAYS choose the table that contains the CONDITION COLUMNS from the user query**
+  * **PRIORITIZE tables where the user's WHERE/HAVING/filtering conditions can be applied**
+  * **Only go to those tables where the user query condition lies - avoid tables that don't have the filtering criteria**
+  * **Example: If user asks "patients with high glucose", choose the table that has glucose columns, not just patient demographics**
+  * **Example: If user asks "medications with dosage > 100mg", choose the table that has dosage columns, not just medication names**
 - EXPERT TABLE SELECTION RULES:
   * If multiple tables seem related to the same medical concept (e.g., multiple patient tables, test tables, etc.), analyze the query context carefully
   * Choose tables based on QUERY SPECIFICITY: More specific user requirements should guide you to more specialized tables
@@ -1968,10 +2123,17 @@ STEP 3: EXPLORE SCHEMA OF EACH RELEVANT TABLE
   * Descriptive fields that provide business context (to INCLUDE in SELECT)
 - This step is MANDATORY for EVERY relevant table
 - SMART TABLE COMPARISON: If you discover multiple tables with similar schemas, compare them and choose the one that:
+  * **MOST IMPORTANT: Contains the CONDITION COLUMNS from the user query (e.g., glucose_level, dosage, risk_category)**
+  * **Has the exact columns needed for WHERE/HAVING clauses in the user query**
   * Has more columns relevant to the user's specific query
   * Contains the exact data types mentioned in the query
   * Has better foreign key relationships for joining
   * Appears to be the primary/main table (usually has more comprehensive data)
+- **CONDITION-COLUMN PRIORITY RULE:**
+  * **If user asks about "high glucose patients", prioritize tables with glucose columns**
+  * **If user asks about "expensive medications", prioritize tables with cost/price columns**
+  * **If user asks about "recent lab results", prioritize tables with date columns and result data**
+  * **Always choose the table that can fulfill the filtering conditions directly**
 
 STEP 4: MAP QUERY REQUIREMENTS TO SCHEMA WITH SELECTIVE COLUMN APPROACH
 - Create an explicit mapping between the user's requirements and the discovered schema
@@ -1994,9 +2156,14 @@ STEP 4: MAP QUERY REQUIREMENTS TO SCHEMA WITH SELECTIVE COLUMN APPROACH
   * Minimal context columns that explain the business logic
 - This step ensures you include ONLY what's needed to answer the user's question
 - RESOLVE TABLE CONFLICTS: If multiple tables could satisfy the same requirement, choose based on:
-  * Data completeness (table with more comprehensive information)
-  * Query specificity (more specialized table for specific queries)
-  * Join efficiency (table that requires fewer complex joins)
+  * **PRIORITY 1: CONDITION COLUMNS - Choose the table that contains the columns needed for WHERE/HAVING clauses**
+  * **PRIORITY 2: Data completeness (table with more comprehensive information)**
+  * **PRIORITY 3: Query specificity (more specialized table for specific queries)**
+  * **PRIORITY 4: Join efficiency (table that requires fewer complex joins)**
+- **CONDITION-FIRST TABLE SELECTION:**
+  * **Always prioritize the table that can directly satisfy the user's filtering conditions**
+  * **If user mentions specific values/ranges/conditions, choose the table with those exact columns**
+  * **Avoid unnecessary joins to tables that don't contain the condition columns**
 
 STEP 5: CONSTRUCT THE SQL QUERY WITH SELECTIVE AND FOCUSED SELECT CLAUSE
 - **CRITICAL SELECT CLAUSE CONSTRUCTION:**
@@ -2083,6 +2250,32 @@ When you encounter multiple tables that could potentially serve the same purpose
 
 **ENHANCED COLUMN SELECTION EXAMPLES WITH FOCUSED APPROACH:**
 
+**CONDITION-BASED TABLE SELECTION EXAMPLES:**
+
+Example 1: "Find patients with glucose levels above 200"
+- WRONG: Choose patients table and JOIN to lab_results
+- CORRECT: Choose lab_results table as PRIMARY (has glucose_level column for condition)
+- SQL: SELECT lr.test_date, lr.glucose_level, p.patient_name FROM lab_results lr JOIN patients p ON lr.patient_id = p.patient_id WHERE lr.glucose_level > 200
+
+Example 2: "Show medications with dosage greater than 100mg"
+- WRONG: Choose medication_names table and try to JOIN for dosage
+- CORRECT: Choose medication_dosages or prescriptions table (has dosage column for condition)
+- SQL: SELECT m.medication_name, m.dosage, p.patient_name FROM prescriptions m JOIN patients p ON m.patient_id = p.patient_id WHERE m.dosage > 100
+
+Example 3: "Find high-risk patients with moderate risk category"
+- WRONG: Choose patients table and try to JOIN for risk data
+- CORRECT: Choose risk_assessment or risk_details table (has risk_category column for condition)
+- SQL: SELECT r.risk_category, r.risk_score, p.patient_name FROM risk_details r JOIN patients p ON r.patient_id = p.patient_id WHERE r.risk_category = 'Moderate'
+
+Example 4: "Show recent lab tests from last 30 days"
+- WRONG: Choose patients table and try to JOIN for dates
+- CORRECT: Choose lab_results or test_results table (has test_date column for condition)
+- SQL: SELECT lr.test_date, lr.test_type, lr.result_value, p.patient_name FROM lab_results lr JOIN patients p ON lr.patient_id = p.patient_id WHERE lr.test_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+
+**KEY PRINCIPLE: Always choose the table that contains the condition columns first, then JOIN to get additional context if needed.**
+
+**TRADITIONAL COLUMN SELECTION EXAMPLES:**
+
 Example 1: "Find patients with the highest number of total medications and check if any of them are marked as Safe"
 - PRIMARY ENTITY: patients table
 - FOCUSED SQL: SELECT p.patient_name, p.age, m.safety_status, m.medication_name, m.total_count FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE m.safety_status = 'Safe' ORDER BY m.total_count DESC
@@ -2115,8 +2308,12 @@ Example 4: "Show patients with moderate risk categories and their therapeutic cl
 ✅ ID columns excluded unless specifically needed
 ✅ SELECT clause focused and answers the user's specific question
 ✅ No unnecessary columns that don't contribute to query intent
+✅ **CONDITION-BASED TABLE SELECTION: Primary table chosen based on WHERE clause columns**
+✅ **MULTIPLE TABLE RULE: If tables have similar meaning, chose the one with condition columns**
 
 Remember: You are an EXPERT - use your knowledge to make intelligent decisions about table selection AND always create focused SELECT clauses with explicit column names that directly answer the user's question.
+
+**CRITICAL TABLE SELECTION PRINCIPLE: When multiple tables seem similar, ALWAYS choose the table that contains the columns needed for your WHERE/HAVING conditions. This avoids unnecessary complex joins and focuses on the data that directly satisfies the user's criteria.**
 
 USER QUERY: ${query}
 
@@ -2879,12 +3076,7 @@ Return only valid, semantic HTML.`;
                         }
                     }
 
-                    // Close connection
-                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                        await connection.end();
-                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                        await connection.end();
-                    }
+                    // Note: Connection will be closed after all operations including restructured SQL
 
                     // Process graph data if requested
                     let graphData = null;
@@ -3086,8 +3278,8 @@ Return only valid, semantic HTML.`;
                         timestamp: new Date().toISOString()
                     };
 
-                    // ========== STEP: RESTRUCTURE SQL RESULTS WITH OPENAI ==========
-                    console.log('🤖 Step: Restructuring SQL results with Azure OpenAI for better data organization...');
+                    // ========== STEP: GENERATE RESTRUCTURED SQL WITH AZURE OPENAI ==========
+                    console.log('🤖 Step: Generating restructured SQL with Azure OpenAI for better data organization...');
                     
                     let restructuredResults = null;
                     try {
@@ -3102,39 +3294,96 @@ Return only valid, semantic HTML.`;
                         }
                         // Only restructure if we have actual data and it's an array with records
                         else if (Array.isArray(rows) && rows.length > 0) {
-                            console.log(`🔄 Restructuring ${rows.length} SQL result records using Azure OpenAI...`);
+                            console.log(`🔄 Generating restructured SQL query for ${rows.length} records using Azure OpenAI...`);
                             
-                            restructuredResults = await restructureSQLResults(
+                            restructuredResults = await generateRestructuredSQL(
                                 finalSQL,
                                 rows,
                                 query,
+                                dbConfig.type.toLocaleLowerCase(),
                                 3 // Sample size for OpenAI analysis
                             );
                             
-                            console.log('✅ SQL results restructuring completed');
+                            console.log('✅ SQL restructuring completed');
                             
-                            // Add restructured data to sql_results
-                            if (restructuredResults && restructuredResults.restructure_success) {
-                                (response.sql_results as any).sql_final = restructuredResults.restructured_data;
-                                (response.sql_results as any).restructure_info = {
-                                    success: true,
-                                    message: restructuredResults.restructure_message,
-                                    structure_explanation: restructuredResults.structure_explanation,
-                                    grouping_logic: restructuredResults.grouping_logic,
-                                    eliminated_redundancy: restructuredResults.eliminated_redundancy,
-                                    original_record_count: restructuredResults.original_record_count,
-                                    sample_size_used: restructuredResults.sample_size_used,
-                                    database_type: dbConfig.type.toLocaleLowerCase()
-                                };
-                                console.log('✅ Enhanced response with restructured data');
+                            // If we successfully generated a restructured SQL, execute it
+                            if (restructuredResults && restructuredResults.restructure_success && restructuredResults.restructured_sql) {
+                                try {
+                                    console.log('🔄 Executing restructured SQL query...');
+                                    console.log('🔧 Restructured SQL:', restructuredResults.restructured_sql);
+                                    
+                                    // Check if connection is still valid, create new one if needed
+                                    if (!connection || 
+                                        (connection.state && connection.state === 'disconnected') || 
+                                        (connection.destroyed !== undefined && connection.destroyed) ||
+                                        (connection._fatalError !== undefined)) {
+                                        console.log('🔄 Recreating database connection for restructured SQL...');
+                                        if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                            connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                        } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                            connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                        }
+                                        console.log('✅ Database connection recreated successfully');
+                                    } else {
+                                        console.log('✅ Using existing database connection for restructured SQL');
+                                    }
+                                    
+                                    let restructuredRows: any[] = [];
+                                    let restructuredFields: any = null;
+                                    
+                                    // Execute the restructured SQL query
+                                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                        const [mysqlRows, mysqlFields] = await connection.execute(restructuredResults.restructured_sql);
+                                        restructuredRows = mysqlRows;
+                                        restructuredFields = mysqlFields;
+                                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                        const result = await connection.query(restructuredResults.restructured_sql);
+                                        restructuredRows = result.rows;
+                                        restructuredFields = result.fields;
+                                    }
+                                    
+                                    console.log(`✅ Restructured query executed successfully, returned ${Array.isArray(restructuredRows) ? restructuredRows.length : 0} structured rows`);
+                                    
+                                    // Add restructured data to sql_results
+                                    (response.sql_results as any).sql_final = restructuredRows;
+                                    (response.sql_results as any).restructure_info = {
+                                        success: true,
+                                        message: "Successfully executed restructured SQL query",
+                                        restructured_sql: restructuredResults.restructured_sql,
+                                        explanation: restructuredResults.explanation,
+                                        grouping_logic: restructuredResults.grouping_logic,
+                                        expected_structure: restructuredResults.expected_structure,
+                                        main_entity: restructuredResults.main_entity,
+                                        original_record_count: rows.length,
+                                        restructured_record_count: Array.isArray(restructuredRows) ? restructuredRows.length : 0,
+                                        sample_size_used: 3,
+                                        database_type: dbConfig.type.toLocaleLowerCase()
+                                    };
+                                    console.log('✅ Enhanced response with restructured SQL results');
+                                    
+                                } catch (restructuredSQLError: any) {
+                                    console.error('❌ Error executing restructured SQL:', restructuredSQLError.message);
+                                    
+                                    // Fallback to original data with error info
+                                    (response.sql_results as any).restructure_info = {
+                                        success: false,
+                                        message: `Restructured SQL execution failed: ${restructuredSQLError.message}`,
+                                        restructured_sql: restructuredResults.restructured_sql,
+                                        explanation: restructuredResults.explanation,
+                                        sql_error: restructuredSQLError.message,
+                                        database_type: dbConfig.type.toLocaleLowerCase()
+                                    };
+                                    console.log('⚠️ Restructured SQL execution failed, keeping original data');
+                                }
                             } else {
                                 (response.sql_results as any).restructure_info = {
                                     success: false,
-                                    message: restructuredResults?.restructure_message || 'Restructuring failed',
+                                    message: restructuredResults?.restructure_message || 'Restructured SQL generation failed',
                                     error_details: restructuredResults?.error_details,
+                                    explanation: restructuredResults?.explanation,
                                     database_type: dbConfig.type.toLocaleLowerCase()
                                 };
-                                console.log('⚠️ Restructuring failed, keeping original data');
+                                console.log('⚠️ Restructured SQL generation failed, keeping original data');
                             }
                         } else {
                             (response.sql_results as any).restructure_info = {
@@ -3159,8 +3408,21 @@ Return only valid, semantic HTML.`;
 
                     // Cleanup: Close database connections to prevent "Too many connections" errors
                     try {
+                        if (connection) {
+                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                if (!connection.destroyed) {
+                                    await connection.end();
+                                }
+                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                if (!connection._ended) {
+                                    await connection.end();
+                                }
+                            }
+                            console.log('✅ Primary database connection closed');
+                        }
+                        
                         await databaseService.closeOrganizationConnections(organizationId);
-                        console.log(`🔌 Closed database connections for organization: ${organizationId}`);
+                        console.log(`🔌 Closed all database connections for organization: ${organizationId}`);
                     } catch (cleanupError) {
                         console.error(`❌ Error closing database connections for organization ${organizationId}:`, cleanupError);
                     }
