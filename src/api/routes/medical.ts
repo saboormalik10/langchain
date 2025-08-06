@@ -6,6 +6,7 @@ import { BufferMemory } from 'langchain/memory';
 import { v4 as uuidv4 } from 'uuid';
 import databaseService from '../../services/databaseService';
 import multiTenantLangChainService from '../../services/multiTenantLangChainService';
+import { AzureOpenAI } from 'openai';
 
 // Graph Types Enum
 enum GraphType {
@@ -111,6 +112,193 @@ interface ConversationSession {
 }
 
 const conversationSessions = new Map<string, ConversationSession>();
+
+// Initialize Azure OpenAI client only if API key is available
+let azureOpenAI: AzureOpenAI | null = null;
+const isAzureOpenAIAvailable = !!(process.env.AZURE_OPENAI_API_KEY && process.env.AZURE_OPENAI_ENDPOINT);
+
+// Function to get Azure OpenAI client lazily
+function getAzureOpenAIClient(): AzureOpenAI | null {
+    if (!isAzureOpenAIAvailable) {
+        return null;
+    }
+    
+    if (!azureOpenAI) {
+        azureOpenAI = new AzureOpenAI({
+            apiKey: process.env.AZURE_OPENAI_API_KEY,
+            endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+            apiVersion: process.env.AZURE_OPENAI_API_VERSION || "2024-08-01-preview",
+        });
+    }
+    
+    return azureOpenAI;
+}
+
+/**
+ * Restructure SQL results using Azure OpenAI to create nested, non-redundant JSON structure
+ * 
+ * This function takes the flat SQL results and uses Azure OpenAI to:
+ * 1. Eliminate redundancy (e.g., same patient with multiple medications becomes one patient with medications array)
+ * 2. Create meaningful hierarchical structure
+ * 3. Group related data logically
+ * 4. Provide structured explanation of the transformation
+ * 
+ * Works with both MySQL and PostgreSQL databases
+ * 
+ * @param sqlQuery - The SQL query that was executed
+ * @param sqlResults - The flat results from SQL execution  
+ * @param userPrompt - The original user query for context
+ * @param sampleSize - Number of sample records to send to Azure OpenAI for analysis
+ * @returns Restructured data with success/failure information
+ */
+async function restructureSQLResults(
+    sqlQuery: string, 
+    sqlResults: any[], 
+    userPrompt: string, 
+    sampleSize: number = 3
+): Promise<any> {
+    try {
+        // Take sample of results for analysis
+        const sampleResults = sqlResults.slice(0, sampleSize);
+        
+        if (sampleResults.length === 0) {
+            return {
+                restructured_data: [],
+                restructure_success: false,
+                restructure_message: "No data to restructure"
+            };
+        }
+
+        const restructuringPrompt = `
+You are an expert data analyst. Your task is to restructure SQL query results into a more meaningful, hierarchical JSON format that eliminates redundancy and groups related data logically.
+
+USER PROMPT: "${userPrompt}"
+
+SQL QUERY EXECUTED:
+\`\`\`sql
+${sqlQuery}
+\`\`\`
+
+SAMPLE SQL RESULTS (first ${sampleSize} records):
+\`\`\`json
+${JSON.stringify(sampleResults, null, 2)}
+\`\`\`
+
+TOTAL RECORDS: ${sqlResults.length}
+
+RESTRUCTURING REQUIREMENTS:
+1. **ELIMINATE REDUNDANCY**: Group related data to avoid repetition (e.g., same patient with multiple medications should be one patient object with medications array)
+2. **CREATE HIERARCHY**: Structure data in nested objects/arrays that represent real-world relationships
+3. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original results
+4. **BE LOGICAL**: Structure should make business sense for medical data
+5. **USE MEANINGFUL KEYS**: Use descriptive property names that reflect the data content
+
+EXPECTED OUTPUT FORMAT:
+Return a JSON object with this structure:
+{
+  "restructured_data": [
+    // Your restructured data here - make it deep and hierarchical
+    // Example for patient-medication data:
+    // {
+    //   "patient": {
+    //     "name": "John Doe",
+    //     "age": 45,
+    //     "demographics": {...}
+    //   },
+    //   "medications": [
+    //     {"name": "Drug A", "dosage": "10mg", "frequency": "daily"},
+    //     {"name": "Drug B", "dosage": "5mg", "frequency": "twice daily"}
+    //   ],
+    //   "lab_results": [...],
+    //   "risk_assessment": {...}
+    // }
+  ],
+  "structure_explanation": "Brief explanation of how you structured the data and why",
+  "grouping_logic": "Explanation of what entities you grouped together",
+  "eliminated_redundancy": "Description of what redundancy was eliminated"
+}
+
+IMPORTANT: 
+- Focus on creating meaningful groups based on the user's query intent
+- If the data represents patients, group by patient
+- If it represents medications, group by medication type or category
+- If it represents lab results, group by patient or test type
+- Make the structure intuitive for the end user
+- Ensure the restructured data fully represents the original query results
+
+Return only valid JSON without any markdown formatting or explanations outside the JSON.
+`;
+
+        console.log('🤖 Sending restructuring request to Azure OpenAI...');
+        
+        const azureOpenAIClient = getAzureOpenAIClient();
+        if (!azureOpenAIClient) {
+            throw new Error('Azure OpenAI client not available');
+        }
+        
+        const completion = await azureOpenAIClient.chat.completions.create({
+            model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4",
+            messages: [
+                {
+                    role: "system",
+                    content: "You are an expert data analyst specializing in restructuring relational database results into meaningful hierarchical JSON structures. Always return valid JSON."
+                },
+                {
+                    role: "user",
+                    content: restructuringPrompt
+                }
+            ],
+            temperature: 0.1,
+            max_tokens: 4000
+        });
+
+        const openaiResponse = completion.choices[0]?.message?.content;
+        
+        if (!openaiResponse) {
+            throw new Error('No response from OpenAI');
+        }
+
+        // Parse the OpenAI response
+        let restructuredResult;
+        try {
+            // Clean the response (remove any markdown formatting)
+            const cleanedResponse = openaiResponse
+                .replace(/```json\n?/g, '')
+                .replace(/```\n?/g, '')
+                .trim();
+            
+            restructuredResult = JSON.parse(cleanedResponse);
+        } catch (parseError) {
+            console.error('❌ Failed to parse Azure OpenAI response as JSON:', parseError);
+            return {
+                restructured_data: sqlResults, // Fallback to original data
+                restructure_success: false,
+                restructure_message: `Azure OpenAI response parsing failed: ${parseError}`,
+                raw_openai_response: openaiResponse
+            };
+        }
+
+        console.log('✅ Successfully restructured SQL results with Azure OpenAI');
+        
+        return {
+            ...restructuredResult,
+            restructure_success: true,
+            restructure_message: "Successfully restructured data using Azure OpenAI",
+            original_record_count: sqlResults.length,
+            sample_size_used: sampleSize
+        };
+
+    } catch (error: any) {
+        console.error('❌ Error restructuring SQL results with Azure OpenAI:', error.message);
+        
+        return {
+            restructured_data: sqlResults, // Fallback to original data
+            restructure_success: false,
+            restructure_message: `Restructuring failed: ${error.message}`,
+            error_details: error.message
+        };
+    }
+}
 
 
 // Cleanup function for expired conversations (runs every hour)
@@ -1702,27 +1890,47 @@ ${conversationalContext ? `=== CONVERSATION CONTEXT ===${conversationalContext}=
 4. **INCLUDE CONTEXT COLUMNS** - Add minimal relevant columns that explain the business logic
 5. **EXCLUDE ID COLUMNS** - Do NOT include any columns with names ending in '_id', 'id', or primary key columns unless specifically requested
 6. **EXCLUDE UNNECESSARY COLUMNS** - Do NOT include all columns from primary table - be selective based on query intent
+7. **CRITICAL: NO DEPENDENT TABLE COLUMNS UNLESS EXPLICITLY REQUESTED** - Do NOT include ANY columns from joined/dependent tables UNLESS they are:
+   - Explicitly mentioned by name in the user query
+   - Used in WHERE/HAVING conditions (filtering criteria only)
+   - Absolutely essential to understand the primary entity's data
+   - **NEVER include descriptive columns from dependent tables just for context**
 
 **SELECT CLAUSE CONSTRUCTION PROCESS:**
-1. **QUERY-SPECIFIC COLUMNS**: List ONLY columns directly related to the user's specific question
-2. **CONDITION COLUMNS**: Add ALL columns used in WHERE, HAVING, ON clauses
-3. **MINIMAL CONTEXT COLUMNS**: Add ONLY essential descriptive columns that explain the results
-4. **BUSINESS VALUE COLUMNS**: Add ONLY columns that directly answer the user's question
+1. **QUERY-SPECIFIC COLUMNS**: List ONLY columns directly related to the user's specific question FROM THE PRIMARY TABLE
+2. **CONDITION COLUMNS**: Add ALL columns used in WHERE, HAVING, ON clauses (filtering criteria only)
+3. **MINIMAL CONTEXT COLUMNS**: Add ONLY essential descriptive columns FROM THE PRIMARY TABLE that explain the results
+4. **BUSINESS VALUE COLUMNS**: Add ONLY columns FROM THE PRIMARY TABLE that directly answer the user's question
 5. **FILTER CRITERIA COLUMNS**: Add any column that explains WHY a record was selected
+6. **CRITICAL: DEPENDENT TABLE EXCLUSION**: Do NOT add ANY columns from joined/dependent tables UNLESS:
+   - The column is explicitly mentioned by name in the user query
+   - The column is used in WHERE/HAVING conditions (show filtering criteria)
+   - The user specifically asks for data from that dependent table
 
 **EXAMPLES OF PROPER SELECTIVE COLUMN SELECTION:**
 
-❌ WRONG (too many columns): SELECT p.patient_name, p.age, p.gender, p.diagnosis, p.medical_history, p.admission_date, p.status, p.emergency_contact, m.medication_name, m.dosage, m.frequency, m.safety_status FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE m.dosage > 100
+❌ WRONG (includes unnecessary dependent table columns): SELECT p.patient_name, p.age, p.gender, m.medication_name, m.dosage, m.frequency, m.safety_status FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE m.dosage > 100
 
-✅ CORRECT (query-focused): SELECT p.patient_name, p.age, m.medication_name, m.dosage FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE m.dosage > 100
+✅ CORRECT (query-focused, primary table focus): SELECT p.patient_name, p.age, m.dosage FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE m.dosage > 100
 
-❌ WRONG (includes all lab columns): SELECT lr.test_date, lr.test_type, lr.glucose_level, lr.cholesterol_level, lr.blood_pressure_systolic, lr.blood_pressure_diastolic, lr.test_status, lr.lab_technician, lr.notes, p.patient_name, p.age FROM lab_results lr JOIN patients p ON lr.patient_id = p.patient_id WHERE lr.glucose_level > 200
+❌ WRONG (includes all columns from both tables): SELECT lr.test_date, lr.test_type, lr.glucose_level, lr.cholesterol_level, p.patient_name, p.age, p.gender, p.diagnosis FROM lab_results lr JOIN patients p ON lr.patient_id = p.patient_id WHERE lr.glucose_level > 200
 
-✅ CORRECT (focused on glucose query): SELECT p.patient_name, p.age, lr.test_date, lr.glucose_level FROM lab_results lr JOIN patients p ON lr.patient_id = p.patient_id WHERE lr.glucose_level > 200
+✅ CORRECT (focused on glucose query, excludes unnecessary dependent table columns): SELECT lr.test_date, lr.glucose_level FROM lab_results lr JOIN patients p ON lr.patient_id = p.patient_id WHERE lr.glucose_level > 200
+
+❌ WRONG (includes unnecessary medication details): SELECT p.patient_name, p.age, p.diagnosis, m.medication_name, m.dosage, m.frequency, m.therapeutic_class FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE p.diagnosis LIKE '%diabetes%'
+
+✅ CORRECT (patient-focused query, minimal dependent table data): SELECT p.patient_name, p.age, p.diagnosis FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE p.diagnosis LIKE '%diabetes%'
 
 **CRITICAL: If you use a column in ANY part of the query (WHERE, JOIN, ORDER BY, GROUP BY, HAVING), you MUST include it in the SELECT clause unless it's an ID column.**
 
 **SELECTIVITY PRINCIPLE: Only include columns that directly relate to answering the user's specific question. Avoid including all available columns.**
+
+**STRUCTURED QUERY REQUIREMENT: Make the query in a structured way to represent the real meaning of user prompt.**
+- Organize the query logic to clearly reflect the user's intent
+- Use appropriate clause ordering (SELECT, FROM, JOIN, WHERE, GROUP BY, HAVING, ORDER BY)
+- Structure JOINs logically based on data relationships
+- Ensure GROUP BY and aggregations accurately represent what the user is asking for
+- Make the query readable and self-documenting of the user's request
 ===============================
 
 MANDATORY STEP-BY-STEP PROCESS (YOU MUST FOLLOW THESE EXACT STEPS IN ORDER):
@@ -1798,23 +2006,36 @@ STEP 5: CONSTRUCT THE SQL QUERY WITH SELECTIVE AND FOCUSED SELECT CLAUSE
   * **For related tables: Include columns that are:**
     - Used in WHERE conditions (MANDATORY - users need to see WHY records were selected)
     - Used in HAVING conditions (MANDATORY)
-    - Used in ORDER BY or GROUP BY (if they provide business context)
-    - Directly mentioned in the user query
-    - Essential for understanding the relationship between tables
+    - Explicitly mentioned by name in the user query
+    - **NEVER include descriptive/context columns from dependent tables unless explicitly requested**
+    - **NEVER include all available columns from joined tables**
   * **Be selective**: Don't include every available column - focus on what answers the user's question
-  * **Include contextual columns**: Add minimal relevant descriptive fields that provide necessary business insight
+  * **Include contextual columns**: Add minimal relevant descriptive fields FROM THE PRIMARY TABLE ONLY
   * **Exclude pure ID columns**: Don't include columns that are just numeric IDs unless specifically needed
+  * **CRITICAL DEPENDENT TABLE RULE**: Only include columns from joined/dependent tables if they are:
+    - Explicitly mentioned in the user query by name
+    - Used in filtering conditions (WHERE/HAVING)
+    - Absolutely essential for understanding the primary entity (very rare)
+- **STRUCTURED QUERY CONSTRUCTION REQUIREMENTS:**
+  * **Structure the query to represent the real meaning of the user prompt**
+  * **Organize query logic to clearly reflect user intent**
+  * **Use logical clause ordering**: SELECT → FROM → JOIN → WHERE → GROUP BY → HAVING → ORDER BY → LIMIT
+  * **Structure JOINs based on actual data relationships and user requirements**
+  * **Ensure GROUP BY and aggregations accurately represent what the user is asking for**
+  * **Make the query self-documenting of the user's request through clear structure**
 - **FOCUSED COLUMN ENUMERATION PROCESS:**
-  1. Start with columns directly mentioned in the user query
-  2. Add all columns used in WHERE clauses from any table
-  3. Add minimal essential context columns from joined tables
-  4. Add columns that help explain why records were selected
+  1. Start with columns directly mentioned in the user query FROM THE PRIMARY TABLE
+  2. Add all columns used in WHERE clauses from any table (filtering criteria only)
+  3. Add minimal essential context columns FROM THE PRIMARY TABLE ONLY
+  4. Add columns that help explain why records were selected (condition columns)
   5. Verify no asterisk (*) symbols remain in the query
   6. **Double-check**: Remove any unnecessary columns that don't directly contribute to answering the user's question
+  7. **CRITICAL**: Remove ANY columns from dependent/joined tables unless explicitly mentioned in user query or used in conditions
 - Start with the core tables and gradually build the query
 - Implement proper JOINs based on discovered key relationships
 - Implement ALL conditions from the user query - don't skip any requirements
 - Add appropriate GROUP BY, ORDER BY, and HAVING clauses based on the query intent
+- **Structure the entire query to logically represent the user's request**
 - Double-check that ALL aspects of the user's query are addressed
 
 STEP 6: REVIEW AND VALIDATE WITH SELECTIVE COLUMN VERIFICATION
@@ -1822,10 +2043,11 @@ STEP 6: REVIEW AND VALIDATE WITH SELECTIVE COLUMN VERIFICATION
   * Verify NO asterisk (*) symbols exist in the SELECT clause
   * Verify ALL columns are listed explicitly by name
   * Verify ALL condition columns from WHERE/HAVING clauses are included in SELECT
-  * Verify ONLY necessary business context columns are included
+  * Verify ONLY necessary business context columns FROM THE PRIMARY TABLE are included
   * Verify ID columns are excluded unless specifically needed
   * Verify the SELECT clause is focused and answers the user's specific question
   * **REMOVE any unnecessary columns that don't directly contribute to the query intent**
+  * **CRITICAL: Verify NO columns from dependent/joined tables are included unless explicitly requested or used in conditions**
 - Verify that your query includes ALL user requirements
 - **CRITICAL: Verify that the PRIMARY ENTITY returns focused, relevant columns (not everything)**
 - **CRITICAL: Verify that related tables return condition columns AND minimal necessary context columns**
@@ -2863,6 +3085,75 @@ Return only valid, semantic HTML.`;
                         } : {}),
                         timestamp: new Date().toISOString()
                     };
+
+                    // ========== STEP: RESTRUCTURE SQL RESULTS WITH OPENAI ==========
+                    console.log('🤖 Step: Restructuring SQL results with Azure OpenAI for better data organization...');
+                    
+                    let restructuredResults = null;
+                    try {
+                        // Check if Azure OpenAI is available
+                        if (!isAzureOpenAIAvailable) {
+                            console.log('⚠️ Azure OpenAI API key not available, skipping restructuring');
+                            (response.sql_results as any).restructure_info = {
+                                success: false,
+                                message: 'Azure OpenAI API key not configured',
+                                skipped: true
+                            };
+                        }
+                        // Only restructure if we have actual data and it's an array with records
+                        else if (Array.isArray(rows) && rows.length > 0) {
+                            console.log(`🔄 Restructuring ${rows.length} SQL result records using Azure OpenAI...`);
+                            
+                            restructuredResults = await restructureSQLResults(
+                                finalSQL,
+                                rows,
+                                query,
+                                3 // Sample size for OpenAI analysis
+                            );
+                            
+                            console.log('✅ SQL results restructuring completed');
+                            
+                            // Add restructured data to sql_results
+                            if (restructuredResults && restructuredResults.restructure_success) {
+                                (response.sql_results as any).sql_final = restructuredResults.restructured_data;
+                                (response.sql_results as any).restructure_info = {
+                                    success: true,
+                                    message: restructuredResults.restructure_message,
+                                    structure_explanation: restructuredResults.structure_explanation,
+                                    grouping_logic: restructuredResults.grouping_logic,
+                                    eliminated_redundancy: restructuredResults.eliminated_redundancy,
+                                    original_record_count: restructuredResults.original_record_count,
+                                    sample_size_used: restructuredResults.sample_size_used,
+                                    database_type: dbConfig.type.toLocaleLowerCase()
+                                };
+                                console.log('✅ Enhanced response with restructured data');
+                            } else {
+                                (response.sql_results as any).restructure_info = {
+                                    success: false,
+                                    message: restructuredResults?.restructure_message || 'Restructuring failed',
+                                    error_details: restructuredResults?.error_details,
+                                    database_type: dbConfig.type.toLocaleLowerCase()
+                                };
+                                console.log('⚠️ Restructuring failed, keeping original data');
+                            }
+                        } else {
+                            (response.sql_results as any).restructure_info = {
+                                success: false,
+                                message: 'No data available for restructuring',
+                                skipped: true,
+                                database_type: dbConfig.type.toLocaleLowerCase()
+                            };
+                            console.log('⚠️ Skipping restructuring - no data available');
+                        }
+                    } catch (restructureError: any) {
+                        console.error('❌ Error during SQL results restructuring:', restructureError.message);
+                        (response.sql_results as any).restructure_info = {
+                            success: false,
+                            message: 'Restructuring process failed',
+                            error_details: restructureError.message,
+                            database_type: dbConfig.type.toLocaleLowerCase()
+                        };
+                    }
 
                     res.json(response);
 
