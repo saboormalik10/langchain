@@ -142,13 +142,15 @@ function getAzureOpenAIClient(): AzureOpenAI | null {
  * 2. Create meaningful hierarchical structure directly in SQL
  * 3. Group related data logically using GROUP BY and JSON functions
  * 4. Provide structured explanation of the SQL transformation
+ * 5. Ensure compatibility with specific database version
  * 
- * Works with both MySQL and PostgreSQL databases using their JSON functions
+ * Works with both MySQL and PostgreSQL databases using version-appropriate JSON functions
  * 
  * @param originalSQL - The original SQL query that was executed
  * @param sqlResults - Sample results from original SQL execution for analysis
  * @param userPrompt - The original user query for context
  * @param dbType - Database type ('mysql' or 'postgresql') for appropriate JSON syntax
+ * @param dbVersion - Database version information for compatibility
  * @param sampleSize - Number of sample records to send to Azure OpenAI for analysis
  * @returns Restructured SQL query with success/failure information
  */
@@ -157,6 +159,7 @@ async function generateRestructuredSQL(
     sqlResults: any[], 
     userPrompt: string, 
     dbType: string,
+    dbVersion: string,
     sampleSize: number = 3
 ): Promise<any> {
     try {
@@ -187,6 +190,7 @@ ${JSON.stringify(sampleResults, null, 2)}
 \`\`\`
 
 DATABASE TYPE: ${dbType.toUpperCase()}
+DATABASE VERSION: ${dbVersion}
 
 TOTAL RECORDS IN ORIGINAL RESULT: ${sqlResults.length}
 
@@ -198,16 +202,38 @@ RESTRUCTURING REQUIREMENTS:
 3. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original query
 4. **BE LOGICAL**: Structure should make business sense for medical data (group by patient, medication, test type, etc.)
 5. **USE APPROPRIATE GROUPING**: Identify the main entity (patient, medication, test, etc.) and group related data under it
+6. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
 
-DATABASE-SPECIFIC JSON FUNCTIONS:
+DATABASE-SPECIFIC JSON FUNCTIONS FOR ${dbType.toUpperCase()} ${dbVersion}:
 ${dbType === 'mysql' ? `
+MySQL ${dbVersion} JSON Functions:
 - JSON_OBJECT('key', value, 'key2', value2) - creates JSON object
-- JSON_ARRAYAGG(JSON_OBJECT('key', value)) - creates array of JSON objects
+- JSON_ARRAYAGG(JSON_OBJECT('key', value)) - creates array of JSON objects (MySQL 5.7.22+)
+- JSON_ARRAY(value1, value2, ...) - creates JSON array
 - GROUP_CONCAT(DISTINCT column) - concatenates values (alternative to JSON)
+- Note: JSON functions require MySQL 5.7+ for full support
+- Use appropriate syntax for version ${dbVersion}
 ` : `
-- json_build_object('key', value, 'key2', value2) - creates JSON object  
-- json_agg(json_build_object('key', value)) - creates array of JSON objects
+PostgreSQL ${dbVersion} JSON Functions:  
+- json_build_object('key', value, 'key2', value2) - creates JSON object
+- json_agg(json_build_object('key', value)) - creates array of JSON objects (PostgreSQL 9.3+)
+- json_build_array(value1, value2, ...) - creates JSON array
 - array_agg(DISTINCT column) - creates array of values
+- Note: JSON functions available in PostgreSQL 9.2+, json_build_* in 9.4+
+- Use appropriate syntax for version ${dbVersion}
+`}
+
+VERSION-SPECIFIC CONSIDERATIONS:
+${dbType === 'mysql' ? `
+- For MySQL ${dbVersion}: Check JSON function availability and syntax compatibility
+- Use proper escaping for JSON string values
+- Consider GROUP_CONCAT as fallback for older versions
+- Ensure proper handling of NULL values in JSON functions
+` : `
+- For PostgreSQL ${dbVersion}: Verify json_build_* function availability
+- Use appropriate casting (::json) if needed for older versions
+- Consider using row_to_json() for complex objects
+- Ensure proper handling of NULL values in JSON aggregation
 `}
 
 EXAMPLE TRANSFORMATIONS:
@@ -276,13 +302,26 @@ Return a JSON object with this structure:
 }
 
 CRITICAL REQUIREMENTS:
-- Generate a complete, executable SQL query that uses JSON functions
+- Generate a complete, executable SQL query that uses JSON functions compatible with ${dbType.toUpperCase()} ${dbVersion}
 - The query should return fewer rows than the original (due to grouping)
 - Each row should contain a JSON object with hierarchical structure
 - Use appropriate GROUP BY clause to eliminate redundancy
 - Include all original data but organized hierarchically
 - Use LEFT JOIN if needed to preserve main entities even without related data
-- Test that your SQL syntax is correct for ${dbType.toUpperCase()}
+- Ensure SQL syntax is correct and compatible with ${dbType.toUpperCase()} ${dbVersion}
+- Handle NULL values appropriately in JSON functions
+- Use version-appropriate JSON function syntax
+
+VERSION COMPATIBILITY NOTES:
+${dbType === 'mysql' ? `
+- For MySQL versions prior to 5.7.22, consider using GROUP_CONCAT instead of JSON_ARRAYAGG
+- Ensure proper JSON escaping for string values
+- Use COALESCE() or IFNULL() to handle NULL values in JSON functions
+` : `
+- For PostgreSQL versions prior to 9.4, use json_agg() instead of json_build_object()
+- Consider row_to_json() for complex object structures in older versions
+- Use COALESCE() to handle NULL values in JSON aggregation
+`}
 
 IMPORTANT: 
 - Focus on the primary entity that appears most frequently in the sample data
@@ -380,7 +419,9 @@ Return only valid JSON without any markdown formatting, comments, or explanation
                 error_details: `Parse error: ${parseError}. Response preview: ${openaiResponse.substring(0, 200)}...`,
                 explanation: "Error parsing AI response",
                 grouping_logic: "No grouping applied due to parsing error",
-                expected_structure: "Original flat structure maintained"
+                expected_structure: "Original flat structure maintained",
+                database_type: dbType,
+                database_version: dbVersion
             };
         }
 
@@ -398,7 +439,9 @@ Return only valid JSON without any markdown formatting, comments, or explanation
                 restructure_message: "No restructured SQL generated by AI, using original query",
                 explanation: "AI did not provide a restructured SQL query",
                 grouping_logic: "No grouping applied",
-                expected_structure: "Original flat structure maintained"
+                expected_structure: "Original flat structure maintained",
+                database_type: dbType,
+                database_version: dbVersion
             };
         }
 
@@ -415,7 +458,9 @@ Return only valid JSON without any markdown formatting, comments, or explanation
                 restructure_message: "Generated SQL is identical to original query",
                 explanation: restructuredResult.explanation || "No restructuring applied",
                 grouping_logic: restructuredResult.grouping_logic || "No grouping applied",
-                expected_structure: restructuredResult.expected_structure || "Original structure maintained"
+                expected_structure: restructuredResult.expected_structure || "Original structure maintained",
+                database_type: dbType,
+                database_version: dbVersion
             };
         }
 
@@ -431,7 +476,8 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             main_entity: restructuredResult.main_entity || "Unknown",
             original_sql: originalSQL,
             sample_size_used: sampleSize,
-            database_type: dbType
+            database_type: dbType,
+            database_version: dbVersion
         };
 
     } catch (error: any) {
@@ -444,7 +490,9 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             error_details: error.message,
             explanation: "Error occurred during SQL restructuring",
             grouping_logic: "No grouping applied due to error",
-            expected_structure: "Original flat structure maintained"
+            expected_structure: "Original flat structure maintained",
+            database_type: dbType,
+            database_version: dbVersion
         };
     }
 }
@@ -3301,6 +3349,7 @@ Return only valid, semantic HTML.`;
                                 rows,
                                 query,
                                 dbConfig.type.toLocaleLowerCase(),
+                                mySQLVersionString || 'unknown', // Database version for compatibility
                                 3 // Sample size for OpenAI analysis
                             );
                             
