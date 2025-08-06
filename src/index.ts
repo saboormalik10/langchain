@@ -1540,6 +1540,58 @@ Ensure the query follows medical database best practices and is production-ready
     try {
       // Create SQL Agent with custom configuration to return all results
       const dbType = this.dbConfig.type?.toLocaleLowerCase() || 'mysql';
+      
+      // Get database version and feature information for context
+      let dbVersionInfo = '';
+      let dbFeaturesInfo = '';
+      
+      try {
+        if (dbType === 'mysql' || dbType === 'mariadb') {
+          // Get MySQL version for context
+          const connection = await mysql.createConnection({
+            host: this.dbConfig.host,
+            port: this.dbConfig.port,
+            user: this.dbConfig.username,
+            password: this.dbConfig.password,
+            database: this.dbConfig.database,
+          });
+          
+          const [rows] = await connection.execute('SELECT VERSION() as version');
+          if (rows && Array.isArray(rows) && rows[0] && (rows[0] as any).version) {
+            const versionString = (rows[0] as any).version;
+            dbVersionInfo = `Database Version: ${versionString}`;
+            
+            // Parse version for feature detection
+            const versionMatch = versionString.match(/(\d+)\.(\d+)\.(\d+)/);
+            if (versionMatch) {
+              const major = parseInt(versionMatch[1]);
+              const minor = parseInt(versionMatch[2]);
+              
+              dbFeaturesInfo = `
+Available Features:
+- JSON Functions: ${major >= 5 && minor >= 7 ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Window Functions: ${major >= 8 ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Common Table Expressions (WITH): ${major >= 8 ? 'AVAILABLE' : 'NOT AVAILABLE'}
+- Regular Expressions: AVAILABLE`;
+            }
+          }
+          await connection.end();
+        } else if (dbType === 'postgresql') {
+          // Get PostgreSQL version for context
+          dbVersionInfo = `Database Type: PostgreSQL`;
+          dbFeaturesInfo = `
+Available Features:
+- JSON Functions: AVAILABLE
+- Window Functions: AVAILABLE
+- Common Table Expressions (WITH): AVAILABLE
+- Regular Expressions: AVAILABLE`;
+        }
+      } catch (versionError) {
+        console.warn('Could not retrieve database version info:', versionError);
+        dbVersionInfo = `Database Type: ${dbType.toUpperCase()}`;
+        dbFeaturesInfo = 'Feature information not available';
+      }
+
       const dbSpecificInstructions = dbType === 'postgresql' ? 
         `Given an input question, create a syntactically correct PostgreSQL query to run, then look at the results of the query and return the answer.
 Use proper PostgreSQL syntax and functions.
@@ -1555,11 +1607,40 @@ Use proper MySQL data types and casting when needed.`;
         this.sqlToolkit,
         {
           prefix: `You are an agent designed to interact with a ${dbType.toUpperCase()} database.
+
+=== DATABASE CONTEXT ===
+${dbVersionInfo}
+${dbFeaturesInfo}
+
+Database Configuration:
+- Host: ${this.dbConfig.host}
+- Port: ${this.dbConfig.port}
+- Database: ${this.dbConfig.database}
+- Connection established and verified
+========================
+
 ${dbSpecificInstructions}
+
 IMPORTANT: Unless the user specifically asks for a limited number of results, always return ALL matching records from the database.
 Do NOT automatically limit results - the user needs complete data for analysis.
 You can order the results by a relevant column to return the most interesting examples in the database.
-Never query for all the columns from a specific table, only ask for the relevant columns given the question.
+
+ENHANCED COLUMN SELECTION RULES:
+- For PRIMARY ENTITY tables: SELECT ALL COLUMNS (table_alias.*)
+- For related tables: SELECT condition columns AND relevant context columns
+- Always include columns used in WHERE conditions so users understand WHY records were selected
+- Include relevant identifying columns (names, IDs, dates) from related tables for context
+
+CRITICAL SQL SYNTAX REQUIREMENTS:
+- NEVER start a query with a closing parenthesis ")"
+- NEVER include malformed WITH clauses
+- ALWAYS ensure balanced parentheses in your queries
+- ALWAYS ensure your SELECT statement has a valid FROM clause
+- AVOID nested queries unless absolutely necessary - use JOINs instead
+- Generate clean, single SQL statements without extra formatting or markdown
+- NEVER include multiple SELECT statements in one response
+- ALWAYS validate your SQL structure before returning it
+
 You have access to tools for interacting with the database.
 Only use the below tools. Only use the information returned by the below tools to construct your final answer.
 You MUST double check your query before executing it. If you get an error while executing a query, rewrite the query and try again.
@@ -1583,6 +1664,7 @@ DATA QUERY BEST PRACTICES:
 - Include relevant information in results when displaying data
 - Test your approach with the actual database structure
 - Adapt your strategy based on the specific database schema you discover
+- Include condition columns in SELECT to provide context for filtered results
 
 When providing your final answer, format it clearly and include the actual data results.
 Return ALL matching records unless specifically asked to limit.`,
