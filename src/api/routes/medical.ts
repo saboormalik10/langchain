@@ -2362,58 +2362,58 @@ BEGIN WITH STEP 1 NOW. List ALL tables before proceeding to any other steps.
 
                 // NEW: Enhanced SQL syntax validation before execution
                 console.log('📊 Step 3.1: Enhanced SQL syntax validation...');
-                const syntaxValidation = validateSQLSyntax(finalSQL);
+                // const syntaxValidation = finalSQL;
 
-                if (!syntaxValidation.isValid) {
-                    console.log('⚠️ SQL syntax issues detected:', syntaxValidation.errors);
-                    debugInfo.sqlCorrections.push(`Syntax issues found: ${syntaxValidation.errors.join(', ')}`);
+                // if (false) {
+                //     console.log('⚠️ SQL syntax issues detected:', syntaxValidation.errors);
+                //     debugInfo.sqlCorrections.push(`Syntax issues found: ${syntaxValidation.errors.join(', ')}`);
 
-                    // Use the fixed SQL if available and different from original
-                    if (syntaxValidation.fixedSQL && syntaxValidation.fixedSQL !== finalSQL) {
-                        console.log('🔧 Applied automatic syntax fixes');
-                        console.log('🔧 Original SQL:', finalSQL);
-                        console.log('🔧 Fixed SQL:', syntaxValidation.fixedSQL);
+                //     // Use the fixed SQL if available and different from original
+                //     if (syntaxValidation.fixedSQL && syntaxValidation.fixedSQL !== finalSQL) {
+                //         console.log('🔧 Applied automatic syntax fixes');
+                //         console.log('🔧 Original SQL:', finalSQL);
+                //         console.log('🔧 Fixed SQL:', syntaxValidation.fixedSQL);
                         
-                        finalSQL = syntaxValidation.fixedSQL;
-                        debugInfo.sqlCorrections.push('Applied automatic syntax corrections');
+                //         finalSQL = syntaxValidation.fixedSQL;
+                //         debugInfo.sqlCorrections.push('Applied automatic syntax corrections');
                         
-                        // Re-validate the fixed SQL to ensure it's now valid
-                        const revalidation = validateSQLSyntax(finalSQL);
-                        if (!revalidation.isValid) {
-                            console.log('❌ Fixed SQL still has issues:', revalidation.errors);
-                            debugInfo.sqlCorrections.push(`Fixed SQL still has issues: ${revalidation.errors.join(', ')}`);
+                //         // Re-validate the fixed SQL to ensure it's now valid
+                //         const revalidation = validateSQLSyntax(finalSQL);
+                //         if (!revalidation.isValid) {
+                //             console.log('❌ Fixed SQL still has issues:', revalidation.errors);
+                //             debugInfo.sqlCorrections.push(`Fixed SQL still has issues: ${revalidation.errors.join(', ')}`);
                             
-                            // Try one more round of fixes
-                            if (revalidation.fixedSQL && revalidation.fixedSQL !== finalSQL) {
-                                finalSQL = revalidation.fixedSQL;
-                                console.log('🔧 Applied second round of fixes:', finalSQL);
-                                debugInfo.sqlCorrections.push('Applied second round of automatic corrections');
-                            }
-                        } else {
-                            console.log('✅ Fixed SQL now passes validation');
-                            debugInfo.sqlCorrections.push('Fixed SQL passes validation');
-                        }
-                    } else {
-                        console.log('❌ Could not automatically fix SQL syntax issues');
-                        return res.status(400).json({
-                            error: 'SQL syntax validation failed',
-                            message: 'The generated SQL query has syntax errors that could not be automatically fixed',
-                            extracted_sql: extractedSQL,
-                            final_sql: finalSQL,
-                            syntax_errors: syntaxValidation.errors,
-                            debug_info: debugInfo,
-                            suggestions: [
-                                'Try rephrasing your query with simpler language',
-                                'Check if you are referencing existing table and column names',
-                                'Ensure your query structure is clear and unambiguous'
-                            ],
-                            timestamp: new Date().toISOString()
-                        });
-                    }
-                } else {
-                    console.log('✅ SQL syntax validation passed');
-                    debugInfo.sqlCorrections.push('SQL syntax validation passed');
-                }
+                //             // Try one more round of fixes
+                //             if (revalidation.fixedSQL && revalidation.fixedSQL !== finalSQL) {
+                //                 finalSQL = revalidation.fixedSQL;
+                //                 console.log('🔧 Applied second round of fixes:', finalSQL);
+                //                 debugInfo.sqlCorrections.push('Applied second round of automatic corrections');
+                //             }
+                //         } else {
+                //             console.log('✅ Fixed SQL now passes validation');
+                //             debugInfo.sqlCorrections.push('Fixed SQL passes validation');
+                //         }
+                //     } else {
+                //         console.log('❌ Could not automatically fix SQL syntax issues');
+                //         return res.status(400).json({
+                //             error: 'SQL syntax validation failed',
+                //             message: 'The generated SQL query has syntax errors that could not be automatically fixed',
+                //             extracted_sql: extractedSQL,
+                //             final_sql: finalSQL,
+                //             syntax_errors: syntaxValidation.errors,
+                //             debug_info: debugInfo,
+                //             suggestions: [
+                //                 'Try rephrasing your query with simpler language',
+                //                 'Check if you are referencing existing table and column names',
+                //                 'Ensure your query structure is clear and unambiguous'
+                //             ],
+                //             timestamp: new Date().toISOString()
+                //         });
+                //     }
+                // } else {
+                //     console.log('✅ SQL syntax validation passed');
+                //     debugInfo.sqlCorrections.push('SQL syntax validation passed');
+                // }
 
                 // Skip column name correction and trust the sqlAgent to generate correct queries
                 console.log('📊 Step 3.5: Using original SQL from agent without column name modifications');
