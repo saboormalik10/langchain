@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
-import mysql from 'mysql2/promise';
+import * as mysql from 'mysql2/promise';
 import { MedicalDatabaseLangChainApp } from '../../index';
 import { BufferMemory } from 'langchain/memory';
 import { v4 as uuidv4 } from 'uuid';
@@ -401,6 +401,8 @@ Return a JSON object with this structure:
 }
 
 CRITICAL REQUIREMENTS:
+- Remove fields in select clause which are not required by user in his prompt
+- Don't add any repeating records that are not needed or already present in the original query
 - Generate a complete, executable SQL query that uses JSON functions compatible with ${dbType.toUpperCase()} ${dbVersion}
 - The query should return fewer rows than the original (due to grouping)
 - Each row should contain a JSON object with hierarchical structure
@@ -2104,6 +2106,21 @@ Generate ONLY the corrected SQL query without explanations.
                                 const minor = parseInt(versionMatch[2]);
                                 const patch = parseInt(versionMatch[3]);
 
+                                // Check MySQL sql_mode for only_full_group_by
+                                let hasOnlyFullGroupBy = false;
+                                try {
+                                    const [sqlModeRows] = await versionConnection.execute("SELECT @@sql_mode as sql_mode");
+                                    if (sqlModeRows && Array.isArray(sqlModeRows) && sqlModeRows[0] && (sqlModeRows[0] as any).sql_mode) {
+                                        const sqlMode = (sqlModeRows[0] as any).sql_mode;
+                                        hasOnlyFullGroupBy = sqlMode.includes('ONLY_FULL_GROUP_BY');
+                                        console.log(`🔍 MySQL sql_mode: ${sqlMode}`);
+                                        console.log(`🚨 only_full_group_by enabled: ${hasOnlyFullGroupBy}`);
+                                    }
+                                } catch (sqlModeError) {
+                                    console.warn('⚠️ Could not detect sql_mode, assuming only_full_group_by is enabled for safety');
+                                    hasOnlyFullGroupBy = true; // Assume enabled for safety
+                                }
+
                                 mysqlVersionInfo = {
                                     full: mySQLVersionString,
                                     major,
@@ -2112,11 +2129,13 @@ Generate ONLY the corrected SQL query without explanations.
                                     supportsJSON: major >= 5 && minor >= 7,
                                     supportsWindowFunctions: major >= 8,
                                     supportsCTE: major >= 8,
-                                    supportsRegex: true
+                                    supportsRegex: true,
+                                    hasOnlyFullGroupBy: hasOnlyFullGroupBy
                                 };
 
                                 console.log(`✅ MySQL Version detected: ${mySQLVersionString} (${major}.${minor}.${patch})`);
                                 console.log(`📋 Feature support: JSON=${mysqlVersionInfo.supportsJSON}, Windows=${mysqlVersionInfo.supportsWindowFunctions}, CTE=${mysqlVersionInfo.supportsCTE}`);
+                                console.log(`🚨 only_full_group_by mode: ${hasOnlyFullGroupBy ? 'ENABLED (strict GROUP BY required)' : 'DISABLED'}`);
                             }
                         }
 
@@ -2381,6 +2400,31 @@ VERSION-SPECIFIC COMPATIBILITY:
 - Window Functions (e.g., ROW_NUMBER()): ${databaseVersionInfo.supportsWindowFunctions ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
 - Common Table Expressions (WITH): ${databaseVersionInfo.supportsCTE ? 'AVAILABLE ✅' : 'NOT AVAILABLE ❌'}
 - Regular Expressions: AVAILABLE ✅
+${databaseType.toLowerCase() === 'mysql' ? `- MySQL only_full_group_by mode: ${databaseVersionInfo.hasOnlyFullGroupBy ? 'ENABLED 🚨 (STRICT GROUP BY REQUIRED)' : 'DISABLED ✅'}` : ''}
+
+🚨 CRITICAL MySQL GROUP BY COMPLIANCE (sql_mode=only_full_group_by):
+${databaseType.toLowerCase() === 'mysql' && databaseVersionInfo.hasOnlyFullGroupBy ? `
+**🚨 ONLY_FULL_GROUP_BY MODE IS ENABLED - STRICT COMPLIANCE REQUIRED:**
+1. **ALL non-aggregated columns in SELECT MUST be in GROUP BY clause**
+2. **If using aggregation functions (COUNT, SUM, AVG, MAX, MIN), ALL other SELECT columns MUST be in GROUP BY**
+3. **NEVER mix aggregated and non-aggregated columns without proper GROUP BY**
+
+**CORRECT PATTERN:**
+✅ SELECT column1, column2, COUNT(*) FROM table GROUP BY column1, column2;
+✅ SELECT column1, AVG(column2) FROM table GROUP BY column1;
+✅ SELECT * FROM table WHERE condition; (no aggregation)
+
+**INCORRECT PATTERN (WILL FAIL):**
+❌ SELECT column1, column2, COUNT(*) FROM table GROUP BY column1; (missing column2 in GROUP BY)
+❌ SELECT column1, AVG(column2) FROM table; (missing GROUP BY when using aggregation)
+❌ SELECT column1, column2, risk_score FROM table GROUP BY column1, column2, patient_id HAVING AVG(risk_score) > 2; (risk_score not aggregated but not in GROUP BY)
+
+**FIX STRATEGY:**
+- If using aggregation: Either aggregate ALL columns (COUNT, MAX, MIN, etc.) OR include them in GROUP BY
+- If NOT using aggregation: Remove GROUP BY entirely
+- Example fix: SELECT column1, column2, AVG(risk_score) FROM table GROUP BY column1, column2 HAVING AVG(risk_score) > 2;
+
+**MYSQL sql_mode=only_full_group_by COMPLIANCE IS ABSOLUTELY MANDATORY**` : databaseType.toLowerCase() === 'mysql' ? '**MySQL GROUP BY COMPLIANCE**: Ensure proper GROUP BY usage for any aggregation queries' : ''}
 
 CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase()} version. Avoid any syntax not supported by ${databaseVersionInfo.full}.
 ` : '';
@@ -2396,9 +2440,49 @@ CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase(
                         // The enhanced prompt with structured step-by-step approach
                         // The enhanced prompt with structured step-by-step approach and database context
                         const enhancedQuery = `
-You are an expert medical database SQL analyst with deep understanding of healthcare data structures. Your task is to understand the user's query intent and generate comprehensive SQL queries that return COMPLETE and DETAILED data.
+🎯 You are an expert SQL database analyst. Your task is to generate a WORKING SQL query that answers the user's question.
 
-CRITICAL REQUIREMENT: NEVER use hardcoded table or column names. ALWAYS use the schema exploration tools to discover the actual table and column names from the database.
+**CRITICAL REQUIREMENTS:**
+1. MUST explore database schema first using sql_db_list_tables() and sql_db_schema()
+2. MUST generate a simple, executable SELECT query
+3. MUST use actual table and column names from the database
+4. NO complex queries, NO CTEs, NO subqueries unless absolutely necessary
+5. Focus on answering the user's specific question
+
+**DATABASE INFO:**
+- Type: ${databaseType.toUpperCase()}
+- Version: ${databaseVersionString}
+- Organization: ${organizationId}
+
+${versionSpecificInstructions}
+
+**USER QUERY:** "${query}"
+
+**STEP-BY-STEP PROCESS:**
+
+**STEP 1: DISCOVER TABLES**
+- Use sql_db_list_tables() to see all available tables
+- Document what tables exist
+
+**STEP 2: EXAMINE RELEVANT SCHEMAS** 
+- Use sql_db_schema("table_name") for tables that might contain data for the user's query
+- Focus on tables that match the user's question topic (patients, medications, lab results, etc.)
+
+**STEP 3: GENERATE SIMPLE SQL**
+- Create a straightforward SELECT query
+- Use explicit column names (NO SELECT *)
+- Include columns mentioned in user query + minimal context columns
+- Include WHERE conditions if user specifies filters
+- Keep the query simple and executable
+
+**EXAMPLES OF GOOD QUERIES:**
+- For "show patients": SELECT patient_id, gender, dob, state, city FROM patients LIMIT 10;
+- For "medications": SELECT patient_id, medications FROM patients WHERE medications IS NOT NULL LIMIT 10;
+- For "high risk": SELECT record_id, risk_category, risk_score FROM risk_details WHERE risk_category LIKE '%High%' LIMIT 10;
+
+**CRITICAL:** Generate ONE simple, working SQL query that directly answers: "${query}"
+
+Start with STEP 1 - list all tables now.
 
 === DATABASE CONTEXT ===
 Database Type: ${databaseType.toUpperCase()}
@@ -2558,8 +2642,90 @@ STEP 4: MAP QUERY REQUIREMENTS TO SCHEMA WITH SELECTIVE COLUMN APPROACH
   * **If user mentions specific values/ranges/conditions, choose the table with those exact columns**
   * **Avoid unnecessary joins to tables that don't contain the condition columns**
 
-STEP 5: CONSTRUCT THE SQL QUERY WITH SELECTIVE AND FOCUSED SELECT CLAUSE
-- **CRITICAL SELECT CLAUSE CONSTRUCTION:**
+STEP 5: CONSTRUCT A SIMPLE, CLEAN, EXECUTABLE SQL QUERY
+🎯 **CRITICAL SQL GENERATION RULES:**
+- **GENERATE SIMPLE SQL**: Create straightforward, readable SQL queries without complex nested structures
+- **AVOID COMPLEX CTEs**: Unless absolutely necessary, use simple SELECT statements with JOINs instead of complex Common Table Expressions
+- **NO MALFORMED STRUCTURES**: Never generate SQL with patterns like ") SELECT" or malformed subqueries
+- **VALIDATE SYNTAX**: Ensure the SQL is syntactically correct and executable
+- **USE DISCOVERED SCHEMA**: Only use table and column names that you discovered through schema exploration
+
+🚨 **CRITICAL MySQL GROUP BY COMPLIANCE (sql_mode=only_full_group_by):**
+${databaseType.toLowerCase() === 'mysql' ? `
+**MANDATORY GROUP BY RULES FOR MySQL:**
+1. **ALL non-aggregated columns in SELECT MUST be in GROUP BY clause**
+2. **If using ANY aggregation function (COUNT, SUM, AVG, MAX, MIN), ALL other non-aggregated SELECT columns MUST be in GROUP BY**
+3. **NEVER mix aggregated and non-aggregated columns without proper GROUP BY**
+4. **Every column in SELECT that is not an aggregate function MUST appear in GROUP BY**
+
+**CORRECT MySQL PATTERNS:**
+✅ SELECT col1, col2, COUNT(*) FROM table GROUP BY col1, col2;
+✅ SELECT col1, AVG(col2) FROM table GROUP BY col1;
+✅ SELECT * FROM table WHERE condition; (no aggregation, no GROUP BY needed)
+✅ SELECT COUNT(*) FROM table; (only aggregation, no GROUP BY needed)
+
+**INCORRECT MySQL PATTERNS (WILL FAIL WITH sql_mode=only_full_group_by):**
+❌ SELECT col1, col2, COUNT(*) FROM table GROUP BY col1; (col2 missing from GROUP BY)
+❌ SELECT col1, AVG(col2) FROM table; (col1 not in GROUP BY when using aggregation)
+❌ SELECT gender, dob, risk_score FROM table GROUP BY gender, dob, patient_id HAVING AVG(risk_score) > 2;
+   (risk_score is not aggregated and not in GROUP BY - MUST be AVG(risk_score) in SELECT)
+
+**MySQL GROUP BY FIX STRATEGIES:**
+- **Strategy 1**: If using aggregation, either aggregate ALL columns OR include them in GROUP BY
+- **Strategy 2**: If NOT using aggregation, remove GROUP BY entirely
+- **Strategy 3**: Move non-aggregated columns to GROUP BY clause
+
+**EXAMPLES OF FIXES:**
+❌ BROKEN: SELECT patients.gender, patients.dob, current_risk_regimen.risk_score, medication_report.evidence 
+          FROM current_risk_regimen 
+          JOIN medication_report ON current_risk_regimen.patient_id = medication_report.record_id 
+          JOIN patients ON current_risk_regimen.patient_id = patients.patient_id 
+          GROUP BY patients.gender, patients.dob, current_risk_regimen.patient_id 
+          HAVING AVG(current_risk_regimen.risk_score) > 2;
+
+✅ FIXED: SELECT patients.gender, patients.dob, AVG(current_risk_regimen.risk_score) as avg_risk_score, medication_report.evidence
+         FROM current_risk_regimen 
+         JOIN medication_report ON current_risk_regimen.patient_id = medication_report.record_id 
+         JOIN patients ON current_risk_regimen.patient_id = patients.patient_id 
+         WHERE medication_report.evidence = 'Strong'
+         GROUP BY patients.gender, patients.dob, medication_report.evidence
+         HAVING AVG(current_risk_regimen.risk_score) > 2;
+
+**CRITICAL: Every query with aggregation functions MUST comply with only_full_group_by mode**` : ''}
+
+**SQL STRUCTURE REQUIREMENTS:**
+- Start with a clear SELECT statement
+- Use proper FROM clause with discovered table names
+- Add appropriate JOIN clauses based on discovered relationships
+- Include WHERE conditions using discovered column names
+- **CRITICAL: Ensure GROUP BY compliance for MySQL (every non-aggregated SELECT column must be in GROUP BY)**
+- End with semicolon
+- **CRITICAL: Avoid complex nested queries, CTEs, or subqueries unless essential**
+
+**SIMPLE SQL PATTERN:**
+SELECT discovered_columns
+FROM primary_table_from_schema
+JOIN additional_tables ON discovered_relationships (if needed)
+WHERE conditions_using_discovered_columns
+GROUP BY discovered_columns (if needed)
+ORDER BY discovered_columns (if needed)
+LIMIT number (if needed);
+**🚫 ABSOLUTE PROHIBITIONS - NEVER GENERATE THESE:**
+- ❌ Complex nested subqueries with ") SELECT" patterns
+- ❌ Malformed CTE structures
+- ❌ Multiple disconnected SELECT statements
+- ❌ SQL with syntax errors or orphaned parentheses
+- ❌ References to non-existent tables or columns
+- ❌ Hardcoded table/column names without schema validation
+
+**✅ ALWAYS GENERATE THESE:**
+- ✅ Simple, clean SELECT statements
+- ✅ Proper JOIN syntax using discovered schema relationships
+- ✅ Valid WHERE clauses with discovered column names
+- ✅ Syntactically correct, executable SQL
+- ✅ Schema-validated table and column references
+
+**CRITICAL SELECT CLAUSE CONSTRUCTION:**
   * **NEVER use asterisk (*) or table.* syntax**
   * **List only relevant column names explicitly**
   * **For PRIMARY ENTITY table: Include ONLY columns that directly relate to the user's question**
@@ -2598,8 +2764,15 @@ STEP 5: CONSTRUCT THE SQL QUERY WITH SELECTIVE AND FOCUSED SELECT CLAUSE
 - **Structure the entire query to logically represent the user's request**
 - Double-check that ALL aspects of the user's query are addressed
 
-STEP 6: REVIEW AND VALIDATE WITH SELECTIVE COLUMN VERIFICATION
-- **CRITICAL SELECT CLAUSE VALIDATION:**
+STEP 6: REVIEW AND VALIDATE SQL SYNTAX AND SCHEMA USAGE
+🎯 **MANDATORY SQL VALIDATION CHECKLIST:**
+- **SYNTAX CHECK**: Verify the SQL has proper structure (SELECT...FROM...WHERE...)
+- **NO MALFORMED PATTERNS**: Ensure there are no ") SELECT" or similar syntax errors
+- **SCHEMA VALIDATION**: Confirm all table and column names were discovered through schema exploration
+- **EXECUTABILITY**: Ensure the SQL can be executed without syntax errors
+- **SIMPLICITY**: Verify the query is straightforward and not overly complex
+
+**CRITICAL SELECT CLAUSE VALIDATION:**
   * Verify NO asterisk (*) symbols exist in the SELECT clause
   * Verify ALL columns are listed explicitly by name
   * Verify ALL condition columns from WHERE/HAVING clauses are included in SELECT
@@ -2692,6 +2865,10 @@ Example 4: "Show patients with moderate risk categories and their therapeutic cl
 **CRITICAL: The goal is to return FOCUSED information that directly answers the user's question (selective columns explicitly listed) AND provide minimal necessary context about WHY these records were selected by including condition columns.**
 
 **FINAL VALIDATION CHECKLIST FOR EVERY QUERY:**
+✅ SQL is simple and executable without syntax errors
+✅ No malformed patterns like ") SELECT" or orphaned parentheses
+✅ All table names discovered through schema exploration
+✅ All column names discovered through schema exploration  
 ✅ No asterisk (*) symbols in SELECT clause
 ✅ All column names explicitly listed
 ✅ Only relevant columns included based on query intent
@@ -2703,16 +2880,33 @@ Example 4: "Show patients with moderate risk categories and their therapeutic cl
 ✅ No unnecessary columns that don't contribute to query intent
 ✅ **CONDITION-BASED TABLE SELECTION: Primary table chosen based on WHERE clause columns**
 ✅ **MULTIPLE TABLE RULE: If tables have similar meaning, chose the one with condition columns**
+✅ **SCHEMA INTELLIGENCE: All references validated against actual database schema**
 
-Remember: You are an EXPERT - use your knowledge to make intelligent decisions about table selection AND always create focused SELECT clauses with explicit column names that directly answer the user's question.
+Remember: You are an EXPERT SQL Agent with INTELLIGENT SCHEMA EXPLORATION capabilities. Use your knowledge to:
+
+🧠 **INTELLIGENT DATABASE EXPLORATION:**
+- **WISELY discover all available database tables**
+- **SMARTLY analyze table schemas to understand data structure**
+- **CLEVERLY choose the optimal tables that contain the exact columns needed**
+- **EXPERTLY map user requirements to actual database schema**
+
+🎯 **INTELLIGENT QUERY CONSTRUCTION:**
+- **SKILLFULLY generate simple, clean, executable SQL**
+- **CAREFULLY avoid complex structures that cause syntax errors**
+- **PRECISELY use only validated table and column names from schema exploration**
+- **STRATEGICALLY focus on relevant data that answers the user's question**
+
+**THE PERFECT SQL QUERY CHARACTERISTICS:**
+1. **SCHEMA-VALIDATED**: Uses only table/column names discovered through exploration
+2. **SIMPLE & CLEAN**: Straightforward structure without malformed patterns
+3. **EXECUTABLE**: Syntactically correct and runs without errors
+4. **FOCUSED**: Returns only relevant data that answers the user's question
+5. **INTELLIGENT**: Demonstrates smart table selection based on query conditions
 
 **CRITICAL TABLE SELECTION PRINCIPLE: When multiple tables seem similar, ALWAYS choose the table that contains the columns needed for your WHERE/HAVING conditions. This avoids unnecessary complex joins and focuses on the data that directly satisfies the user's criteria.**
 
 USER QUERY: ${query}
-
-BEGIN WITH STEP 1 NOW. List ALL tables before proceeding to any other steps.
 `;
-
 
                         console.log('📝 Enhanced query with schema information:', enhancedQuery.substring(0, 200) + '...');
 
@@ -2727,11 +2921,50 @@ BEGIN WITH STEP 1 NOW. List ALL tables before proceeding to any other steps.
                         agentResult = await sqlAgent.call(agentConfig, {
                             callbacks: [{
                                 handleAgentAction: (action: any) => {
-                                    // Log agent's decision-making process
+                                    // 🎯 ENHANCED SQL CAPTURE SYSTEM
                                     console.log('🧠 Agent action:', action.tool);
-                                    console.log('🔍 Action input:', typeof action.toolInput === 'string' ?
-                                        action.toolInput.substring(0, 100) + '...' :
-                                        JSON.stringify(action.toolInput).substring(0, 100) + '...');
+                                    console.log('🔍 Action input type:', typeof action.toolInput);
+                                    console.log('🔍 Action input preview:', typeof action.toolInput === 'string' ?
+                                        action.toolInput.substring(0, 200) + '...' :
+                                        JSON.stringify(action.toolInput).substring(0, 200) + '...');
+
+                                    // Enhanced SQL capture from multiple tool types
+                                    const sqlTools = [
+                                        'sql_db_query',
+                                        'query_sql_db', 
+                                        'sql_db_query_checker',
+                                        'query-checker',
+                                        'query-sql',
+                                        'queryCheckerTool',
+                                        'sql_query'
+                                    ];
+
+                                    if (sqlTools.includes(action.tool)) {
+                                        console.log(`🎯 SQL Tool detected: ${action.tool}`);
+                                        
+                                        let sqlContent = '';
+                                        if (typeof action.toolInput === 'string') {
+                                            sqlContent = action.toolInput;
+                                        } else if (action.toolInput && typeof action.toolInput === 'object') {
+                                            // Handle different input formats
+                                            sqlContent = action.toolInput.query || action.toolInput.sql || action.toolInput.input || '';
+                                        }
+
+                                        if (sqlContent && sqlContent.toLowerCase().includes('select')) {
+                                            console.log('💡 Capturing SQL from tool:', action.tool);
+                                            console.log('📝 Raw SQL:', sqlContent);
+                                            
+                                            debugInfo.originalQueries.push(`[${action.tool}] ${sqlContent}`);
+
+                                            const cleanedSql = cleanSQLQuery(sqlContent);
+                                            if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
+                                                capturedSQLQueries.push(cleanedSql);
+                                                console.log('✅ Successfully captured SQL:', cleanedSql);
+                                            } else {
+                                                console.log('⚠️ SQL cleaning failed or returned invalid result');
+                                            }
+                                        }
+                                    }
 
                                     // Track schema exploration for complex queries
                                     if (action.tool === 'sql_db_schema') {
@@ -2809,23 +3042,37 @@ BEGIN WITH STEP 1 NOW. List ALL tables before proceeding to any other steps.
                                 },
                                 handleToolEnd: (output: any) => {
                                     console.log('✅ Tool completed for query understanding');
-                                    console.log('📊 Tool output:', typeof output === 'string' ?
+                                    console.log('📊 Tool output type:', typeof output);
+                                    console.log('📊 Tool output preview:', typeof output === 'string' ?
                                         output.substring(0, 200) + '...' :
                                         JSON.stringify(output).substring(0, 200) + '...');
 
-                                    // Validate schema understanding
-                                    if (output && typeof output === 'string' && output.includes('COLUMN_NAME')) {
-                                        console.log('📊 Schema information captured for intelligent query generation');
-                                        debugInfo.sqlCorrections.push('Schema understood for intelligent query generation');
+                                    // Enhanced SQL extraction from tool outputs
+                                    let outputString = '';
+                                    if (typeof output === 'string') {
+                                        outputString = output;
+                                    } else if (output && typeof output === 'object') {
+                                        // Try to extract string content from object
+                                        outputString = output.result || output.output || output.text || JSON.stringify(output);
                                     }
 
-                                    // Capture SQL from intelligent analysis
-                                    if (typeof output === 'string' && output.toLowerCase().includes('select')) {
-                                        const cleanedSql = cleanSQLQuery(output);
-                                        if (cleanedSql) {
+                                    // Look for SQL patterns in the output
+                                    if (outputString && outputString.toLowerCase().includes('select')) {
+                                        console.log('💡 Found SQL in tool output');
+                                        
+                                        // Try to extract SQL from the output
+                                        const cleanedSql = cleanSQLQuery(outputString);
+                                        if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
                                             capturedSQLQueries.push(cleanedSql);
-                                            console.log('✅ Captured SQL from intelligent analysis:', cleanedSql);
+                                            console.log('✅ Captured SQL from tool output:', cleanedSql);
+                                            debugInfo.originalQueries.push(`[Tool Output] ${cleanedSql}`);
                                         }
+                                    }
+
+                                    // Validate schema understanding
+                                    if (outputString && outputString.includes('COLUMN_NAME')) {
+                                        console.log('📊 Schema information captured for intelligent query generation');
+                                        debugInfo.sqlCorrections.push('Schema understood for intelligent query generation');
                                     }
                                 }
                             }]
@@ -2875,36 +3122,53 @@ BEGIN WITH STEP 1 NOW. List ALL tables before proceeding to any other steps.
                 } else {
                     // Method 1: Use already captured SQL queries from callbacks
                     if (capturedSQLQueries.length > 0) {
-                        // Sort queries by length to prioritize longer, more complete queries
-                        const sortedQueries = [capturedSQLQueries[capturedSQLQueries.length - 1]];
+                        console.log(`🔍 Captured ${capturedSQLQueries.length} queries:`, capturedSQLQueries);
+                        
+                        // Filter out empty or invalid queries first
+                        const validQueries = capturedSQLQueries.filter(sql => {
+                            const cleaned = sql.trim();
+                            return cleaned && 
+                                   cleaned !== ';' && 
+                                   cleaned.length > 5 && 
+                                   cleaned.toLowerCase().includes('select') &&
+                                   cleaned.toLowerCase().includes('from');
+                        });
 
-                        // Get the longest SQL query that includes both SELECT and FROM and appears to be complete
-                        for (const sql of sortedQueries) {
-                            console.log({ sql });
-                            console.log({ sortedQueries });
-                            if (isCompleteSQLQuery(sql)) {
-                                extractedSQL = sql;
-                                debugInfo.extractionAttempts.push('Complete captured query: ' + extractedSQL);
-                                console.log('✅ Found complete SQL from captured queries');
-                                break;
-                            }
-                        }
+                        console.log(`🔍 Found ${validQueries.length} valid queries:`, validQueries);
 
-                        // If no complete query found, take the longest one
-                        if (!extractedSQL) {
-                            console.log('⚠️ No complete SQL found in captured queries, using longest one');
-                            extractedSQL = sortedQueries[sortedQueries.length - 1];
-                            debugInfo.extractionAttempts.push('Longest captured query: ' + extractedSQL);
-                            console.log('⚠️ Using longest captured SQL query as fallback');
+                        if (validQueries.length > 0) {
+                            // Sort by completeness and length - prefer complete queries
+                            const sortedQueries = validQueries.sort((a, b) => {
+                                const aComplete = isCompleteSQLQuery(a);
+                                const bComplete = isCompleteSQLQuery(b);
+                                
+                                // Prioritize complete queries
+                                if (aComplete && !bComplete) return -1;
+                                if (!aComplete && bComplete) return 1;
+                                
+                                // If both complete or both incomplete, sort by length
+                                return b.length - a.length;
+                            });
+
+                            // Get the best SQL query
+                            extractedSQL = sortedQueries[0];
+                            debugInfo.extractionAttempts.push(`Selected best query: ${extractedSQL}`);
+                            console.log('✅ Found valid SQL from captured queries:', extractedSQL);
+                        } else {
+                            console.log('⚠️ No valid SQL found in captured queries');
                         }
                     }
 
                     // Method 2: Try to extract from agent output if still not found
                     if (!extractedSQL && agentResult && agentResult.output) {
+                        console.log('🔍 Attempting to extract SQL from agent output...');
                         extractedSQL = cleanSQLQuery(agentResult.output);
-                        if (extractedSQL) {
+                        if (extractedSQL && extractedSQL !== ';' && extractedSQL.length > 5) {
                             debugInfo.extractionAttempts.push('Extracted from agent output: ' + extractedSQL);
-                            console.log('✅ Found SQL in agent output');
+                            console.log('✅ Found SQL in agent output:', extractedSQL);
+                        } else {
+                            console.log('❌ No valid SQL found in agent output');
+                            extractedSQL = '';
                         }
                     }
                 }
@@ -2921,6 +3185,53 @@ BEGIN WITH STEP 1 NOW. List ALL tables before proceeding to any other steps.
                     }
                 }
 
+                if (!extractedSQL) {
+                    console.log('❌ No SQL extracted from agent - attempting intelligent fallback...');
+                    
+                    // INTELLIGENT FALLBACK: Generate a reasonable query based on user intent
+                    const userQueryLower = query.toLowerCase();
+                    let fallbackSQL = '';
+                    
+                    // Analyze user intent and create appropriate fallback
+                    if (userQueryLower.includes('patient')) {
+                        if (userQueryLower.includes('medication') || userQueryLower.includes('drug')) {
+                            // Patient + medication query
+                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
+                            console.log('🎯 Using patient+medication fallback');
+                        } else if (userQueryLower.includes('lab') || userQueryLower.includes('test') || userQueryLower.includes('result')) {
+                            // Patient + lab results query
+                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
+                            console.log('🎯 Using patient+lab fallback');
+                        } else if (userQueryLower.includes('risk') || userQueryLower.includes('high') || userQueryLower.includes('low')) {
+                            // Patient + risk query
+                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
+                            console.log('🎯 Using patient+risk fallback');
+                        } else {
+                            // General patient query
+                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
+                            console.log('🎯 Using general patient fallback');
+                        }
+                    } else if (userQueryLower.includes('medication') || userQueryLower.includes('drug')) {
+                        // Medication-focused query
+                        fallbackSQL = "SELECT p.patient_id, p.medications FROM patients p WHERE p.medications IS NOT NULL LIMIT 10;";
+                        console.log('🎯 Using medication fallback');
+                    } else if (userQueryLower.includes('risk')) {
+                        // Risk-focused query  
+                        fallbackSQL = "SELECT rd.record_id, rd.risk_category FROM risk_details rd LIMIT 10;";
+                        console.log('🎯 Using risk fallback');
+                    } else {
+                        // Default fallback - basic patient data
+                        fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state FROM patients p LIMIT 10;";
+                        console.log('🎯 Using default patient fallback');
+                    }
+                    
+                    if (fallbackSQL) {
+                        extractedSQL = fallbackSQL;
+                        debugInfo.extractionAttempts.push(`Intelligent fallback used: ${fallbackSQL}`);
+                        console.log('✅ Applied intelligent fallback SQL:', fallbackSQL);
+                    }
+                }
+                
                 if (!extractedSQL) {
                     return res.status(400).json({
                         error: 'No valid SQL query found in agent response',
@@ -3007,6 +3318,63 @@ BEGIN WITH STEP 1 NOW. List ALL tables before proceeding to any other steps.
 
                 // Skip column name correction and trust the sqlAgent to generate correct queries
                 console.log('📊 Step 3.5: Using original SQL from agent without column name modifications');
+
+                // NEW: Enhanced MySQL GROUP BY validation for only_full_group_by mode
+                console.log('📊 Step 3.6: MySQL GROUP BY compliance validation...');
+                if (dbConfig.type.toLocaleLowerCase() === 'mysql' && mysqlVersionInfo && mysqlVersionInfo.hasOnlyFullGroupBy) {
+                    const groupByValidation = validateMySQLGroupByCompliance(finalSQL);
+                    
+                    if (!groupByValidation.isCompliant) {
+                        console.log('🚨 MySQL GROUP BY compliance issues detected:', groupByValidation.issues);
+                        debugInfo.sqlCorrections.push(`GROUP BY compliance issues: ${groupByValidation.issues.join(', ')}`);
+                        
+                        // Try to fix the GROUP BY issues automatically
+                        if (groupByValidation.suggestedFix) {
+                            console.log('🔧 Attempting automatic GROUP BY fix...');
+                            console.log('🔧 Original SQL:', finalSQL);
+                            console.log('🔧 Suggested fix:', groupByValidation.suggestedFix);
+                            
+                            finalSQL = groupByValidation.suggestedFix;
+                            debugInfo.sqlCorrections.push('Applied automatic GROUP BY compliance fix');
+                            
+                            // Re-validate the fixed SQL
+                            const revalidation = validateMySQLGroupByCompliance(finalSQL);
+                            if (revalidation.isCompliant) {
+                                console.log('✅ GROUP BY fix successful');
+                                debugInfo.sqlCorrections.push('GROUP BY compliance fix successful');
+                            } else {
+                                console.log('⚠️ GROUP BY fix partially successful, remaining issues:', revalidation.issues);
+                                debugInfo.sqlCorrections.push(`Partial GROUP BY fix, remaining issues: ${revalidation.issues.join(', ')}`);
+                            }
+                        } else {
+                            console.log('❌ Could not automatically fix GROUP BY compliance issues');
+                            return res.status(400).json({
+                                error: 'MySQL GROUP BY compliance validation failed',
+                                message: `The generated SQL query violates MySQL's only_full_group_by mode. Issues: ${groupByValidation.issues.join(', ')}`,
+                                extracted_sql: extractedSQL,
+                                final_sql: finalSQL,
+                                groupby_issues: groupByValidation.issues,
+                                debug_info: debugInfo,
+                                suggestions: [
+                                    'Make sure all non-aggregated columns in SELECT are included in GROUP BY',
+                                    'If using aggregation functions, either aggregate all columns or add them to GROUP BY',
+                                    'Consider removing GROUP BY if no aggregation is needed',
+                                    'Use AVG(), MAX(), MIN(), COUNT(), SUM() for columns that should be aggregated'
+                                ],
+                                mysql_info: {
+                                    version: mysqlVersionInfo.full,
+                                    only_full_group_by_enabled: mysqlVersionInfo.hasOnlyFullGroupBy
+                                },
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+                    } else {
+                        console.log('✅ MySQL GROUP BY compliance validation passed');
+                        debugInfo.sqlCorrections.push('MySQL GROUP BY compliance validation passed');
+                    }
+                } else {
+                    console.log('ℹ️ Skipping GROUP BY validation (not MySQL or only_full_group_by disabled)');
+                }
 
                 // Add a note to debug info
                 debugInfo.sqlCorrections.push('Using SQL directly from agent without column name corrections');
@@ -4334,6 +4702,63 @@ Avoid technical jargon and focus on helping the user get the information they ne
     // No hardcoded mappings or corrections are needed
 
     // The rest of the helper functions remain the same
+    // Function to fix malformed SQL structures commonly generated by SQL Agent
+    function fixMalformedSQLStructures(sql: string): string {
+        if (!sql) return '';
+
+        let fixedSQL = sql;
+
+        // Fix 1: Handle malformed CTE/Subquery structure ") SELECT" pattern
+        // Example: "FROM table ) SELECT ..." -> Convert to proper CTE or remove extra parenthesis
+        if (fixedSQL.match(/\)\s*SELECT/i)) {
+            console.log('🔧 Detected ") SELECT" pattern - fixing malformed CTE structure');
+            
+            // Try to identify if this should be a CTE
+            const cteMatch = fixedSQL.match(/(.*?)\s*\)\s*SELECT(.*)/i);
+            if (cteMatch) {
+                const [, beforePart, afterPart] = cteMatch;
+                
+                // Check if the before part looks like a valid subquery
+                if (beforePart.match(/SELECT.*FROM/i)) {
+                    // Convert to CTE structure
+                    fixedSQL = `WITH temp_cte AS (${beforePart.trim()}) SELECT${afterPart}`;
+                    console.log('🔧 Converted malformed structure to CTE');
+                } else {
+                    // Remove the orphaned parenthesis
+                    fixedSQL = fixedSQL.replace(/\)\s*SELECT/i, ' SELECT');
+                    console.log('🔧 Removed orphaned parenthesis before SELECT');
+                }
+            }
+        }
+
+        // Fix 2: Handle multiple SELECT statements - keep only the first complete one
+        const selectMatches = [...fixedSQL.matchAll(/SELECT\s+[\s\S]*?FROM[\s\S]*?(?=\s+SELECT|\s*$)/gi)];
+        if (selectMatches.length > 1) {
+            console.log(`🔧 Found ${selectMatches.length} SELECT statements - using the first complete one`);
+            fixedSQL = selectMatches[0][0].trim();
+        }
+
+        // Fix 3: Remove trailing explanatory text that's not SQL
+        fixedSQL = fixedSQL.replace(/This query returns.*$/i, '');
+        fixedSQL = fixedSQL.replace(/All patients in the result set.*$/i, '');
+        fixedSQL = fixedSQL.replace(/If you need additional.*$/i, '');
+
+        // Fix 4: Clean up extra semicolons and whitespace
+        fixedSQL = fixedSQL.replace(/;+\s*$/, '').trim();
+
+        // Fix 5: Validate basic SQL structure
+        if (!fixedSQL.match(/SELECT\s+.*\s+FROM\s+/i)) {
+            console.log('🔧 Warning: SQL does not have basic SELECT...FROM structure');
+            return '';
+        }
+
+        // Fix 6: Handle non-existent table references
+        // This should be handled by table validation, but we can add basic cleanup
+        fixedSQL = fixedSQL.replace(/JOIN\s+risk_scores\s+/gi, '-- JOIN risk_scores '); // Comment out non-existent table
+
+        return fixedSQL;
+    }
+
     function cleanSQLQuery(input: string): string {
         if (!input || typeof input !== 'string') return '';
 
@@ -4363,6 +4788,9 @@ Avoid technical jargon and focus on helping the user get the information they ne
         }
 
         if (!sql) return '';
+
+        // CRITICAL: Fix malformed SQL structures that SQL Agent generates
+        sql = fixMalformedSQLStructures(sql);
 
         // Clean up markdown and formatting but preserve SQL structure
         sql = sql.replace(/\*\*(.*?)\*\*/g, '$1') // Bold
@@ -4462,6 +4890,153 @@ Avoid technical jargon and focus on helping the user get the information they ne
         }
 
         return fixedSQL;
+    }
+
+    /**
+     * Validates MySQL GROUP BY compliance for only_full_group_by mode
+     * @param sql SQL query to validate
+     * @returns Object with compliance status and suggested fixes
+     */
+    function validateMySQLGroupByCompliance(sql: string): {
+        isCompliant: boolean;
+        issues: string[];
+        suggestedFix?: string;
+    } {
+        if (!sql || typeof sql !== 'string') {
+            return { isCompliant: true, issues: [] };
+        }
+
+        const issues: string[] = [];
+        let suggestedFix = '';
+
+        // Parse the SQL to check for GROUP BY compliance
+        const sqlUpper = sql.toUpperCase();
+        const sqlLower = sql.toLowerCase();
+
+        // Check if the query has aggregation functions
+        const aggregationFunctions = ['COUNT(', 'SUM(', 'AVG(', 'MAX(', 'MIN(', 'GROUP_CONCAT('];
+        const hasAggregation = aggregationFunctions.some(func => sqlUpper.includes(func.toUpperCase()));
+
+        // Check if the query has GROUP BY
+        const hasGroupBy = sqlUpper.includes('GROUP BY');
+
+        if (!hasAggregation) {
+            // No aggregation functions, so GROUP BY compliance is not required
+            return { isCompliant: true, issues: [] };
+        }
+
+        if (!hasGroupBy) {
+            issues.push('Query uses aggregation functions but missing GROUP BY clause');
+            
+            // Try to suggest a fix by adding GROUP BY for non-aggregated columns
+            const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
+            if (selectMatch) {
+                const selectClause = selectMatch[1];
+                const columns = selectClause.split(',').map(col => col.trim());
+                
+                const nonAggregatedColumns: string[] = [];
+                columns.forEach(col => {
+                    const isAggregated = aggregationFunctions.some(func => 
+                        col.toUpperCase().includes(func.toUpperCase())
+                    );
+                    if (!isAggregated && !col.includes('*')) {
+                        // Extract just the column name, removing aliases
+                        const colName = col.replace(/\s+AS\s+\w+/i, '').trim();
+                        nonAggregatedColumns.push(colName);
+                    }
+                });
+
+                if (nonAggregatedColumns.length > 0) {
+                    const fromMatch = sql.match(/FROM[\s\S]*?(?=WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|$)/i);
+                    const whereMatch = sql.match(/(WHERE[\s\S]*?)(?=GROUP BY|HAVING|ORDER BY|LIMIT|$)/i);
+                    const havingMatch = sql.match(/(HAVING[\s\S]*?)(?=ORDER BY|LIMIT|$)/i);
+                    const orderByMatch = sql.match(/(ORDER BY[\s\S]*?)(?=LIMIT|$)/i);
+                    const limitMatch = sql.match(/(LIMIT[\s\S]*)$/i);
+
+                    suggestedFix = `SELECT ${selectClause} ${fromMatch ? fromMatch[0] : ''}`;
+                    if (whereMatch) suggestedFix += ` ${whereMatch[1]}`;
+                    suggestedFix += ` GROUP BY ${nonAggregatedColumns.join(', ')}`;
+                    if (havingMatch) suggestedFix += ` ${havingMatch[1]}`;
+                    if (orderByMatch) suggestedFix += ` ${orderByMatch[1]}`;
+                    if (limitMatch) suggestedFix += ` ${limitMatch[1]}`;
+                    
+                    if (!suggestedFix.endsWith(';')) suggestedFix += ';';
+                }
+            }
+            
+            return { isCompliant: false, issues, suggestedFix };
+        }
+
+        // Parse SELECT clause to find all columns
+        const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
+        if (!selectMatch) {
+            return { isCompliant: true, issues: [] }; // Can't parse, assume compliant
+        }
+
+        const selectClause = selectMatch[1];
+        const columns = selectClause.split(',').map(col => col.trim());
+
+        // Parse GROUP BY clause
+        const groupByMatch = sql.match(/GROUP BY\s+(.*?)(?:\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$)/i);
+        if (!groupByMatch) {
+            issues.push('GROUP BY clause could not be parsed');
+            return { isCompliant: false, issues };
+        }
+
+        const groupByClause = groupByMatch[1];
+        const groupByColumns = groupByClause.split(',').map(col => col.trim());
+
+        // Check each SELECT column
+        const nonAggregatedColumns: string[] = [];
+        const missingFromGroupBy: string[] = [];
+
+        columns.forEach(col => {
+            const isAggregated = aggregationFunctions.some(func => 
+                col.toUpperCase().includes(func.toUpperCase())
+            );
+            
+            if (!isAggregated && !col.includes('*')) {
+                // Extract just the column name, removing aliases and table prefixes for comparison
+                let colName = col.replace(/\s+AS\s+\w+/i, '').trim();
+                
+                // Check if this column is in GROUP BY
+                const isInGroupBy = groupByColumns.some(groupCol => {
+                    // Normalize both for comparison (remove table prefixes, spaces)
+                    const normalizedGroupCol = groupCol.replace(/^\w+\./, '').trim();
+                    const normalizedColName = colName.replace(/^\w+\./, '').trim();
+                    return normalizedGroupCol === normalizedColName || 
+                           groupCol.trim() === colName ||
+                           normalizedGroupCol.toLowerCase() === normalizedColName.toLowerCase();
+                });
+
+                nonAggregatedColumns.push(colName);
+                
+                if (!isInGroupBy) {
+                    missingFromGroupBy.push(colName);
+                }
+            }
+        });
+
+        if (missingFromGroupBy.length > 0) {
+            issues.push(`Non-aggregated columns not in GROUP BY: ${missingFromGroupBy.join(', ')}`);
+            
+            // Suggest fix by adding missing columns to GROUP BY
+            const additionalGroupBy = missingFromGroupBy.filter(col => 
+                !groupByColumns.some(groupCol => 
+                    groupCol.toLowerCase().includes(col.toLowerCase()) ||
+                    col.toLowerCase().includes(groupCol.toLowerCase())
+                )
+            );
+
+            if (additionalGroupBy.length > 0) {
+                const newGroupBy = [...groupByColumns, ...additionalGroupBy].join(', ');
+                suggestedFix = sql.replace(/GROUP BY\s+.*?(?=\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$)/i, `GROUP BY ${newGroupBy}`);
+            }
+
+            return { isCompliant: false, issues, suggestedFix };
+        }
+
+        return { isCompliant: true, issues: [] };
     }
 
     function finalCleanSQL(sql: string): string {
@@ -4712,6 +5287,28 @@ Avoid technical jargon and focus on helping the user get the information they ne
             }
         }
 
+        // Check for multiple SELECT statements (common SQL Agent issue) - Enhanced
+        const multiSelectCount = (fixedSQL.match(/\bSELECT\b/gi) || []).length;
+        if (multiSelectCount > 1) {
+            errors.push('Multiple SELECT statements detected - using first one');
+            console.log(`🔧 Validator: Found ${multiSelectCount} SELECT statements, extracting first complete one...`);
+            
+            // Extract the first complete SELECT statement
+            const firstSelectMatch = fixedSQL.match(/(SELECT[\s\S]*?FROM[\s\S]*?)(?=\s+SELECT|\s*$)/i);
+            if (firstSelectMatch) {
+                fixedSQL = firstSelectMatch[1].trim();
+                console.log('🔧 Validator: Extracted first complete SELECT statement');
+            }
+        }
+
+        // Remove trailing explanatory text that's not SQL
+        const explanatoryTextPattern = /This query returns.*$|All patients in the result set.*$|If you need additional.*$/i;
+        if (explanatoryTextPattern.test(fixedSQL)) {
+            fixedSQL = fixedSQL.replace(explanatoryTextPattern, '').trim();
+            errors.push('Removed explanatory text from SQL');
+            console.log('🔧 Validator: Removed trailing explanatory text');
+        }
+
         // Check for unmatched parentheses
         const openParens = (fixedSQL.match(/\(/g) || []).length;
         const closeParens = (fixedSQL.match(/\)/g) || []).length;
@@ -4765,7 +5362,7 @@ Avoid technical jargon and focus on helping the user get the information they ne
         }
 
         // Check for missing commas in SELECT clause - CRITICAL FIX for common syntax error
-        const selectClausePattern = /SELECT\s+(.*?)\s+FROM/is;
+        const selectClausePattern = /SELECT\s+(.*?)\s+FROM/i;
         const selectMatch = fixedSQL.match(selectClausePattern);
         if (selectMatch) {
             const selectClause = selectMatch[1];

@@ -1,7 +1,7 @@
 import * as dotenv from 'dotenv';
 import { Pool, QueryResult } from 'pg';
-import mysql from 'mysql2/promise';
-import CryptoJS from 'crypto-js';
+import * as mysql from 'mysql2/promise';
+import * as CryptoJS from 'crypto-js';
 
 // Load environment variables
 dotenv.config();
