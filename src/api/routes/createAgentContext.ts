@@ -1,20 +1,46 @@
-// ===========================
-// INTELLIGENT SQL AGENT CONTEXT
-// Optimized for Complex Query Generation
-// ===========================
- 
-const createAgentContext = (config) => {
+// Define interfaces for the configuration and database-specific settings
+interface AgentConfig {
+  databaseType: string;
+  databaseVersionString: string;
+  organizationId: string;
+  query: string;
+  versionSpecificInstructions: string;
+  conversationalContext?: string;
+  queryComplexity?: 'simple' | 'medium' | 'complex' | 'auto';
+  domainContext?: string;
+}
+
+interface DatabaseConfig {
+  groupByMode?: string;
+  features: string[];
+  limits: {
+    maxJoins: number;
+    preferredLimit: number;
+  };
+  optimizations: string[];
+}
+
+interface DatabaseConfigs {
+  [key: string]: DatabaseConfig;
+}
+
+/**
+ * Creates a context for the SQL Agent with intelligent query generation capabilities
+ * @param config Configuration object with database and query information
+ * @returns A string containing the agent context
+ */
+const createAgentContext = (config: AgentConfig): string => {
   const {
     databaseType,
     databaseVersionString,
     organizationId,
     query,
     versionSpecificInstructions,
-    conversationalContext,
+    conversationalContext = '',
     queryComplexity = 'auto',
     domainContext = 'general'
   } = config;
- 
+
   // Core agent identity and capabilities
   const AGENT_CORE = `You are an EXPERT SQL Database Intelligence Agent with advanced query generation capabilities.
  
@@ -26,9 +52,9 @@ const createAgentContext = (config) => {
 - Multi-table relationship mapping
 - Performance-aware query construction
 - Error prediction and prevention`;
- 
+
   // Database-specific configurations
-  const DATABASE_CONFIG = {
+  const DATABASE_CONFIG: DatabaseConfigs = {
     mysql: {
       groupByMode: 'only_full_group_by',
       features: ['JSON_EXTRACT', 'WINDOW_FUNCTIONS', 'CTEs'],
@@ -46,9 +72,9 @@ const createAgentContext = (config) => {
       optimizations: ['Simple joins preferred', 'Avoid complex CTEs']
     }
   };
- 
+
   const dbConfig = DATABASE_CONFIG[databaseType.toLowerCase()] || DATABASE_CONFIG.mysql;
- 
+
   // Build the complete context dynamically
   const fullContext = `${AGENT_CORE}
  
@@ -58,8 +84,8 @@ const createAgentContext = (config) => {
 🎲 Query Complexity: ${queryComplexity}
 🏆 Domain: ${domainContext}
 ⚡ Features: ${dbConfig.features.join(', ')}
-📊 Limits: Max Joins ${dbConfig.maxJoins}, Preferred Limit ${dbConfig.preferredLimit}
- 
+📊 Limits: Max Joins ${dbConfig.limits.maxJoins}, Preferred Limit ${dbConfig.limits.preferredLimit}
+
 ${versionSpecificInstructions}
  
 === TARGET QUERY ===
@@ -115,11 +141,11 @@ ${conversationalContext ? `=== CONVERSATION HISTORY ===\n${conversationalContext
 🔗 **INTELLIGENT JOIN STRATEGIES**
 - Auto-detect optimal join types (INNER/LEFT/RIGHT/FULL)
 - Performance-aware join ordering
-- Maximum joins allowed: ${dbConfig.maxJoins}
+- Maximum joins allowed: ${dbConfig.limits.maxJoins}
 - Relationship inference from foreign key patterns
  
 📊 **PERFORMANCE OPTIMIZATION**
-- Query result limiting: Default ${dbConfig.preferredLimit} rows
+- Query result limiting: Default ${dbConfig.limits.preferredLimit} rows
 - Index-aware WHERE clause construction
 - ${dbConfig.optimizations.join('\n- ')}
  
@@ -175,7 +201,7 @@ ${databaseType.toLowerCase() === 'mysql' ? `
 - **GROUP BY Compliance**: Every non-aggregated SELECT column MUST be in GROUP BY
 - **Performance**: Use STRAIGHT_JOIN for complex multi-table queries
 - **Indexing**: Leverage USE INDEX hints for large tables
-- **Limits**: Default LIMIT ${dbConfig.preferredLimit} for result sets
+- **Limits**: Default LIMIT ${dbConfig.limits.preferredLimit} for result sets
 - **JSON**: Use JSON_EXTRACT() for JSON column queries when available
  
 ✅ **MySQL GROUP BY Pattern**:
@@ -201,7 +227,7 @@ ${databaseType.toLowerCase() === 'sqlite' ? `
 🪶 **SQLite v${databaseVersionString} OPTIMIZATIONS**
 - **Simplicity**: Prefer simple JOINs over complex CTEs
 - **JSON**: JSON1 extension for JSON operations
-- **Performance**: Limit ${dbConfig.preferredLimit} rows for responsiveness  
+- **Performance**: Limit ${dbConfig.limits.preferredLimit} rows for responsiveness
 - **Indexes**: Create indexes on frequently queried columns
 - **Compatibility**: Standard SQL features only
  
@@ -222,7 +248,7 @@ ${databaseType.toLowerCase() === 'sqlite' ? `
  
 🔥 **QUERY GENERATION PRIORITIES**
 - **Accuracy**: Query must return exactly what user requested
-- **Performance**: Optimize for ${dbConfig.preferredLimit} row limit
+- **Performance**: Optimize for ${dbConfig.limits.preferredLimit} row limit
 - **Completeness**: Include all filtering conditions from user query
 - **Clarity**: Use meaningful table aliases and clear structure
  
@@ -236,20 +262,8 @@ ${databaseType.toLowerCase() === 'sqlite' ? `
 ---
 **BEGIN EXECUTION**: Start with sql_db_list_tables() now.
 ---`;
- 
+
   return fullContext;
 };
- 
-// Usage:
-// const context = createAgentContext({
-//   databaseType: 'mysql',
-//   databaseVersionString: '8.0.33',
-//   organizationId: 'org_123',
-//   query: 'Find patients with high glucose levels',
-//   versionSpecificInstructions: 'MySQL specific features enabled',
-//   conversationalContext: 'Previous conversation context...',
-//   queryComplexity: 'complex',
-//   domainContext: 'healthcare'
-// });
- 
-module.exports = { createAgentContext };
+
+export { createAgentContext, type AgentConfig, type DatabaseConfig };
