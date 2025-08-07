@@ -160,7 +160,9 @@ async function generateRestructuredSQL(
     userPrompt: string, 
     dbType: string,
     dbVersion: string,
-    sampleSize: number = 3
+    sampleSize: number = 3,
+    sqlAgent: any,
+    organizationId: string
 ): Promise<any> {
     try {
         // Take sample of results for analysis
@@ -173,6 +175,78 @@ async function generateRestructuredSQL(
                 restructure_message: "No data to restructure"
             };
         }
+
+        console.log('🤖 Step 1: Using SQL Agent to get accurate database schema...');
+        
+        // Step 1: Use SQL Agent to explore and validate schema
+        let schemaInfo = '';
+        let tablesInfo = '';
+        let validatedTables: string[] = [];
+        let validatedColumns: { [table: string]: string[] } = {};
+        
+        try {
+            // Extract table names from original SQL
+            const tableNamePattern = /FROM\s+(\w+)|JOIN\s+(\w+)/gi;
+            const tableMatches = [...originalSQL.matchAll(tableNamePattern)];
+            const tableNames = [...new Set(tableMatches
+                .map(match => match[1] || match[2])
+                .filter(name => name && !['SELECT', 'WHERE', 'AND', 'OR', 'ORDER', 'GROUP', 'HAVING', 'LIMIT'].includes(name.toUpperCase()))
+            )];
+
+            console.log(`🔍 Detected tables from original SQL: ${tableNames.join(', ')}`);
+
+            // Use SQL Agent to get table list and validate tables
+            if (sqlAgent) {
+                const tableListResult = await sqlAgent.call({
+                    input: `List all available tables in the database and show me the schema for these specific tables: ${tableNames.join(', ')}. For each table, show all column names and their data types.`
+                });
+
+                if (tableListResult && tableListResult.output) {
+                    tablesInfo = tableListResult.output;
+                    console.log('✅ Got table information from SQL Agent');
+                    
+                    // Extract validated table and column information from agent output
+                    // This is a simple extraction - the agent output should contain table names and columns
+                    const lines = tablesInfo.toLowerCase().split('\n');
+                    let currentTable = '';
+                    
+                    for (const line of lines) {
+                        // Look for table names
+                        for (const tableName of tableNames) {
+                            if (line.includes(tableName.toLowerCase()) && (line.includes('table') || line.includes('schema'))) {
+                                currentTable = tableName;
+                                validatedTables.push(tableName);
+                                validatedColumns[tableName] = [];
+                                break;
+                            }
+                        }
+                        
+                        // Look for column names (lines that contain column indicators)
+                        if (currentTable && (line.includes('column') || line.includes('field') || line.includes('|'))) {
+                            // Extract column names from the line
+                            const columnMatches = line.match(/\b\w+\b/g);
+                            if (columnMatches) {
+                                for (const match of columnMatches) {
+                                    if (match.length > 2 && !['column', 'field', 'type', 'table', 'schema', 'varchar', 'int', 'text', 'date', 'null'].includes(match.toLowerCase())) {
+                                        if (!validatedColumns[currentTable].includes(match)) {
+                                            validatedColumns[currentTable].push(match);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    console.log(`✅ Validated tables: ${validatedTables.join(', ')}`);
+                    console.log(`✅ Extracted column information for schema validation`);
+                }
+            }
+        } catch (schemaError: any) {
+            console.error('❌ Error getting schema from SQL Agent:', schemaError.message);
+            // Continue with Azure OpenAI only approach as fallback
+        }
+
+        console.log('🤖 Step 2: Using Azure OpenAI for restructuring logic with validated schema...');
 
         const restructuringPrompt = `
 You are an expert SQL developer specializing in transforming flat relational queries into structured, hierarchical queries that eliminate redundancy using JSON aggregation functions.
@@ -194,6 +268,15 @@ DATABASE VERSION: ${dbVersion}
 
 TOTAL RECORDS IN ORIGINAL RESULT: ${sqlResults.length}
 
+${tablesInfo ? `
+VALIDATED DATABASE SCHEMA FROM SQL AGENT:
+${tablesInfo}
+
+CRITICAL: Use ONLY the table and column names shown above. These are the actual names in the database.
+` : ''}
+
+VALIDATED TABLES: ${validatedTables.length > 0 ? validatedTables.join(', ') : 'Schema validation failed - use original SQL table names'}
+
 TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database.
 
 RESTRUCTURING REQUIREMENTS:
@@ -203,6 +286,7 @@ RESTRUCTURING REQUIREMENTS:
 4. **BE LOGICAL**: Structure should make business sense for medical data (group by patient, medication, test type, etc.)
 5. **USE APPROPRIATE GROUPING**: Identify the main entity (patient, medication, test, etc.) and group related data under it
 6. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
+7. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
 
 DATABASE-SPECIFIC JSON FUNCTIONS FOR ${dbType.toUpperCase()} ${dbVersion}:
 ${dbType === 'mysql' ? `
@@ -211,6 +295,18 @@ MySQL ${dbVersion} JSON Functions:
 - JSON_ARRAYAGG(JSON_OBJECT('key', value)) - creates array of JSON objects (MySQL 5.7.22+)
 - JSON_ARRAY(value1, value2, ...) - creates JSON array
 - GROUP_CONCAT(DISTINCT column) - concatenates values (alternative to JSON)
+
+CRITICAL MYSQL VERSION CONSTRAINTS FOR ${dbVersion}:
+- JSON functions require MySQL 5.7+ for full support
+- JSON_ARRAYAGG() available in MySQL 5.7.22+
+- NEVER use DISTINCT inside JSON_ARRAYAGG() - use GROUP BY instead for uniqueness
+- For duplicate removal, use proper GROUP BY clauses, not DISTINCT inside JSON functions
+- Example: Instead of JSON_ARRAYAGG(DISTINCT value), use GROUP BY and JSON_ARRAYAGG(value)
+
+CORRECT MYSQL SYNTAX:
+✅ CORRECT: JSON_ARRAYAGG(JSON_OBJECT('key', value)) with proper GROUP BY
+❌ INCORRECT: JSON_ARRAYAGG(DISTINCT JSON_OBJECT('key', value)) - DISTINCT not supported
+❌ INCORRECT: JSON_ARRAYAGG(DISTINCT value) - DISTINCT not supported inside JSON_ARRAYAGG
 - Note: JSON functions require MySQL 5.7+ for full support
 - Use appropriate syntax for version ${dbVersion}
 ` : `
@@ -229,6 +325,9 @@ ${dbType === 'mysql' ? `
 - Use proper escaping for JSON string values
 - Consider GROUP_CONCAT as fallback for older versions
 - Ensure proper handling of NULL values in JSON functions
+- CRITICAL: NEVER use DISTINCT inside JSON_ARRAYAGG() - MySQL does not support this syntax
+- For uniqueness, rely on proper GROUP BY clauses instead of DISTINCT inside JSON functions
+- Test all JSON function syntax against MySQL ${dbVersion} compatibility
 ` : `
 - For PostgreSQL ${dbVersion}: Verify json_build_* function availability
 - Use appropriate casting (::json) if needed for older versions
@@ -329,6 +428,15 @@ IMPORTANT:
 - If data shows medications with multiple effects, group by medication  
 - If data shows lab tests with multiple results, group by test or patient
 - Use the user's original query intent to determine the best grouping strategy
+
+${dbType === 'mysql' ? `
+FINAL MYSQL SYNTAX REMINDER FOR ${dbVersion}:
+- ABSOLUTELY NEVER use DISTINCT inside JSON_ARRAYAGG() function
+- NEVER write: JSON_ARRAYAGG(DISTINCT column) or JSON_ARRAYAGG(DISTINCT JSON_OBJECT(...))
+- For unique values, use proper GROUP BY clauses instead
+- ALL JSON functions must be compatible with MySQL ${dbVersion}
+- Double-check every JSON function call for MySQL compatibility
+` : ''}
 
 Return only valid JSON without any markdown formatting, comments, or explanations outside the JSON.
 `;
@@ -493,6 +601,243 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             expected_structure: "Original flat structure maintained",
             database_type: dbType,
             database_version: dbVersion
+        };
+    }
+}
+
+/**
+ * Generate bar chart analysis using Azure OpenAI
+ * 
+ * This function takes the structured query and user prompt to analyze data for bar chart creation.
+ * It provides comprehensive parameters needed for creating meaningful bar charts.
+ * 
+ * @param structuredQuery - The SQL query that was executed
+ * @param userPrompt - The original user query/prompt
+ * @param sqlResults - The results from SQL execution for analysis
+ * @param organizationId - The organization identifier
+ * @returns Promise with bar chart analysis and parameters
+ */
+async function generateBarChartAnalysis(
+    structuredQuery: string,
+    userPrompt: string,
+    sqlResults: any[],
+    organizationId: string
+): Promise<any> {
+    try {
+        console.log('📊 Starting Azure OpenAI bar chart analysis...');
+        
+        const azureClient = getAzureOpenAIClient();
+        if (!azureClient) {
+            console.log('⚠️ Azure OpenAI not available, skipping bar chart analysis');
+            return {
+                bar_chart_success: false,
+                message: "Azure OpenAI not available",
+                timestamp: new Date().toISOString()
+            };
+        }
+
+        // Sample the results for analysis (first 5 rows)
+        const sampleResults = sqlResults.slice(0, 5);
+        const resultColumns = sampleResults.length > 0 ? Object.keys(sampleResults[0]) : [];
+        
+        const analysisPrompt = `You are an expert data visualization analyst specializing in medical data. Analyze the provided SQL query, user prompt, and sample data to generate comprehensive parameters for creating a BAR CHART visualization.
+
+CRITICAL INSTRUCTIONS:
+1. You MUST return a valid JSON object with all required parameters
+2. Focus specifically on BAR CHART creation and analysis
+3. Provide actionable parameters that can be directly used for chart creation
+4. Consider medical data context and best practices
+5. Ensure all parameters are practical and implementable
+
+USER QUERY/PROMPT:
+"${userPrompt}"
+
+EXECUTED SQL QUERY:
+${structuredQuery}
+
+SAMPLE DATA RESULTS (first 5 rows):
+${JSON.stringify(sampleResults, null, 2)}
+
+AVAILABLE COLUMNS:
+${resultColumns.join(', ')}
+
+ANALYSIS REQUIREMENTS:
+Please provide a comprehensive JSON response with the following structure:
+
+{
+    "bar_chart_success": true,
+    "analysis": {
+        "chart_type": "BAR_CHART",
+        "recommended_chart_subtype": "vertical_bar|horizontal_bar|grouped_bar|stacked_bar",
+        "data_interpretation": "Brief explanation of what the data represents",
+        "visualization_rationale": "Why bar chart is suitable for this data"
+    },
+    "chart_parameters": {
+        "title": "Meaningful chart title based on user query",
+        "subtitle": "Additional context or time frame",
+        "description": "What the chart shows and key insights",
+        "x_axis": {
+            "field": "column_name_for_x_axis",
+            "label": "Human readable X-axis label",
+            "data_type": "categorical|numeric|datetime",
+            "format": "formatting_suggestion"
+        },
+        "y_axis": {
+            "field": "column_name_for_y_axis", 
+            "label": "Human readable Y-axis label",
+            "data_type": "numeric|count",
+            "aggregation": "sum|count|avg|max|min|none",
+            "format": "number|currency|percentage"
+        },
+        "grouping": {
+            "enabled": true|false,
+            "field": "column_for_grouping_if_applicable",
+            "label": "Group by label"
+        },
+        "filtering": {
+            "recommended_filters": [
+                {
+                    "field": "column_name",
+                    "label": "Filter label",
+                    "type": "dropdown|range|search",
+                    "default_value": "suggested default"
+                }
+            ]
+        },
+        "colors": {
+            "scheme": "medical|professional|category|gradient",
+            "primary_color": "#hex_color",
+            "secondary_colors": ["#hex1", "#hex2", "#hex3"]
+        },
+        "sorting": {
+            "field": "field_to_sort_by",
+            "direction": "asc|desc",
+            "rationale": "why this sorting makes sense"
+        }
+    },
+    "insights": {
+        "key_findings": [
+            "Primary insight from the data",
+            "Secondary insight or pattern",
+            "Notable trends or outliers"
+        ],
+        "medical_context": "Medical significance of the visualization",
+        "actionable_insights": [
+            "What healthcare professionals can do with this information",
+            "Decision support recommendations"
+        ]
+    },
+    "interaction_features": {
+        "drill_down": {
+            "enabled": true|false,
+            "target_fields": ["field1", "field2"],
+            "description": "What drilling down reveals"
+        },
+        "tooltips": {
+            "fields": ["field1", "field2", "field3"],
+            "format": "what information to show on hover"
+        },
+        "export_options": ["png", "pdf", "csv", "excel"]
+    },
+    "performance_considerations": {
+        "data_size": "small|medium|large",
+        "rendering_strategy": "client_side|server_side|hybrid",
+        "optimization_notes": "performance recommendations"
+    },
+    "accessibility": {
+        "color_blind_friendly": true|false,
+        "alt_text": "Alternative text description for screen readers",
+        "keyboard_navigation": true|false
+    }
+}
+
+IMPORTANT NOTES:
+- Choose the most appropriate column for X and Y axes based on the user query intent
+- Consider medical data privacy and sensitivity
+- Ensure the visualization answers the user's original question
+- Provide practical, implementable parameters
+- Focus on clarity and actionability for healthcare professionals
+
+Return ONLY the JSON object, no additional text or formatting.`;
+
+        console.log('🤖 Sending bar chart analysis request to Azure OpenAI...');
+        
+        const completion = await azureClient.chat.completions.create({
+            model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4",
+            messages: [
+                {
+                    role: "system", 
+                    content: "You are a medical data visualization expert. Always respond with valid JSON only."
+                },
+                {
+                    role: "user", 
+                    content: analysisPrompt
+                }
+            ],
+            max_tokens: 2000,
+            temperature: 0.3,
+            response_format: { type: "json_object" }
+        });
+
+        const response = completion.choices[0]?.message?.content;
+        if (!response) {
+            throw new Error('No response from Azure OpenAI');
+        }
+
+        console.log('✅ Received response from Azure OpenAI for bar chart analysis');
+        console.log('📄 Raw response length:', response.length);
+
+        // Parse the JSON response
+        let analysisResult;
+        try {
+            analysisResult = JSON.parse(response);
+        } catch (parseError) {
+            console.error('❌ Failed to parse Azure OpenAI response as JSON:', parseError);
+            console.error('❌ Raw response:', response.substring(0, 500) + '...');
+            
+            return {
+                bar_chart_success: false,
+                message: "Failed to parse bar chart analysis response",
+                error_details: parseError,
+                raw_response: response.substring(0, 500) + '...',
+                timestamp: new Date().toISOString()
+            };
+        }
+
+        // Validate the response structure
+        if (!analysisResult || typeof analysisResult !== 'object') {
+            throw new Error('Invalid response structure from Azure OpenAI');
+        }
+
+        // Add metadata to the response
+        analysisResult.metadata = {
+            analyzed_at: new Date().toISOString(),
+            organization_id: organizationId,
+            data_sample_size: sampleResults.length,
+            total_columns: resultColumns.length,
+            query_complexity: structuredQuery.length > 200 ? 'complex' : 'simple',
+            ai_model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4"
+        };
+
+        console.log('✅ Bar chart analysis completed successfully');
+        
+        return analysisResult;
+
+    } catch (error: any) {
+        console.error('❌ Error generating bar chart analysis with Azure OpenAI:', error.message);
+        
+        return {
+            bar_chart_success: false,
+            message: `Bar chart analysis failed: ${error.message}`,
+            error_details: error.message,
+            fallback_parameters: {
+                chart_type: "BAR_CHART",
+                title: "Data Visualization",
+                x_axis: sqlResults.length > 0 ? Object.keys(sqlResults[0])[0] : "category",
+                y_axis: sqlResults.length > 0 ? Object.keys(sqlResults[0])[1] : "value",
+                basic_config: true
+            },
+            timestamp: new Date().toISOString()
         };
     }
 }
@@ -3344,13 +3689,21 @@ Return only valid, semantic HTML.`;
                         else if (Array.isArray(rows) && rows.length > 0) {
                             console.log(`🔄 Generating restructured SQL query for ${rows.length} records using Azure OpenAI...`);
                             
+                            // Prepare comprehensive version information for Azure OpenAI
+                            let detailedVersionInfo = mySQLVersionString || 'unknown';
+                            if (mysqlVersionInfo) {
+                                detailedVersionInfo = `${mysqlVersionInfo.full} (${mysqlVersionInfo.major}.${mysqlVersionInfo.minor}.${mysqlVersionInfo.patch}) - JSON:${mysqlVersionInfo.supportsJSON}, CTE:${mysqlVersionInfo.supportsCTE}, Windows:${mysqlVersionInfo.supportsWindowFunctions}`;
+                            }
+                            
                             restructuredResults = await generateRestructuredSQL(
-                                finalSQL,
-                                rows,
-                                query,
-                                dbConfig.type.toLocaleLowerCase(),
-                                mySQLVersionString || 'unknown', // Database version for compatibility
-                                3 // Sample size for OpenAI analysis
+                                finalSQL, // originalSQL
+                                rows, // sqlResults  
+                                query, // userPrompt
+                                dbConfig.type.toLocaleLowerCase(), // dbType
+                                detailedVersionInfo, // dbVersion - Enhanced version information with feature support
+                                3, // sampleSize - Sample size for OpenAI analysis
+                                sqlAgent, // sqlAgent
+                                organizationId // organizationId
                             );
                             
                             console.log('✅ SQL restructuring completed');
@@ -3452,6 +3805,46 @@ Return only valid, semantic HTML.`;
                             database_type: dbConfig.type.toLocaleLowerCase()
                         };
                     }
+
+                    // ========== BAR CHART ANALYSIS LAYER ==========
+                    // Add Azure OpenAI bar chart analysis before sending response
+                    console.log('📊 Step 5: Adding bar chart analysis layer...');
+                    
+                    try {
+                        // Get the data for analysis (use restructured data if available, otherwise original data)
+                        const dataForAnalysis = (response.sql_results as any).sql_final || rows;
+                        
+                        if (dataForAnalysis && Array.isArray(dataForAnalysis) && dataForAnalysis.length > 0) {
+                            console.log('🤖 Calling Azure OpenAI for bar chart analysis...');
+                            
+                            const barChartAnalysis = await generateBarChartAnalysis(
+                                finalSQL,
+                                query,
+                                dataForAnalysis,
+                                organizationId
+                            );
+                            
+                            // Add bar chart analysis to the response
+                            (response as any).bar_chart_analysis = barChartAnalysis;
+                            console.log('✅ Bar chart analysis completed and added to response');
+                        } else {
+                            console.log('⚠️ No data available for bar chart analysis');
+                            (response as any).bar_chart_analysis = {
+                                bar_chart_success: false,
+                                message: "No data available for bar chart analysis",
+                                timestamp: new Date().toISOString()
+                            };
+                        }
+                    } catch (barChartError: any) {
+                        console.error('❌ Error during bar chart analysis:', barChartError.message);
+                        (response as any).bar_chart_analysis = {
+                            bar_chart_success: false,
+                            message: `Bar chart analysis failed: ${barChartError.message}`,
+                            error_details: barChartError.message,
+                            timestamp: new Date().toISOString()
+                        };
+                    }
+                    // ================================================
 
                     res.json(response);
 
