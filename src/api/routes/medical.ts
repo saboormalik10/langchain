@@ -122,7 +122,7 @@ function getAzureOpenAIClient(): AzureOpenAI | null {
     if (!isAzureOpenAIAvailable) {
         return null;
     }
-    
+
     if (!azureOpenAI) {
         azureOpenAI = new AzureOpenAI({
             apiKey: process.env.AZURE_OPENAI_API_KEY,
@@ -130,7 +130,7 @@ function getAzureOpenAIClient(): AzureOpenAI | null {
             apiVersion: process.env.AZURE_OPENAI_API_VERSION || "2024-08-01-preview",
         });
     }
-    
+
     return azureOpenAI;
 }
 
@@ -155,9 +155,9 @@ function getAzureOpenAIClient(): AzureOpenAI | null {
  * @returns Restructured SQL query with success/failure information
  */
 async function generateRestructuredSQL(
-    originalSQL: string, 
-    sqlResults: any[], 
-    userPrompt: string, 
+    originalSQL: string,
+    sqlResults: any[],
+    userPrompt: string,
     dbType: string,
     dbVersion: string,
     sampleSize: number = 3,
@@ -167,7 +167,7 @@ async function generateRestructuredSQL(
     try {
         // Take sample of results for analysis
         const sampleResults = sqlResults.slice(0, sampleSize);
-        
+
         if (sampleResults.length === 0) {
             return {
                 restructured_data: [],
@@ -177,13 +177,13 @@ async function generateRestructuredSQL(
         }
 
         console.log('🤖 Step 1: Using SQL Agent to get accurate database schema...');
-        
+
         // Step 1: Use SQL Agent to explore and validate schema
         let schemaInfo = '';
         let tablesInfo = '';
         let validatedTables: string[] = [];
         let validatedColumns: { [table: string]: string[] } = {};
-        
+
         try {
             // Extract table names from original SQL
             const tableNamePattern = /FROM\s+(\w+)|JOIN\s+(\w+)/gi;
@@ -204,12 +204,12 @@ async function generateRestructuredSQL(
                 if (tableListResult && tableListResult.output) {
                     tablesInfo = tableListResult.output;
                     console.log('✅ Got table information from SQL Agent');
-                    
+
                     // Extract validated table and column information from agent output
                     // This is a simple extraction - the agent output should contain table names and columns
                     const lines = tablesInfo.toLowerCase().split('\n');
                     let currentTable = '';
-                    
+
                     for (const line of lines) {
                         // Look for table names
                         for (const tableName of tableNames) {
@@ -220,7 +220,7 @@ async function generateRestructuredSQL(
                                 break;
                             }
                         }
-                        
+
                         // Look for column names (lines that contain column indicators)
                         if (currentTable && (line.includes('column') || line.includes('field') || line.includes('|'))) {
                             // Extract column names from the line
@@ -236,7 +236,7 @@ async function generateRestructuredSQL(
                             }
                         }
                     }
-                    
+
                     console.log(`✅ Validated tables: ${validatedTables.join(', ')}`);
                     console.log(`✅ Extracted column information for schema validation`);
                 }
@@ -444,12 +444,12 @@ Return only valid JSON without any markdown formatting, comments, or explanation
 `;
 
         console.log('🤖 Sending restructuring request to Azure OpenAI...');
-        
+
         const azureOpenAIClient = getAzureOpenAIClient();
         if (!azureOpenAIClient) {
             throw new Error('Azure OpenAI client not available');
         }
-        
+
         const completion = await azureOpenAIClient.chat.completions.create({
             model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4",
             messages: [
@@ -467,7 +467,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
         });
 
         const openaiResponse = completion.choices[0]?.message?.content;
-        
+
         if (!openaiResponse) {
             throw new Error('No response from OpenAI');
         }
@@ -484,33 +484,33 @@ Return only valid JSON without any markdown formatting, comments, or explanation
                 .replace(/```\n?/g, '')
                 .replace(/```/g, '')
                 .trim();
-            
+
             // Remove any single-line comments (//)
             cleanedResponse = cleanedResponse.replace(/\/\/.*$/gm, '');
-            
+
             // Remove any multi-line comments (/* ... */)
             cleanedResponse = cleanedResponse.replace(/\/\*[\s\S]*?\*\//g, '');
-            
+
             // Remove any trailing commas before closing brackets/braces
             cleanedResponse = cleanedResponse.replace(/,(\s*[\]}])/g, '$1');
-            
+
             // First parsing attempt
             try {
                 restructuredResult = JSON.parse(cleanedResponse);
             } catch (firstParseError) {
                 console.log('🔄 First parse failed, trying to extract JSON object...');
-                
+
                 // Try to find the JSON object within the response
                 const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
                 if (jsonMatch) {
                     const extractedJson = jsonMatch[0];
-                    
+
                     // Clean the extracted JSON further
                     const finalCleanedJson = extractedJson
                         .replace(/\/\/.*$/gm, '')
                         .replace(/\/\*[\s\S]*?\*\//g, '')
                         .replace(/,(\s*[\]}])/g, '$1');
-                    
+
                     restructuredResult = JSON.parse(finalCleanedJson);
                 } else {
                     throw new Error('No valid JSON object found in response');
@@ -520,7 +520,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             console.error('❌ Failed to parse Azure OpenAI response as JSON:', parseError);
             console.error('❌ Raw response:', openaiResponse.substring(0, 1000) + '...');
             console.error('❌ Error at position:', (parseError as any).message);
-            
+
             return {
                 restructured_sql: originalSQL, // Fallback to original SQL
                 restructure_success: false,
@@ -542,7 +542,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
 
         if (!restructuredResult.restructured_sql || typeof restructuredResult.restructured_sql !== 'string') {
             console.log('⚠️ Invalid structure, no restructured SQL found...');
-            
+
             return {
                 restructured_sql: originalSQL, // Fallback to original SQL
                 restructure_success: false,
@@ -558,10 +558,10 @@ Return only valid JSON without any markdown formatting, comments, or explanation
         // Validate that the generated SQL is different from the original
         const cleanedGeneratedSQL = restructuredResult.restructured_sql.trim().replace(/\s+/g, ' ');
         const cleanedOriginalSQL = originalSQL.trim().replace(/\s+/g, ' ');
-        
+
         if (cleanedGeneratedSQL.toLowerCase() === cleanedOriginalSQL.toLowerCase()) {
             console.log('⚠️ Generated SQL is identical to original, no restructuring benefit...');
-            
+
             return {
                 restructured_sql: originalSQL,
                 restructure_success: false,
@@ -575,7 +575,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
         }
 
         console.log('✅ Successfully generated restructured SQL query with Azure OpenAI');
-        
+
         return {
             restructured_sql: restructuredResult.restructured_sql,
             restructure_success: true,
@@ -592,7 +592,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
 
     } catch (error: any) {
         console.error('❌ Error generating restructured SQL with Azure OpenAI:', error.message);
-        
+
         return {
             restructured_sql: originalSQL, // Fallback to original SQL
             restructure_success: false,
@@ -627,7 +627,7 @@ async function generateBarChartAnalysis(
 ): Promise<any> {
     try {
         console.log('📊 Starting Azure OpenAI bar chart analysis...');
-        
+
         const azureClient = getAzureOpenAIClient();
         if (!azureClient) {
             console.log('⚠️ Azure OpenAI not available, skipping bar chart analysis');
@@ -641,7 +641,7 @@ async function generateBarChartAnalysis(
         // Sample the results for analysis (first 5 rows)
         const sampleResults = sqlResults.slice(0, 5);
         const resultColumns = sampleResults.length > 0 ? Object.keys(sampleResults[0]) : [];
-        
+
         const analysisPrompt = `You are an expert data visualization analyst specializing in medical data. Analyze the provided SQL query, user prompt, and sample data to generate comprehensive parameters for creating a BAR CHART visualization.
 
 CRITICAL INSTRUCTIONS:
@@ -763,16 +763,16 @@ IMPORTANT NOTES:
 Return ONLY the JSON object, no additional text or formatting.`;
 
         console.log('🤖 Sending bar chart analysis request to Azure OpenAI...');
-        
+
         const completion = await azureClient.chat.completions.create({
             model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4",
             messages: [
                 {
-                    role: "system", 
+                    role: "system",
                     content: "You are a medical data visualization expert. Always respond with valid JSON only."
                 },
                 {
-                    role: "user", 
+                    role: "user",
                     content: analysisPrompt
                 }
             ],
@@ -796,7 +796,7 @@ Return ONLY the JSON object, no additional text or formatting.`;
         } catch (parseError) {
             console.error('❌ Failed to parse Azure OpenAI response as JSON:', parseError);
             console.error('❌ Raw response:', response.substring(0, 500) + '...');
-            
+
             return {
                 bar_chart_success: false,
                 message: "Failed to parse bar chart analysis response",
@@ -822,12 +822,12 @@ Return ONLY the JSON object, no additional text or formatting.`;
         };
 
         console.log('✅ Bar chart analysis completed successfully');
-        
+
         return analysisResult;
 
     } catch (error: any) {
         console.error('❌ Error generating bar chart analysis with Azure OpenAI:', error.message);
-        
+
         return {
             bar_chart_success: false,
             message: `Bar chart analysis failed: ${error.message}`,
@@ -2089,7 +2089,7 @@ Generate ONLY the corrected SQL query without explanations.
                 // ========== DATABASE VERSION DETECTION ==========
                 // Detect database version for both chain and non-chain modes
                 console.log('🔍 Detecting database version for query optimization...');
-                
+
                 try {
                     // Get database version information
                     if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
@@ -2147,7 +2147,7 @@ Generate ONLY the corrected SQL query without explanations.
                         if (result.rows && result.rows[0] && result.rows[0].version) {
                             mySQLVersionString = result.rows[0].version; // Use same variable name for consistency
                             console.log(`✅ PostgreSQL Version detected: ${mySQLVersionString}`);
-                            
+
                             // Parse PostgreSQL version for features
                             const versionMatch = mySQLVersionString.match(/PostgreSQL (\d+)\.(\d+)/);
                             if (versionMatch) {
@@ -2386,7 +2386,7 @@ CRITICAL INSTRUCTIONS FOR CHAINS:
                     try {
                         // Use already detected database version information
                         console.log('🔍 Using detected database version for SQL generation...');
-                        
+
                         const databaseType = dbConfig.type.toLocaleLowerCase();
                         const databaseVersionString = mySQLVersionString;
                         const databaseVersionInfo = mysqlVersionInfo;
@@ -2428,6 +2428,7 @@ ${databaseType.toLowerCase() === 'mysql' && databaseVersionInfo.hasOnlyFullGroup
 
 CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase()} version. Avoid any syntax not supported by ${databaseVersionInfo.full}.
 ` : '';
+                        console.log({ versionSpecificInstructions })
 
                         // Add conversation context if in conversational mode
                         let conversationalContext = '';
@@ -2437,19 +2438,16 @@ CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase(
                                 .join('\n') + '\n\n';
                         }
 
-                        // The enhanced prompt with structured step-by-step approach
-                        // The enhanced prompt with structured step-by-step approach and database context
+                        // The enhanced prompt with structured step-by-step approach and database version enforcement
                         const enhancedQuery = `
 🎯 You are an expert SQL database analyst. Your task is to generate a WORKING SQL query that answers the user's question.
 
-**CRITICAL REQUIREMENTS:**
-1. MUST explore database schema first using sql_db_list_tables() and sql_db_schema()
-2. MUST generate a simple, executable SELECT query
-3. MUST use actual table and column names from the database
-4. NO complex queries, NO CTEs, NO subqueries unless absolutely necessary
-5. Focus on answering the user's specific question
+**CRITICAL VERSION REQUIREMENTS:**
+1. You MUST strictly follow the database version compatibility rules provided below
+2. Any SQL features not supported by the detected version MUST be avoided
+3. Version-specific query patterns MUST be followed exactly, especially for GROUP BY clauses
 
-**DATABASE INFO:**
+**MANDATORY DATABASE VERSION ANALYSIS:**
 - Type: ${databaseType.toUpperCase()}
 - Version: ${databaseVersionString}
 - Organization: ${organizationId}
@@ -2458,7 +2456,7 @@ ${versionSpecificInstructions}
 
 **USER QUERY:** "${query}"
 
-**STEP-BY-STEP PROCESS:**
+**VERSION-AWARE STEP-BY-STEP PROCESS:**
 
 **STEP 1: DISCOVER TABLES**
 - Use sql_db_list_tables() to see all available tables
@@ -2468,19 +2466,36 @@ ${versionSpecificInstructions}
 - Use sql_db_schema("table_name") for tables that might contain data for the user's query
 - Focus on tables that match the user's question topic (patients, medications, lab results, etc.)
 
-**STEP 3: GENERATE SIMPLE SQL**
-- Create a straightforward SELECT query
+**STEP 3: GENERATE VERSION-COMPATIBLE SQL**
+- Create a SQL query compatible with ${databaseType.toUpperCase()} ${databaseVersionString}
 - Use explicit column names (NO SELECT *)
 - Include columns mentioned in user query + minimal context columns
 - Include WHERE conditions if user specifies filters
-- Keep the query simple and executable
+- If using MySQL with only_full_group_by mode: Strictly ensure all non-aggregated columns in SELECT appear in GROUP BY
+- Avoid any syntax features not supported by this database version
 
-**EXAMPLES OF GOOD QUERIES:**
+**VERSION-COMPATIBLE QUERY EXAMPLES:**
+${databaseType.toLowerCase() === 'mysql' && databaseVersionInfo && databaseVersionInfo.hasOnlyFullGroupBy ? `
+- ✅ For "patients with count": SELECT patient_id, gender, COUNT(*) FROM patients GROUP BY patient_id, gender;
+- ✅ For "average risk score by gender": SELECT gender, AVG(risk_score) FROM patients GROUP BY gender;
+- ✅ For "high risk patients": SELECT patient_id, risk_category FROM risk_details WHERE risk_category = 'High';
+- ❌ AVOID: SELECT patient_id, gender, COUNT(*) FROM patients GROUP BY patient_id; (missing gender in GROUP BY)
+- ❌ AVOID: SELECT risk_score, patient_name FROM risk_details GROUP BY patient_id; (columns not in GROUP BY)
+` : `
 - For "show patients": SELECT patient_id, gender, dob, state, city FROM patients LIMIT 10;
 - For "medications": SELECT patient_id, medications FROM patients WHERE medications IS NOT NULL LIMIT 10;
 - For "high risk": SELECT record_id, risk_category, risk_score FROM risk_details WHERE risk_category LIKE '%High%' LIMIT 10;
+`}
 
-**CRITICAL:** Generate ONE simple, working SQL query that directly answers: "${query}"
+**CRITICAL VERSION-SPECIFIC COMPATIBILITY CHECKS:**
+${databaseType.toLowerCase() === 'mysql' ? `
+- JSON Functions: ${databaseVersionInfo && databaseVersionInfo.supportsJSON ? 'Available - OK to use' : 'NOT AVAILABLE - DO NOT USE JSON_EXTRACT or other JSON functions'}
+- Window Functions: ${databaseVersionInfo && databaseVersionInfo.supportsWindowFunctions ? 'Available - OK to use ROW_NUMBER(), etc.' : 'NOT AVAILABLE - DO NOT USE any window functions like ROW_NUMBER()'}
+- CTEs (WITH clause): ${databaseVersionInfo && databaseVersionInfo.supportsCTE ? 'Available - OK to use' : 'NOT AVAILABLE - DO NOT USE WITH clause or CTEs'}
+- GROUP BY Mode: ${databaseVersionInfo && databaseVersionInfo.hasOnlyFullGroupBy ? 'STRICT - all non-aggregated SELECT columns MUST be in GROUP BY' : 'Standard - normal GROUP BY rules apply'}
+` : ''}
+
+**CRITICAL:** Generate ONE version-compatible SQL query that directly answers: "${query}"
 
 Start with STEP 1 - list all tables now.
 
@@ -2642,12 +2657,13 @@ STEP 4: MAP QUERY REQUIREMENTS TO SCHEMA WITH SELECTIVE COLUMN APPROACH
   * **If user mentions specific values/ranges/conditions, choose the table with those exact columns**
   * **Avoid unnecessary joins to tables that don't contain the condition columns**
 
-STEP 5: CONSTRUCT A SIMPLE, CLEAN, EXECUTABLE SQL QUERY
-🎯 **CRITICAL SQL GENERATION RULES:**
-- **GENERATE SIMPLE SQL**: Create straightforward, readable SQL queries without complex nested structures
-- **AVOID COMPLEX CTEs**: Unless absolutely necessary, use simple SELECT statements with JOINs instead of complex Common Table Expressions
-- **NO MALFORMED STRUCTURES**: Never generate SQL with patterns like ") SELECT" or malformed subqueries
-- **VALIDATE SYNTAX**: Ensure the SQL is syntactically correct and executable
+STEP 5: VERSION-COMPATIBLE SQL QUERY CONSTRUCTION
+🎯 **CRITICAL VERSION-AWARE SQL GENERATION RULES:**
+- **GENERATE VERSION-COMPATIBLE SQL**: Create SQL that strictly follows the version constraints of ${databaseType.toUpperCase()} ${databaseVersionString}
+- **CHECK VERSION FEATURES BEFORE USING**: For each SQL feature or function, verify it's supported in this specific version
+- **HONOR VERSION LIMITATIONS**: Avoid ANY syntax not explicitly supported by this version
+- **FOLLOW VERSION-SPECIFIC PATTERNS**: Especially for GROUP BY clauses based on database mode settings
+- **VALIDATE SYNTAX**: Ensure the SQL is syntactically correct AND compatible with this specific version
 - **USE DISCOVERED SCHEMA**: Only use table and column names that you discovered through schema exploration
 
 🚨 **CRITICAL MySQL GROUP BY COMPLIANCE (sql_mode=only_full_group_by):**
@@ -2717,6 +2733,7 @@ LIMIT number (if needed);
 - ❌ SQL with syntax errors or orphaned parentheses
 - ❌ References to non-existent tables or columns
 - ❌ Hardcoded table/column names without schema validation
+- ❌ SQL features not supported by this specific database version ${databaseVersionString}
 
 **✅ ALWAYS GENERATE THESE:**
 - ✅ Simple, clean SELECT statements
@@ -2724,6 +2741,7 @@ LIMIT number (if needed);
 - ✅ Valid WHERE clauses with discovered column names
 - ✅ Syntactically correct, executable SQL
 - ✅ Schema-validated table and column references
+- ✅ Version-compatible syntax that works with ${databaseType.toUpperCase()} ${databaseVersionString}
 
 **CRITICAL SELECT CLAUSE CONSTRUCTION:**
   * **NEVER use asterisk (*) or table.* syntax**
@@ -2764,13 +2782,24 @@ LIMIT number (if needed);
 - **Structure the entire query to logically represent the user's request**
 - Double-check that ALL aspects of the user's query are addressed
 
-STEP 6: REVIEW AND VALIDATE SQL SYNTAX AND SCHEMA USAGE
-🎯 **MANDATORY SQL VALIDATION CHECKLIST:**
-- **SYNTAX CHECK**: Verify the SQL has proper structure (SELECT...FROM...WHERE...)
+STEP 6: VERSION-SPECIFIC VALIDATION AND COMPATIBILITY CHECK
+🎯 **MANDATORY VERSION VALIDATION CHECKLIST:**
+- **VERSION COMPATIBILITY**: Verify the SQL uses ONLY features available in ${databaseType.toUpperCase()} ${databaseVersionString}
+- **VERSION-SPECIFIC CHECKS**: Confirm compatibility with all version-specific rules like GROUP BY requirements
+- **FEATURE VALIDATION**: Double-check that all functions and clauses are supported in this exact version
+- **SYNTAX CHECK**: Verify the SQL has proper structure for this database version
 - **NO MALFORMED PATTERNS**: Ensure there are no ") SELECT" or similar syntax errors
 - **SCHEMA VALIDATION**: Confirm all table and column names were discovered through schema exploration
-- **EXECUTABILITY**: Ensure the SQL can be executed without syntax errors
+- **EXECUTABILITY**: Ensure the SQL can be executed without syntax errors on this specific version
 - **SIMPLICITY**: Verify the query is straightforward and not overly complex
+
+**CRITICAL VERSION-SPECIFIC VALIDATION:**
+${databaseType.toLowerCase() === 'mysql' ? `
+  * **JSON Functions**: ${databaseVersionInfo && databaseVersionInfo.supportsJSON ? 'OK to use JSON_EXTRACT, etc.' : 'REMOVE any JSON functions - not supported in this version'}
+  * **Window Functions**: ${databaseVersionInfo && databaseVersionInfo.supportsWindowFunctions ? 'OK to use ROW_NUMBER(), etc.' : 'REMOVE any window functions - not supported in this version'}
+  * **CTEs**: ${databaseVersionInfo && databaseVersionInfo.supportsCTE ? 'OK to use WITH clause' : 'REMOVE any WITH clauses - not supported in this version'}
+  * **GROUP BY**: ${databaseVersionInfo && databaseVersionInfo.hasOnlyFullGroupBy ? 'STRICT VALIDATION - all non-aggregated SELECT columns MUST be in GROUP BY' : 'Standard GROUP BY rules apply'}
+` : ''}
 
 **CRITICAL SELECT CLAUSE VALIDATION:**
   * Verify NO asterisk (*) symbols exist in the SELECT clause
@@ -2795,6 +2824,8 @@ CRITICAL CONSISTENCY RULES:
 - **ABSOLUTE RULE: List only relevant column names explicitly**
 - **ABSOLUTE RULE: If a column is used in WHERE, HAVING, or JOIN conditions, include it in SELECT (unless it's an ID column)**
 - **ABSOLUTE RULE: Be selective - don't include all available columns, focus on what answers the user's question**
+- **ABSOLUTE RULE: NEVER use SQL features not supported by ${databaseType.toUpperCase()} ${databaseVersionString}**
+- **ABSOLUTE RULE: Strictly adhere to the version-specific GROUP BY rules**
 - NEVER skip any of the 6 steps above
 - ALWAYS document your findings at each step
 - ALWAYS include ALL conditions from the user query
@@ -2864,7 +2895,10 @@ Example 4: "Show patients with moderate risk categories and their therapeutic cl
 
 **CRITICAL: The goal is to return FOCUSED information that directly answers the user's question (selective columns explicitly listed) AND provide minimal necessary context about WHY these records were selected by including condition columns.**
 
-**FINAL VALIDATION CHECKLIST FOR EVERY QUERY:**
+**FINAL VERSION-AWARE VALIDATION CHECKLIST FOR EVERY QUERY:**
+✅ SQL is compatible with ${databaseType.toUpperCase()} ${databaseVersionString}
+✅ SQL uses only features and functions supported by this database version
+✅ SQL follows all version-specific rules (especially GROUP BY if using MySQL)
 ✅ SQL is simple and executable without syntax errors
 ✅ No malformed patterns like ") SELECT" or orphaned parentheses
 ✅ All table names discovered through schema exploration
@@ -2881,6 +2915,10 @@ Example 4: "Show patients with moderate risk categories and their therapeutic cl
 ✅ **CONDITION-BASED TABLE SELECTION: Primary table chosen based on WHERE clause columns**
 ✅ **MULTIPLE TABLE RULE: If tables have similar meaning, chose the one with condition columns**
 ✅ **SCHEMA INTELLIGENCE: All references validated against actual database schema**
+${databaseType.toLowerCase() === 'mysql' && databaseVersionInfo && databaseVersionInfo.hasOnlyFullGroupBy ? `
+✅ **GROUP BY COMPLIANCE: All non-aggregated columns in SELECT are included in GROUP BY**
+✅ **AGGREGATION CORRECTNESS: If using aggregation functions, all other columns in GROUP BY**
+` : ''}
 
 Remember: You are an EXPERT SQL Agent with INTELLIGENT SCHEMA EXPLORATION capabilities. Use your knowledge to:
 
@@ -2891,17 +2929,20 @@ Remember: You are an EXPERT SQL Agent with INTELLIGENT SCHEMA EXPLORATION capabi
 - **EXPERTLY map user requirements to actual database schema**
 
 🎯 **INTELLIGENT QUERY CONSTRUCTION:**
-- **SKILLFULLY generate simple, clean, executable SQL**
+- **SKILLFULLY generate version-compatible SQL for ${databaseType.toUpperCase()} ${databaseVersionString}**
 - **CAREFULLY avoid complex structures that cause syntax errors**
 - **PRECISELY use only validated table and column names from schema exploration**
 - **STRATEGICALLY focus on relevant data that answers the user's question**
 
 **THE PERFECT SQL QUERY CHARACTERISTICS:**
-1. **SCHEMA-VALIDATED**: Uses only table/column names discovered through exploration
-2. **SIMPLE & CLEAN**: Straightforward structure without malformed patterns
-3. **EXECUTABLE**: Syntactically correct and runs without errors
-4. **FOCUSED**: Returns only relevant data that answers the user's question
-5. **INTELLIGENT**: Demonstrates smart table selection based on query conditions
+1. **VERSION-COMPATIBLE**: Uses only features supported by ${databaseType.toUpperCase()} ${databaseVersionString}
+2. **SCHEMA-VALIDATED**: Uses only table/column names discovered through exploration
+3. **SIMPLE & CLEAN**: Straightforward structure without malformed patterns
+4. **EXECUTABLE**: Syntactically correct and runs without errors
+5. **FOCUSED**: Returns only relevant data that answers the user's question
+6. **INTELLIGENT**: Demonstrates smart table selection based on query conditions
+
+**CRITICAL VERSION-SPECIFIC PRINCIPLE: Always validate that every SQL feature, function, and pattern you use is fully supported by ${databaseType.toUpperCase()} ${databaseVersionString}. When in doubt about a feature's compatibility, use simpler alternative syntax that is guaranteed to work.**
 
 **CRITICAL TABLE SELECTION PRINCIPLE: When multiple tables seem similar, ALWAYS choose the table that contains the columns needed for your WHERE/HAVING conditions. This avoids unnecessary complex joins and focuses on the data that directly satisfies the user's criteria.**
 
@@ -2931,7 +2972,7 @@ USER QUERY: ${query}
                                     // Enhanced SQL capture from multiple tool types
                                     const sqlTools = [
                                         'sql_db_query',
-                                        'query_sql_db', 
+                                        'query_sql_db',
                                         'sql_db_query_checker',
                                         'query-checker',
                                         'query-sql',
@@ -2941,7 +2982,7 @@ USER QUERY: ${query}
 
                                     if (sqlTools.includes(action.tool)) {
                                         console.log(`🎯 SQL Tool detected: ${action.tool}`);
-                                        
+
                                         let sqlContent = '';
                                         if (typeof action.toolInput === 'string') {
                                             sqlContent = action.toolInput;
@@ -2953,13 +2994,20 @@ USER QUERY: ${query}
                                         if (sqlContent && sqlContent.toLowerCase().includes('select')) {
                                             console.log('💡 Capturing SQL from tool:', action.tool);
                                             console.log('📝 Raw SQL:', sqlContent);
-                                            
+
                                             debugInfo.originalQueries.push(`[${action.tool}] ${sqlContent}`);
 
+                                            // Enhanced version-aware SQL cleaning
                                             const cleanedSql = cleanSQLQuery(sqlContent);
                                             if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
-                                                capturedSQLQueries.push(cleanedSql);
-                                                console.log('✅ Successfully captured SQL:', cleanedSql);
+                                                // Verify the SQL is version-compatible before adding it
+                                                if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                                                    capturedSQLQueries.push(cleanedSql);
+                                                    console.log('✅ Successfully captured version-compatible SQL:', cleanedSql);
+                                                } else {
+                                                    console.log('⚠️ Rejected non-version-compatible SQL:', cleanedSql);
+                                                    debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL: ' + cleanedSql);
+                                                }
                                             } else {
                                                 console.log('⚠️ SQL cleaning failed or returned invalid result');
                                             }
@@ -2994,10 +3042,17 @@ USER QUERY: ${query}
                                         console.log('💡 Agent generating SQL based on query understanding');
                                         debugInfo.originalQueries.push(sql);
 
+                                        // Enhanced version-aware SQL cleaning
                                         const cleanedSql = cleanSQLQuery(sql);
                                         if (cleanedSql) {
-                                            capturedSQLQueries.push(cleanedSql);
-                                            console.log('✅ Generated intelligent SQL:', cleanedSql);
+                                            // Verify the SQL is version-compatible before adding it
+                                            if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                                                capturedSQLQueries.push(cleanedSql);
+                                                console.log('✅ Generated version-compatible SQL:', cleanedSql);
+                                            } else {
+                                                console.log('⚠️ Rejected non-version-compatible SQL:', cleanedSql);
+                                                debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL: ' + cleanedSql);
+                                            }
                                         }
                                     }
 
@@ -3019,10 +3074,17 @@ USER QUERY: ${query}
                                             (action.toolInput.toLowerCase().includes('select') ||
                                                 action.toolInput.toLowerCase().includes('from'))) {
 
+                                            // Enhanced version-aware SQL cleaning
                                             const cleanedSql = cleanSQLQuery(action.toolInput);
                                             if (cleanedSql) {
-                                                capturedSQLQueries.push(cleanedSql);
-                                                console.log('✅ Captured intelligent SQL:', cleanedSql);
+                                                // Verify the SQL is version-compatible before adding it
+                                                if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                                                    capturedSQLQueries.push(cleanedSql);
+                                                    console.log('✅ Captured version-compatible SQL:', cleanedSql);
+                                                } else {
+                                                    console.log('⚠️ Rejected non-version-compatible SQL:', cleanedSql);
+                                                    debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL: ' + cleanedSql);
+                                                }
                                             }
                                         }
                                     }
@@ -3059,13 +3121,19 @@ USER QUERY: ${query}
                                     // Look for SQL patterns in the output
                                     if (outputString && outputString.toLowerCase().includes('select')) {
                                         console.log('💡 Found SQL in tool output');
-                                        
-                                        // Try to extract SQL from the output
+
+                                        // Try to extract SQL from the output with version compatibility check
                                         const cleanedSql = cleanSQLQuery(outputString);
                                         if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
-                                            capturedSQLQueries.push(cleanedSql);
-                                            console.log('✅ Captured SQL from tool output:', cleanedSql);
-                                            debugInfo.originalQueries.push(`[Tool Output] ${cleanedSql}`);
+                                            // Verify the SQL is version-compatible before adding it
+                                            if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                                                capturedSQLQueries.push(cleanedSql);
+                                                console.log('✅ Captured version-compatible SQL from tool output:', cleanedSql);
+                                                debugInfo.originalQueries.push(`[Tool Output] ${cleanedSql}`);
+                                            } else {
+                                                console.log('⚠️ Rejected non-version-compatible SQL from tool output:', cleanedSql);
+                                                debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL from tool output: ' + cleanedSql);
+                                            }
                                         }
                                     }
 
@@ -3082,12 +3150,18 @@ USER QUERY: ${query}
                         rawAgentResponse = JSON.stringify(agentResult, null, 2);
                         console.log('🔍 Agent raw response:', rawAgentResponse);
 
-                        // Also try to extract SQL from the final output
+                        // Also try to extract SQL from the final output with version compatibility check
                         if (agentResult.output && typeof agentResult.output === 'string') {
                             const cleanedSql = cleanSQLQuery(agentResult.output);
                             if (cleanedSql) {
-                                capturedSQLQueries.push(cleanedSql);
-                                console.log('✅ Captured SQL from final output:', cleanedSql);
+                                // Verify the SQL is version-compatible before adding it
+                                if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                                    capturedSQLQueries.push(cleanedSql);
+                                    console.log('✅ Captured version-compatible SQL from final output:', cleanedSql);
+                                } else {
+                                    console.log('⚠️ Rejected non-version-compatible SQL from final output:', cleanedSql);
+                                    debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL from final output: ' + cleanedSql);
+                                }
                             }
                         }
 
@@ -3100,6 +3174,77 @@ USER QUERY: ${query}
                             timestamp: new Date().toISOString()
                         });
                     }
+                }
+
+                // Helper function to check if SQL is compatible with the database version
+                function isCompatibleWithDatabaseVersion(sql: string, dbType: string, versionInfo: any): boolean {
+                    if (!versionInfo) return true; // If version info not available, assume compatible
+
+                    const sqlLower = sql.toLowerCase();
+
+                    // Check for MySQL version compatibility
+                    if (dbType.toLowerCase() === 'mysql') {
+                        // Check JSON function compatibility
+                        if (!versionInfo.supportsJSON && (
+                            sqlLower.includes('json_extract') ||
+                            sqlLower.includes('json_') ||
+                            sqlLower.includes('->')
+                        )) {
+                            return false;
+                        }
+
+                        // Check window function compatibility
+                        if (!versionInfo.supportsWindowFunctions && (
+                            sqlLower.includes('over (') ||
+                            sqlLower.includes('row_number()') ||
+                            sqlLower.includes('rank()') ||
+                            sqlLower.includes('dense_rank()')
+                        )) {
+                            return false;
+                        }
+
+                        // Check CTE compatibility
+                        if (!versionInfo.supportsCTE && (
+                            sqlLower.includes('with ') &&
+                            (sqlLower.includes(' as (select') || sqlLower.includes(' as(select'))
+                        )) {
+                            return false;
+                        }
+
+                        // Check GROUP BY compatibility with only_full_group_by mode
+                        if (versionInfo.hasOnlyFullGroupBy && sqlLower.includes('group by')) {
+                            // This is a simplified check that should be expanded for production
+                            // A full implementation would parse the SQL and verify all non-aggregated columns
+                            // in the SELECT clause are included in the GROUP BY clause
+
+                            // Extract SELECT and GROUP BY clauses for basic validation
+                            const selectMatch = /select\s+(.*?)\s+from/i.exec(sqlLower);
+                            const groupByMatch = /group\s+by\s+(.*?)(?:having|order|limit|$)/i.exec(sqlLower);
+
+                            if (selectMatch && groupByMatch) {
+                                const selectColumns = selectMatch[1].split(',').map(c => c.trim());
+                                const groupByColumns = groupByMatch[1].split(',').map(c => c.trim());
+
+                                // Very basic check - in a real implementation this would be more sophisticated
+                                // to handle aliases, expressions, etc.
+                                for (const col of selectColumns) {
+                                    // Skip aggregated columns
+                                    if (col.includes('count(') || col.includes('sum(') ||
+                                        col.includes('avg(') || col.includes('min(') ||
+                                        col.includes('max(') || col.includes(' as ')) {
+                                        continue;
+                                    }
+
+                                    // Check if non-aggregated column is in GROUP BY
+                                    if (!groupByColumns.some(g => g === col || col.endsWith('.' + g))) {
+                                        return false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return true; // If no incompatibilities found
                 }
 
                 // Initialize agentResult if it wasn't set (safety check)
@@ -3123,15 +3268,15 @@ USER QUERY: ${query}
                     // Method 1: Use already captured SQL queries from callbacks
                     if (capturedSQLQueries.length > 0) {
                         console.log(`🔍 Captured ${capturedSQLQueries.length} queries:`, capturedSQLQueries);
-                        
+
                         // Filter out empty or invalid queries first
                         const validQueries = capturedSQLQueries.filter(sql => {
                             const cleaned = sql.trim();
-                            return cleaned && 
-                                   cleaned !== ';' && 
-                                   cleaned.length > 5 && 
-                                   cleaned.toLowerCase().includes('select') &&
-                                   cleaned.toLowerCase().includes('from');
+                            return cleaned &&
+                                cleaned !== ';' &&
+                                cleaned.length > 5 &&
+                                cleaned.toLowerCase().includes('select') &&
+                                cleaned.toLowerCase().includes('from');
                         });
 
                         console.log(`🔍 Found ${validQueries.length} valid queries:`, validQueries);
@@ -3141,11 +3286,11 @@ USER QUERY: ${query}
                             const sortedQueries = validQueries.sort((a, b) => {
                                 const aComplete = isCompleteSQLQuery(a);
                                 const bComplete = isCompleteSQLQuery(b);
-                                
+
                                 // Prioritize complete queries
                                 if (aComplete && !bComplete) return -1;
                                 if (!aComplete && bComplete) return 1;
-                                
+
                                 // If both complete or both incomplete, sort by length
                                 return b.length - a.length;
                             });
@@ -3187,11 +3332,11 @@ USER QUERY: ${query}
 
                 if (!extractedSQL) {
                     console.log('❌ No SQL extracted from agent - attempting intelligent fallback...');
-                    
+
                     // INTELLIGENT FALLBACK: Generate a reasonable query based on user intent
                     const userQueryLower = query.toLowerCase();
                     let fallbackSQL = '';
-                    
+
                     // Analyze user intent and create appropriate fallback
                     if (userQueryLower.includes('patient')) {
                         if (userQueryLower.includes('medication') || userQueryLower.includes('drug')) {
@@ -3224,14 +3369,14 @@ USER QUERY: ${query}
                         fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state FROM patients p LIMIT 10;";
                         console.log('🎯 Using default patient fallback');
                     }
-                    
+
                     if (fallbackSQL) {
                         extractedSQL = fallbackSQL;
                         debugInfo.extractionAttempts.push(`Intelligent fallback used: ${fallbackSQL}`);
                         console.log('✅ Applied intelligent fallback SQL:', fallbackSQL);
                     }
                 }
-                
+
                 if (!extractedSQL) {
                     return res.status(400).json({
                         error: 'No valid SQL query found in agent response',
@@ -3274,16 +3419,16 @@ USER QUERY: ${query}
                 //         console.log('🔧 Applied automatic syntax fixes');
                 //         console.log('🔧 Original SQL:', finalSQL);
                 //         console.log('🔧 Fixed SQL:', syntaxValidation.fixedSQL);
-                        
+
                 //         finalSQL = syntaxValidation.fixedSQL;
                 //         debugInfo.sqlCorrections.push('Applied automatic syntax corrections');
-                        
+
                 //         // Re-validate the fixed SQL to ensure it's now valid
                 //         const revalidation = validateSQLSyntax(finalSQL);
                 //         if (!revalidation.isValid) {
                 //             console.log('❌ Fixed SQL still has issues:', revalidation.errors);
                 //             debugInfo.sqlCorrections.push(`Fixed SQL still has issues: ${revalidation.errors.join(', ')}`);
-                            
+
                 //             // Try one more round of fixes
                 //             if (revalidation.fixedSQL && revalidation.fixedSQL !== finalSQL) {
                 //                 finalSQL = revalidation.fixedSQL;
@@ -3323,20 +3468,20 @@ USER QUERY: ${query}
                 console.log('📊 Step 3.6: MySQL GROUP BY compliance validation...');
                 if (dbConfig.type.toLocaleLowerCase() === 'mysql' && mysqlVersionInfo && mysqlVersionInfo.hasOnlyFullGroupBy) {
                     const groupByValidation = validateMySQLGroupByCompliance(finalSQL);
-                    
+
                     if (!groupByValidation.isCompliant) {
                         console.log('🚨 MySQL GROUP BY compliance issues detected:', groupByValidation.issues);
                         debugInfo.sqlCorrections.push(`GROUP BY compliance issues: ${groupByValidation.issues.join(', ')}`);
-                        
+
                         // Try to fix the GROUP BY issues automatically
                         if (groupByValidation.suggestedFix) {
                             console.log('🔧 Attempting automatic GROUP BY fix...');
                             console.log('🔧 Original SQL:', finalSQL);
                             console.log('🔧 Suggested fix:', groupByValidation.suggestedFix);
-                            
+
                             finalSQL = groupByValidation.suggestedFix;
                             debugInfo.sqlCorrections.push('Applied automatic GROUP BY compliance fix');
-                            
+
                             // Re-validate the fixed SQL
                             const revalidation = validateMySQLGroupByCompliance(finalSQL);
                             if (revalidation.isCompliant) {
@@ -4041,7 +4186,7 @@ Return only valid, semantic HTML.`;
 
                     // ========== STEP: GENERATE RESTRUCTURED SQL WITH AZURE OPENAI ==========
                     console.log('🤖 Step: Generating restructured SQL with Azure OpenAI for better data organization...');
-                    
+
                     let restructuredResults = null;
                     try {
                         // Check if Azure OpenAI is available
@@ -4056,13 +4201,13 @@ Return only valid, semantic HTML.`;
                         // Only restructure if we have actual data and it's an array with records
                         else if (Array.isArray(rows) && rows.length > 0) {
                             console.log(`🔄 Generating restructured SQL query for ${rows.length} records using Azure OpenAI...`);
-                            
+
                             // Prepare comprehensive version information for Azure OpenAI
                             let detailedVersionInfo = mySQLVersionString || 'unknown';
                             if (mysqlVersionInfo) {
                                 detailedVersionInfo = `${mysqlVersionInfo.full} (${mysqlVersionInfo.major}.${mysqlVersionInfo.minor}.${mysqlVersionInfo.patch}) - JSON:${mysqlVersionInfo.supportsJSON}, CTE:${mysqlVersionInfo.supportsCTE}, Windows:${mysqlVersionInfo.supportsWindowFunctions}`;
                             }
-                            
+
                             restructuredResults = await generateRestructuredSQL(
                                 finalSQL, // originalSQL
                                 rows, // sqlResults  
@@ -4073,18 +4218,18 @@ Return only valid, semantic HTML.`;
                                 sqlAgent, // sqlAgent
                                 organizationId // organizationId
                             );
-                            
+
                             console.log('✅ SQL restructuring completed');
-                            
+
                             // If we successfully generated a restructured SQL, execute it
                             if (restructuredResults && restructuredResults.restructure_success && restructuredResults.restructured_sql) {
                                 try {
                                     console.log('🔄 Executing restructured SQL query...');
                                     console.log('🔧 Restructured SQL:', restructuredResults.restructured_sql);
-                                    
+
                                     // Check if connection is still valid, create new one if needed
-                                    if (!connection || 
-                                        (connection.state && connection.state === 'disconnected') || 
+                                    if (!connection ||
+                                        (connection.state && connection.state === 'disconnected') ||
                                         (connection.destroyed !== undefined && connection.destroyed) ||
                                         (connection._fatalError !== undefined)) {
                                         console.log('🔄 Recreating database connection for restructured SQL...');
@@ -4097,10 +4242,10 @@ Return only valid, semantic HTML.`;
                                     } else {
                                         console.log('✅ Using existing database connection for restructured SQL');
                                     }
-                                    
+
                                     let restructuredRows: any[] = [];
                                     let restructuredFields: any = null;
-                                    
+
                                     // Execute the restructured SQL query
                                     if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
                                         const [mysqlRows, mysqlFields] = await connection.execute(restructuredResults.restructured_sql);
@@ -4111,9 +4256,9 @@ Return only valid, semantic HTML.`;
                                         restructuredRows = result.rows;
                                         restructuredFields = result.fields;
                                     }
-                                    
+
                                     console.log(`✅ Restructured query executed successfully, returned ${Array.isArray(restructuredRows) ? restructuredRows.length : 0} structured rows`);
-                                    
+
                                     // Add restructured data to sql_results
                                     (response.sql_results as any).sql_final = restructuredRows;
                                     (response.sql_results as any).restructure_info = {
@@ -4130,10 +4275,10 @@ Return only valid, semantic HTML.`;
                                         database_type: dbConfig.type.toLocaleLowerCase()
                                     };
                                     console.log('✅ Enhanced response with restructured SQL results');
-                                    
+
                                 } catch (restructuredSQLError: any) {
                                     console.error('❌ Error executing restructured SQL:', restructuredSQLError.message);
-                                    
+
                                     // Fallback to original data with error info
                                     (response.sql_results as any).restructure_info = {
                                         success: false,
@@ -4177,21 +4322,21 @@ Return only valid, semantic HTML.`;
                     // ========== BAR CHART ANALYSIS LAYER ==========
                     // Add Azure OpenAI bar chart analysis before sending response
                     console.log('📊 Step 5: Adding bar chart analysis layer...');
-                    
+
                     try {
                         // Get the data for analysis (use restructured data if available, otherwise original data)
                         const dataForAnalysis = (response.sql_results as any).sql_final || rows;
-                        
+
                         if (dataForAnalysis && Array.isArray(dataForAnalysis) && dataForAnalysis.length > 0) {
                             console.log('🤖 Calling Azure OpenAI for bar chart analysis...');
-                            
+
                             const barChartAnalysis = await generateBarChartAnalysis(
                                 finalSQL,
                                 query,
                                 dataForAnalysis,
                                 organizationId
                             );
-                            
+
                             // Add bar chart analysis to the response
                             (response as any).bar_chart_analysis = barChartAnalysis;
                             console.log('✅ Bar chart analysis completed and added to response');
@@ -4230,7 +4375,7 @@ Return only valid, semantic HTML.`;
                             }
                             console.log('✅ Primary database connection closed');
                         }
-                        
+
                         await databaseService.closeOrganizationConnections(organizationId);
                         console.log(`🔌 Closed all database connections for organization: ${organizationId}`);
                     } catch (cleanupError) {
@@ -4712,12 +4857,12 @@ Avoid technical jargon and focus on helping the user get the information they ne
         // Example: "FROM table ) SELECT ..." -> Convert to proper CTE or remove extra parenthesis
         if (fixedSQL.match(/\)\s*SELECT/i)) {
             console.log('🔧 Detected ") SELECT" pattern - fixing malformed CTE structure');
-            
+
             // Try to identify if this should be a CTE
             const cteMatch = fixedSQL.match(/(.*?)\s*\)\s*SELECT(.*)/i);
             if (cteMatch) {
                 const [, beforePart, afterPart] = cteMatch;
-                
+
                 // Check if the before part looks like a valid subquery
                 if (beforePart.match(/SELECT.*FROM/i)) {
                     // Convert to CTE structure
@@ -4927,16 +5072,16 @@ Avoid technical jargon and focus on helping the user get the information they ne
 
         if (!hasGroupBy) {
             issues.push('Query uses aggregation functions but missing GROUP BY clause');
-            
+
             // Try to suggest a fix by adding GROUP BY for non-aggregated columns
             const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
             if (selectMatch) {
                 const selectClause = selectMatch[1];
                 const columns = selectClause.split(',').map(col => col.trim());
-                
+
                 const nonAggregatedColumns: string[] = [];
                 columns.forEach(col => {
-                    const isAggregated = aggregationFunctions.some(func => 
+                    const isAggregated = aggregationFunctions.some(func =>
                         col.toUpperCase().includes(func.toUpperCase())
                     );
                     if (!isAggregated && !col.includes('*')) {
@@ -4959,11 +5104,11 @@ Avoid technical jargon and focus on helping the user get the information they ne
                     if (havingMatch) suggestedFix += ` ${havingMatch[1]}`;
                     if (orderByMatch) suggestedFix += ` ${orderByMatch[1]}`;
                     if (limitMatch) suggestedFix += ` ${limitMatch[1]}`;
-                    
+
                     if (!suggestedFix.endsWith(';')) suggestedFix += ';';
                 }
             }
-            
+
             return { isCompliant: false, issues, suggestedFix };
         }
 
@@ -4991,26 +5136,26 @@ Avoid technical jargon and focus on helping the user get the information they ne
         const missingFromGroupBy: string[] = [];
 
         columns.forEach(col => {
-            const isAggregated = aggregationFunctions.some(func => 
+            const isAggregated = aggregationFunctions.some(func =>
                 col.toUpperCase().includes(func.toUpperCase())
             );
-            
+
             if (!isAggregated && !col.includes('*')) {
                 // Extract just the column name, removing aliases and table prefixes for comparison
                 let colName = col.replace(/\s+AS\s+\w+/i, '').trim();
-                
+
                 // Check if this column is in GROUP BY
                 const isInGroupBy = groupByColumns.some(groupCol => {
                     // Normalize both for comparison (remove table prefixes, spaces)
                     const normalizedGroupCol = groupCol.replace(/^\w+\./, '').trim();
                     const normalizedColName = colName.replace(/^\w+\./, '').trim();
-                    return normalizedGroupCol === normalizedColName || 
-                           groupCol.trim() === colName ||
-                           normalizedGroupCol.toLowerCase() === normalizedColName.toLowerCase();
+                    return normalizedGroupCol === normalizedColName ||
+                        groupCol.trim() === colName ||
+                        normalizedGroupCol.toLowerCase() === normalizedColName.toLowerCase();
                 });
 
                 nonAggregatedColumns.push(colName);
-                
+
                 if (!isInGroupBy) {
                     missingFromGroupBy.push(colName);
                 }
@@ -5019,10 +5164,10 @@ Avoid technical jargon and focus on helping the user get the information they ne
 
         if (missingFromGroupBy.length > 0) {
             issues.push(`Non-aggregated columns not in GROUP BY: ${missingFromGroupBy.join(', ')}`);
-            
+
             // Suggest fix by adding missing columns to GROUP BY
-            const additionalGroupBy = missingFromGroupBy.filter(col => 
-                !groupByColumns.some(groupCol => 
+            const additionalGroupBy = missingFromGroupBy.filter(col =>
+                !groupByColumns.some(groupCol =>
                     groupCol.toLowerCase().includes(col.toLowerCase()) ||
                     col.toLowerCase().includes(groupCol.toLowerCase())
                 )
@@ -5079,32 +5224,32 @@ Avoid technical jargon and focus on helping the user get the information they ne
         }
 
         // ENHANCED SQL SYNTAX VALIDATION AND FIXING
-        
+
         // Fix common syntax issues that cause MySQL errors
-        
+
         // 1. Fix orphaned closing parentheses at the beginning
         cleanSQL = cleanSQL.replace(/^\s*\)\s*/, '');
-        
+
         // 2. Fix malformed WITH clauses that don't have proper structure
         cleanSQL = cleanSQL.replace(/^\s*WITH\s*\)\s*/i, '');
-        
+
         // 3. Fix cases where there's a closing parenthesis before SELECT
         cleanSQL = cleanSQL.replace(/^\s*\)\s*(SELECT)/i, '$1');
-        
+
         // 4. Fix complex query structure issues first
         // Handle cases where we have ") SELECT" which indicates malformed CTE or subquery
         if (/\)\s+SELECT/i.test(cleanSQL)) {
             console.log('🔧 Detected malformed CTE/subquery structure, attempting to fix...');
-            
+
             // Pattern: "...GROUP BY field ) SELECT ..." - this is likely a malformed CTE
             const ctePattern = /(SELECT.*?FROM.*?GROUP BY.*?)\s*\)\s*(SELECT.*)/i;
             const cteMatch = cleanSQL.match(ctePattern);
-            
+
             if (cteMatch) {
                 console.log('🔧 Converting to proper CTE structure...');
                 const innerQuery = cteMatch[1];
                 const outerQuery = cteMatch[2];
-                
+
                 // Create a proper CTE structure
                 cleanSQL = `WITH therapeutic_counts AS (${innerQuery}) ${outerQuery}`;
                 console.log('🔧 Fixed CTE structure:', cleanSQL);
@@ -5114,7 +5259,7 @@ Avoid technical jargon and focus on helping the user get the information they ne
                 const selectMatches = cleanSQL.match(/(SELECT[\s\S]*?(?:;|$))/gi);
                 if (selectMatches && selectMatches.length > 0) {
                     // Take the longest SELECT statement (likely most complete)
-                    const longestSelect = selectMatches.reduce((longest, current) => 
+                    const longestSelect = selectMatches.reduce((longest, current) =>
                         current.length > longest.length ? current : longest
                     );
                     cleanSQL = longestSelect;
@@ -5122,22 +5267,22 @@ Avoid technical jargon and focus on helping the user get the information they ne
                 }
             }
         }
-        
+
         // 5. Fix mismatched parentheses - count and balance them
         const openParens = (cleanSQL.match(/\(/g) || []).length;
         const closeParens = (cleanSQL.match(/\)/g) || []).length;
-        
+
         if (closeParens > openParens) {
             // Remove extra closing parentheses strategically
             let extraClosing = closeParens - openParens;
             console.log(`🔧 Removing ${extraClosing} extra closing parentheses...`);
-            
+
             // First, try to remove orphaned closing parentheses at the beginning
             while (extraClosing > 0 && /^\s*\)/.test(cleanSQL)) {
                 cleanSQL = cleanSQL.replace(/^\s*\)/, '');
                 extraClosing--;
             }
-            
+
             // If still have extra, remove them from other strategic positions
             while (extraClosing > 0) {
                 // Remove closing parentheses that appear before keywords without matching opening
@@ -5165,73 +5310,73 @@ Avoid technical jargon and focus on helping the user get the information they ne
                 cleanSQL += ')'.repeat(missingClosing);
             }
         }
-        
+
         // 6. Fix cases where there are multiple SELECT statements incorrectly formatted
         const selectMatches = cleanSQL.match(/SELECT/gi);
         if (selectMatches && selectMatches.length > 1) {
             // If there are multiple SELECTs, take only the first complete one
             const firstSelectIndex = cleanSQL.toUpperCase().indexOf('SELECT');
             let queryEnd = cleanSQL.length;
-            
+
             // Find the end of the first SELECT statement
             const secondSelectIndex = cleanSQL.toUpperCase().indexOf('SELECT', firstSelectIndex + 6);
             if (secondSelectIndex > -1) {
                 queryEnd = secondSelectIndex;
             }
-            
+
             cleanSQL = cleanSQL.substring(firstSelectIndex, queryEnd).trim();
         }
-        
+
         // 7. Fix common MySQL syntax issues
-        
+
         // Fix incorrect LIMIT syntax
         cleanSQL = cleanSQL.replace(/LIMIT\s+(\d+)\s*,\s*(\d+)/gi, 'LIMIT $2 OFFSET $1');
-        
+
         // Fix incorrect date formatting
         cleanSQL = cleanSQL.replace(/DATE\s*\(\s*['"]([^'"]+)['"]\s*\)/gi, 'DATE(\'$1\')');
-        
+
         // Fix table alias issues (missing AS keyword or improper spacing)
         cleanSQL = cleanSQL.replace(/(\w+)\s+(\w+)\s+(ON|WHERE|JOIN|GROUP|ORDER|LIMIT|HAVING)/gi, '$1 AS $2 $3');
-        
+
         // 8. NEW: Fix specific SELECT clause issues that cause syntax errors
-        
+
         // Fix missing comma after table.* in SELECT clauses
         // Pattern: SELECT table.* function(...) should be SELECT table.*, function(...)
         cleanSQL = cleanSQL.replace(/SELECT\s+([\w.]+\.\*)\s+([A-Z_]+\s*\()/gi, 'SELECT $1, $2');
-        
+
         // Fix extra "AS" before table names in FROM clause
         // Pattern: FROM AS table_name should be FROM table_name
         cleanSQL = cleanSQL.replace(/FROM\s+AS\s+/gi, 'FROM ');
-        
+
         // Fix missing comma between SELECT fields - IMPROVED PATTERN
         // Only match field names followed by aggregate functions, not function parameters
         cleanSQL = cleanSQL.replace(/(\w+(?:\.\w+)?)\s+(GROUP_CONCAT|COUNT|SUM|AVG|MAX|MIN)\s*\(/gi, '$1, $2(');
-        
+
         // Fix orphaned commas before FROM
         cleanSQL = cleanSQL.replace(/,\s*FROM/gi, ' FROM');
-        
+
         // 9. Validate basic SQL structure
         const upperSQL = cleanSQL.toUpperCase();
-        
+
         // Ensure proper SELECT structure
         if (!upperSQL.includes('SELECT') || !upperSQL.includes('FROM')) {
             return '';
         }
-        
+
         // Check for basic syntax requirements
         const hasValidStructure = /SELECT\s+.*\s+FROM\s+\w+/i.test(cleanSQL);
         if (!hasValidStructure) {
             return '';
         }
-        
+
         // 10. Final cleanup
-        
+
         // Remove any trailing commas before FROM, WHERE, etc.
         cleanSQL = cleanSQL.replace(/,\s+(FROM|WHERE|GROUP|ORDER|LIMIT|HAVING)/gi, ' $1');
-        
+
         // Remove any extra spaces
         cleanSQL = cleanSQL.replace(/\s+/g, ' ').trim();
-        
+
         // Ensure it ends with a semicolon
         if (!cleanSQL.endsWith(';')) {
             cleanSQL += ';';
@@ -5259,16 +5404,16 @@ Avoid technical jargon and focus on helping the user get the information they ne
         if (/\)\s+SELECT/i.test(sql)) {
             errors.push('Malformed CTE or subquery structure detected');
             console.log('🔧 Validator: Detected ") SELECT" pattern, attempting to fix...');
-            
+
             // Pattern: "...GROUP BY field ) SELECT ..." - this is likely a malformed CTE
             const ctePattern = /(SELECT.*?FROM.*?GROUP BY.*?)\s*\)\s*(SELECT.*)/i;
             const cteMatch = fixedSQL.match(ctePattern);
-            
+
             if (cteMatch) {
                 console.log('🔧 Validator: Converting to proper CTE structure...');
                 const innerQuery = cteMatch[1];
                 const outerQuery = cteMatch[2];
-                
+
                 // Create a proper CTE structure
                 fixedSQL = `WITH therapeutic_counts AS (${innerQuery}) ${outerQuery}`;
                 console.log('🔧 Validator: Fixed CTE structure:', fixedSQL);
@@ -5278,7 +5423,7 @@ Avoid technical jargon and focus on helping the user get the information they ne
                 const selectMatches = fixedSQL.match(/(SELECT[\s\S]*?(?:;|$))/gi);
                 if (selectMatches && selectMatches.length > 0) {
                     // Take the longest SELECT statement (likely most complete)
-                    const longestSelect = selectMatches.reduce((longest, current) => 
+                    const longestSelect = selectMatches.reduce((longest, current) =>
                         current.length > longest.length ? current : longest
                     );
                     fixedSQL = longestSelect;
@@ -5292,7 +5437,7 @@ Avoid technical jargon and focus on helping the user get the information they ne
         if (multiSelectCount > 1) {
             errors.push('Multiple SELECT statements detected - using first one');
             console.log(`🔧 Validator: Found ${multiSelectCount} SELECT statements, extracting first complete one...`);
-            
+
             // Extract the first complete SELECT statement
             const firstSelectMatch = fixedSQL.match(/(SELECT[\s\S]*?FROM[\s\S]*?)(?=\s+SELECT|\s*$)/i);
             if (firstSelectMatch) {
@@ -5320,13 +5465,13 @@ Avoid technical jargon and focus on helping the user get the information they ne
             if (closeParens > openParens) {
                 let extra = closeParens - openParens;
                 console.log(`🔧 Validator: Removing ${extra} extra closing parentheses...`);
-                
+
                 // Remove orphaned closing parentheses at the beginning first
                 while (extra > 0 && /^\s*\)/.test(fixedSQL)) {
                     fixedSQL = fixedSQL.replace(/^\s*\)/, '');
                     extra--;
                 }
-                
+
                 // Remove remaining extra closing parentheses strategically
                 let remaining = extra;
                 while (remaining > 0) {
@@ -5366,27 +5511,27 @@ Avoid technical jargon and focus on helping the user get the information they ne
         const selectMatch = fixedSQL.match(selectClausePattern);
         if (selectMatch) {
             const selectClause = selectMatch[1];
-            
+
             // More specific pattern: field_name followed by aggregate function (not within function parameters)
             // Look for cases like "field_name GROUP_CONCAT(" but not "DISTINCT field_name"
             const missingCommaPattern = /(\w+(?:\.\w+)?)\s+(GROUP_CONCAT|COUNT|SUM|AVG|MAX|MIN)\s*\(/g;
-            
+
             if (missingCommaPattern.test(selectClause)) {
                 console.log('🔧 Validator: Detected missing comma in SELECT clause');
                 errors.push('Missing comma in SELECT clause between fields');
-                
+
                 // Fix by adding commas before aggregate functions (but not inside function parameters)
                 let fixedSelectClause = selectClause.replace(
-                    /(\w+(?:\.\w+)?)\s+(GROUP_CONCAT|COUNT|SUM|AVG|MAX|MIN)\s*\(/g, 
+                    /(\w+(?:\.\w+)?)\s+(GROUP_CONCAT|COUNT|SUM|AVG|MAX|MIN)\s*\(/g,
                     '$1, $2('
                 );
-                
+
                 // Fix missing commas before table.field references (but avoid function parameters)
                 fixedSelectClause = fixedSelectClause.replace(
                     /(\w+(?:\.\w+)?)\s+([A-Za-z_]\w*\.[A-Za-z_]\w*)(?!\s*\))/g,
                     '$1, $2'
                 );
-                
+
                 // Reconstruct the full query
                 fixedSQL = fixedSQL.replace(selectClause, fixedSelectClause);
                 console.log('🔧 Validator: Fixed SELECT clause:', fixedSelectClause);
