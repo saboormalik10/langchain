@@ -1,4 +1,5 @@
 import { getAzureOpenAIClient } from '../config/azure';
+import { EnhancedQueryService } from './enhancedQueryService';
 
 /**
  * Generate restructured SQL query using Azure OpenAI to produce structured, non-redundant results
@@ -28,7 +29,10 @@ export async function generateRestructuredSQL(
     dbVersion: string,
     sampleSize: number = 3,
     sqlAgent: any,
-    organizationId: string
+    organizationId: string,
+    databaseVersionInfo?: any,
+    tableSchemas?: Record<string, any[]>,
+    availableTables?: string[]
 ): Promise<any> {
     try {
         // Take sample of results for analysis
@@ -114,10 +118,24 @@ export async function generateRestructuredSQL(
 
         console.log('🤖 Step 2: Using Azure OpenAI for restructuring logic with validated schema...');
 
-        const restructuringPrompt = `
-You are an expert SQL developer specializing in transforming flat relational queries into structured, hierarchical queries that eliminate redundancy using JSON aggregation functions.
+        // Step 2: Create comprehensive restructuring prompt with database schema context
+        console.log('🔍 Creating enhanced structured query prompt...');
+        
+        // Use our enhanced query service for structured query generation
+        const restructuringPrompt = EnhancedQueryService.createStructuredEnhancedQuery({
+            query: userPrompt,
+            organizationId,
+            databaseType: dbType,
+            databaseVersionString: dbVersion,
+            databaseVersionInfo,
+            availableTables: availableTables || validatedTables,
+            tableSchemas: tableSchemas || {},
+            originalQuery: originalSQL
+        });
 
-USER PROMPT: "${userPrompt}"
+        // Add additional structured query specific context
+        const structuredQueryContext = `
+=== STRUCTURED QUERY TRANSFORMATION CONTEXT ===
 
 ORIGINAL SQL QUERY:
 \`\`\`sql
@@ -129,185 +147,42 @@ SAMPLE RESULTS FROM ORIGINAL QUERY (first ${sampleSize} records):
 ${JSON.stringify(sampleResults, null, 2)}
 \`\`\`
 
-DATABASE TYPE: ${dbType.toUpperCase()}
-DATABASE VERSION: ${dbVersion}
-
 TOTAL RECORDS IN ORIGINAL RESULT: ${sqlResults.length}
 
 ${tablesInfo ? `
 VALIDATED DATABASE SCHEMA FROM SQL AGENT:
 ${tablesInfo}
-
-CRITICAL: Use ONLY the table and column names shown above. These are the actual names in the database.
 ` : ''}
 
-VALIDATED TABLES: ${validatedTables.length > 0 ? validatedTables.join(', ') : 'Schema validation failed - use original SQL table names'}
-
-TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database.
-
-RESTRUCTURING REQUIREMENTS:
+=== TRANSFORMATION REQUIREMENTS ===
 1. **ELIMINATE REDUNDANCY**: Use GROUP BY to group related entities (e.g., patients, medications, lab tests)
 2. **CREATE JSON HIERARCHY**: Use ${dbType === 'mysql' ? 'JSON_OBJECT() and JSON_ARRAYAGG()' : 'json_build_object() and json_agg()'} functions to create nested structures
 3. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original query
 4. **BE LOGICAL**: Structure should make business sense for medical data (group by patient, medication, test type, etc.)
 5. **USE APPROPRIATE GROUPING**: Identify the main entity (patient, medication, test, etc.) and group related data under it
-6. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
-7. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
 
-DATABASE-SPECIFIC JSON FUNCTIONS FOR ${dbType.toUpperCase()} ${dbVersion}:
 ${dbType === 'mysql' ? `
-MySQL ${dbVersion} JSON Functions:
-- JSON_OBJECT('key', value, 'key2', value2) - creates JSON object
-- JSON_ARRAYAGG(JSON_OBJECT('key', value)) - creates array of JSON objects (MySQL 5.7.22+)
-- JSON_ARRAY(value1, value2, ...) - creates JSON array
-- GROUP_CONCAT(DISTINCT column) - concatenates values (alternative to JSON)
+**CRITICAL MYSQL JSON SYNTAX RULES:**
+- NEVER use DISTINCT inside JSON_ARRAYAGG() function
+- Example: JSON_ARRAYAGG(JSON_OBJECT('key', value)) with proper GROUP BY
+- For uniqueness, use proper GROUP BY clauses instead of DISTINCT inside JSON functions
+` : ''}
 
-CRITICAL MYSQL VERSION CONSTRAINTS FOR ${dbVersion}:
-- JSON functions require MySQL 5.7+ for full support
-- JSON_ARRAYAGG() available in MySQL 5.7.22+
-- NEVER use DISTINCT inside JSON_ARRAYAGG() - use GROUP BY instead for uniqueness
-- For duplicate removal, use proper GROUP BY clauses, not DISTINCT inside JSON functions
-- Example: Instead of JSON_ARRAYAGG(DISTINCT value), use GROUP BY and JSON_ARRAYAGG(value)
-
-CORRECT MYSQL SYNTAX:
-✅ CORRECT: JSON_ARRAYAGG(JSON_OBJECT('key', value)) with proper GROUP BY
-❌ INCORRECT: JSON_ARRAYAGG(DISTINCT JSON_OBJECT('key', value)) - DISTINCT not supported
-❌ INCORRECT: JSON_ARRAYAGG(DISTINCT value) - DISTINCT not supported inside JSON_ARRAYAGG
-- Note: JSON functions require MySQL 5.7+ for full support
-- Use appropriate syntax for version ${dbVersion}
-` : `
-PostgreSQL ${dbVersion} JSON Functions:  
-- json_build_object('key', value, 'key2', value2) - creates JSON object
-- json_agg(json_build_object('key', value)) - creates array of JSON objects (PostgreSQL 9.3+)
-- json_build_array(value1, value2, ...) - creates JSON array
-- array_agg(DISTINCT column) - creates array of values
-- Note: JSON functions available in PostgreSQL 9.2+, json_build_* in 9.4+
-- Use appropriate syntax for version ${dbVersion}
-`}
-
-VERSION-SPECIFIC CONSIDERATIONS:
-${dbType === 'mysql' ? `
-- For MySQL ${dbVersion}: Check JSON function availability and syntax compatibility
-- Use proper escaping for JSON string values
-- Consider GROUP_CONCAT as fallback for older versions
-- Ensure proper handling of NULL values in JSON functions
-- CRITICAL: NEVER use DISTINCT inside JSON_ARRAYAGG() - MySQL does not support this syntax
-- For uniqueness, rely on proper GROUP BY clauses instead of DISTINCT inside JSON functions
-- Test all JSON function syntax against MySQL ${dbVersion} compatibility
-` : `
-- For PostgreSQL ${dbVersion}: Verify json_build_* function availability
-- Use appropriate casting (::json) if needed for older versions
-- Consider using row_to_json() for complex objects
-- Ensure proper handling of NULL values in JSON aggregation
-`}
-
-EXAMPLE TRANSFORMATIONS:
-
-Original flat query returning patient-medication pairs:
-\`\`\`sql
-SELECT p.name, p.age, m.medication_name, m.dosage 
-FROM patients p JOIN medications m ON p.id = m.patient_id
-\`\`\`
-
-Restructured query with hierarchy:
-${dbType === 'mysql' ? `
-\`\`\`sql
-SELECT 
-    JSON_OBJECT(
-        'patient', JSON_OBJECT(
-            'name', p.name,
-            'age', p.age,
-            'id', p.id
-        ),
-        'medications', JSON_ARRAYAGG(
-            JSON_OBJECT(
-                'medication_name', m.medication_name,
-                'dosage', m.dosage,
-                'frequency', m.frequency
-            )
-        ),
-        'total_medications', COUNT(m.id)
-    ) as structured_result
-FROM patients p 
-LEFT JOIN medications m ON p.id = m.patient_id 
-GROUP BY p.id, p.name, p.age
-\`\`\`
-` : `
-\`\`\`sql
-SELECT 
-    json_build_object(
-        'patient', json_build_object(
-            'name', p.name,
-            'age', p.age,
-            'id', p.id
-        ),
-        'medications', json_agg(
-            json_build_object(
-                'medication_name', m.medication_name,
-                'dosage', m.dosage,
-                'frequency', m.frequency
-            )
-        ),
-        'total_medications', count(m.id)
-    ) as structured_result
-FROM patients p 
-LEFT JOIN medications m ON p.id = m.patient_id 
-GROUP BY p.id, p.name, p.age
-\`\`\`
-`}
-
-EXPECTED OUTPUT FORMAT:
+**EXPECTED OUTPUT FORMAT:**
 Return a JSON object with this structure:
 {
   "restructured_sql": "your_new_sql_query_here",
   "explanation": "Brief explanation of how you restructured the query and why",
-  "grouping_logic": "Explanation of what entities you grouped together (e.g., 'Grouped by patient_id to eliminate patient duplication')",
+  "grouping_logic": "Explanation of what entities you grouped together",
   "expected_structure": "Description of the JSON structure the new query will produce",
-  "main_entity": "The primary entity being grouped (e.g., 'patient', 'medication', 'lab_test')"
+  "main_entity": "The primary entity being grouped"
 }
 
-CRITICAL REQUIREMENTS:
-- Remove fields in select clause which are not required by user in his prompt
-- Don't add any repeating records that are not needed or already present in the original query
-- Generate a complete, executable SQL query that uses JSON functions compatible with ${dbType.toUpperCase()} ${dbVersion}
-- The query should return fewer rows than the original (due to grouping)
-- Each row should contain a JSON object with hierarchical structure
-- Use appropriate GROUP BY clause to eliminate redundancy
-- Include all original data but organized hierarchically
-- Use LEFT JOIN if needed to preserve main entities even without related data
-- Ensure SQL syntax is correct and compatible with ${dbType.toUpperCase()} ${dbVersion}
-- Handle NULL values appropriately in JSON functions
-- Use version-appropriate JSON function syntax
-
-VERSION COMPATIBILITY NOTES:
-${dbType === 'mysql' ? `
-- For MySQL versions prior to 5.7.22, consider using GROUP_CONCAT instead of JSON_ARRAYAGG
-- Ensure proper JSON escaping for string values
-- Use COALESCE() or IFNULL() to handle NULL values in JSON functions
-` : `
-- For PostgreSQL versions prior to 9.4, use json_agg() instead of json_build_object()
-- Consider row_to_json() for complex object structures in older versions
-- Use COALESCE() to handle NULL values in JSON aggregation
-`}
-
-IMPORTANT: 
-- Focus on the primary entity that appears most frequently in the sample data
-- If data shows patients with multiple medications, group by patient
-- If data shows medications with multiple effects, group by medication  
-- If data shows lab tests with multiple results, group by test or patient
-- Use the user's original query intent to determine the best grouping strategy
-
-${dbType === 'mysql' ? `
-FINAL MYSQL SYNTAX REMINDER FOR ${dbVersion}:
-- ABSOLUTELY NEVER use DISTINCT inside JSON_ARRAYAGG() function
-- NEVER write: JSON_ARRAYAGG(DISTINCT column) or JSON_ARRAYAGG(DISTINCT JSON_OBJECT(...))
-- For unique values, use proper GROUP BY clauses instead
-- ALL JSON functions must be compatible with MySQL ${dbVersion}
-- Double-check every JSON function call for MySQL compatibility
-` : ''}
-
-Return only valid JSON without any markdown formatting, comments, or explanations outside the JSON.
+**CRITICAL:** Return only valid JSON without any markdown formatting, comments, or explanations outside the JSON.
+========================
 `;
+
+        const finalPrompt = restructuringPrompt + '\n\n' + structuredQueryContext;
 
         console.log('🤖 Sending restructuring request to Azure OpenAI...');
 
@@ -325,7 +200,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
                 },
                 {
                     role: "user",
-                    content: restructuringPrompt
+                    content: finalPrompt
                 }
             ],
             temperature: 0.1,

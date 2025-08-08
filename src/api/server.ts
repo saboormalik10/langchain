@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import { json, urlencoded } from 'express';
-import { medicalRoutes } from './routes/medical';
+import { medicalRoutes } from './routes/medicalRefactored';
 import databaseService from '../services/databaseService';
 
 class MedicalLangChainAPI {
