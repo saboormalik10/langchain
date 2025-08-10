@@ -2999,6 +2999,8 @@ USER QUERY: ${query}
 
                                             // Enhanced version-aware SQL cleaning
                                             const cleanedSql = cleanSQLQuery(sqlContent);
+                                            console.log('📝 Raw SQL PROCESSED:', cleanedSql);
+
                                             if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
                                                 // Verify the SQL is version-compatible before adding it
                                                 if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
@@ -3296,7 +3298,8 @@ USER QUERY: ${query}
                             });
 
                             // Get the best SQL query
-                            extractedSQL = sortedQueries[0];
+                            console.log('ajajajaj', sortedQueries)
+                            extractedSQL = sortedQueries[sortedQueries.length - 1];
                             debugInfo.extractionAttempts.push(`Selected best query: ${extractedSQL}`);
                             console.log('✅ Found valid SQL from captured queries:', extractedSQL);
                         } else {
@@ -4854,39 +4857,65 @@ Avoid technical jargon and focus on helping the user get the information they ne
         let fixedSQL = sql;
 
         // Fix 1: Handle malformed CTE/Subquery structure ") SELECT" pattern
-        // Example: "FROM table ) SELECT ..." -> Convert to proper CTE or remove extra parenthesis
+        // BUT be very careful not to break valid subqueries
+        // Only fix if it's clearly malformed (e.g., orphaned parenthesis)
         if (fixedSQL.match(/\)\s*SELECT/i)) {
-            console.log('🔧 Detected ") SELECT" pattern - fixing malformed CTE structure');
+            console.log('🔧 Detected ") SELECT" pattern - analyzing structure...');
 
-            // Try to identify if this should be a CTE
-            const cteMatch = fixedSQL.match(/(.*?)\s*\)\s*SELECT(.*)/i);
-            if (cteMatch) {
-                const [, beforePart, afterPart] = cteMatch;
+            // Count parentheses to determine if this is malformed or a valid subquery
+            const beforeSelectPart = fixedSQL.substring(0, fixedSQL.search(/\)\s*SELECT/i) + 1);
+            const openParens = (beforeSelectPart.match(/\(/g) || []).length;
+            const closeParens = (beforeSelectPart.match(/\)/g) || []).length;
 
-                // Check if the before part looks like a valid subquery
-                if (beforePart.match(/SELECT.*FROM/i)) {
-                    // Convert to CTE structure
-                    fixedSQL = `WITH temp_cte AS (${beforePart.trim()}) SELECT${afterPart}`;
-                    console.log('🔧 Converted malformed structure to CTE');
-                } else {
-                    // Remove the orphaned parenthesis
-                    fixedSQL = fixedSQL.replace(/\)\s*SELECT/i, ' SELECT');
-                    console.log('🔧 Removed orphaned parenthesis before SELECT');
+            // Only fix if parentheses are unbalanced (indicating malformed structure)
+            if (openParens < closeParens) {
+                console.log('🔧 Found orphaned closing parenthesis - removing');
+                fixedSQL = fixedSQL.replace(/\)\s*SELECT/i, ' SELECT');
+            } else if (openParens === closeParens) {
+                // This might be a valid subquery structure, check context
+                const validSubqueryPattern = /(?:FROM|JOIN|IN|EXISTS|AS)\s*\(\s*SELECT.*?\)\s*SELECT/i;
+                if (!validSubqueryPattern.test(fixedSQL)) {
+                    // Check if this looks like a CTE that got malformed
+                    const cteMatch = fixedSQL.match(/(.*?)\s*\)\s*SELECT(.*)/i);
+                    if (cteMatch) {
+                        const [, beforePart, afterPart] = cteMatch;
+                        if (beforePart.match(/SELECT.*FROM/i) && !beforePart.match(/(?:FROM|JOIN|IN|EXISTS|AS)\s*\(\s*SELECT/i)) {
+                            // Convert to CTE structure only if it's clearly a malformed CTE
+                            fixedSQL = `WITH temp_cte AS (${beforePart.trim()}) SELECT${afterPart}`;
+                            console.log('🔧 Converted malformed structure to CTE');
+                        }
+                    }
                 }
             }
         }
 
-        // Fix 2: Handle multiple SELECT statements - keep only the first complete one
-        const selectMatches = [...fixedSQL.matchAll(/SELECT\s+[\s\S]*?FROM[\s\S]*?(?=\s+SELECT|\s*$)/gi)];
-        if (selectMatches.length > 1) {
-            console.log(`🔧 Found ${selectMatches.length} SELECT statements - using the first complete one`);
-            fixedSQL = selectMatches[0][0].trim();
+        // Fix 2: Handle multiple separate SELECT statements - keep only the first complete one
+        // But don't break valid UNION queries or subqueries
+        if (!fixedSQL.match(/UNION/i)) {
+            const selectMatches = [...fixedSQL.matchAll(/(?:^|\s)SELECT\s+[\s\S]*?FROM[\s\S]*?(?=\s+(?:^|\s)SELECT|\s*$)/gi)];
+            if (selectMatches.length > 1) {
+                // Only take the first if they appear to be separate queries, not subqueries
+                let firstValidQuery = '';
+                for (const match of selectMatches) {
+                    const query = match[0].trim();
+                    if (query.match(/SELECT\s+.*\s+FROM\s+/i)) {
+                        firstValidQuery = query;
+                        break;
+                    }
+                }
+                if (firstValidQuery) {
+                    console.log(`🔧 Found ${selectMatches.length} separate SELECT statements - using the first complete one`);
+                    fixedSQL = firstValidQuery;
+                }
+            }
         }
 
         // Fix 3: Remove trailing explanatory text that's not SQL
-        fixedSQL = fixedSQL.replace(/This query returns.*$/i, '');
-        fixedSQL = fixedSQL.replace(/All patients in the result set.*$/i, '');
-        fixedSQL = fixedSQL.replace(/If you need additional.*$/i, '');
+        fixedSQL = fixedSQL.replace(/\s+This query returns.*$/i, '');
+        fixedSQL = fixedSQL.replace(/\s+All patients in the result set.*$/i, '');
+        fixedSQL = fixedSQL.replace(/\s+If you need additional.*$/i, '');
+        fixedSQL = fixedSQL.replace(/\s+Note:.*$/i, '');
+        fixedSQL = fixedSQL.replace(/\s+Explanation:.*$/i, '');
 
         // Fix 4: Clean up extra semicolons and whitespace
         fixedSQL = fixedSQL.replace(/;+\s*$/, '').trim();
@@ -4897,10 +4926,11 @@ Avoid technical jargon and focus on helping the user get the information they ne
             return '';
         }
 
-        // Fix 6: Handle non-existent table references
-        // This should be handled by table validation, but we can add basic cleanup
-        fixedSQL = fixedSQL.replace(/JOIN\s+risk_scores\s+/gi, '-- JOIN risk_scores '); // Comment out non-existent table
+        // Fix 6: Handle non-existent table references (but be conservative)
+        // Only comment out clearly problematic references
+        // fixedSQL = fixedSQL.replace(/JOIN\s+risk_scores\s+/gi, '-- JOIN risk_scores '); // Comment out non-existent table
 
+        console.log('🔧 SQL structure validation completed');
         return fixedSQL;
     }
 
@@ -4909,64 +4939,136 @@ Avoid technical jargon and focus on helping the user get the information they ne
 
         let sql = '';
 
-        // First try to extract from code blocks
-        const codeBlockMatch = input.match(/```(?:sql)?\s*((?:SELECT|select)[\s\S]*?)```/);
+        // Extract from code block (```sql ... ```)
+        const codeBlockMatch = input.match(/```(?:sql)?\s*([\s\S]*?)```/i);
         if (codeBlockMatch) {
             sql = codeBlockMatch[1].trim();
         } else {
-            const inlineCodeMatch = input.match(/`((?:SELECT|select)[\s\S]*?)`/);
+            // Extract from inline code (`...`)
+            const inlineCodeMatch = input.match(/`([\s\S]*?)`/);
             if (inlineCodeMatch) {
                 sql = inlineCodeMatch[1].trim();
             } else {
-                // More comprehensive regex that captures multi-line SQL including JOINs
-                const sqlMatch = input.match(/(SELECT\s+[\s\S]*?\s+FROM\s+[\s\S]*?)(?:;(?:\s*$|\s*[^\s])|\s*$|\s*(?:\*\*|\#\#|--(?!\s*ON)|```|\[\[|\]\]|Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s))/i);
-                if (sqlMatch) {
-                    sql = sqlMatch[1].trim();
-                } else {
-                    // Fallback: try to capture everything from SELECT to a natural stopping point
-                    const lastResortMatch = input.match(/(SELECT\s+[\s\S]*?FROM[\s\S]*?)(?:;(?:\s*$|\s*[^\s])|\s*$|\s*(?:\*\*|\#\#|Query executed|Result:|Error:|Final answer))/i);
-                    if (lastResortMatch) {
-                        sql = lastResortMatch[1].trim();
-                    }
+                // Fallback: try to get text starting with SELECT
+                const selectMatch = input.match(/(SELECT[\s\S]*)/i);
+                if (selectMatch) {
+                    sql = selectMatch[1].trim();
                 }
             }
         }
 
         if (!sql) return '';
 
-        // CRITICAL: Fix malformed SQL structures that SQL Agent generates
-        sql = fixMalformedSQLStructures(sql);
-
-        // Clean up markdown and formatting but preserve SQL structure
-        sql = sql.replace(/\*\*(.*?)\*\*/g, '$1') // Bold
+        // Clean up markdown formatting (bold, italics, links, etc)
+        sql = sql
+            .replace(/\*\*(.*?)\*\*/g, '$1')      // Bold
             .replace(/\*(.*?)\*/g, '$1')          // Italic
             .replace(/__(.*?)__/g, '$1')          // Bold
-            // .replace(/_(.*?)_/g, '$1')         // <--- Removed to keep underscores
             .replace(/~~(.*?)~~/g, '$1')          // Strikethrough
             .replace(/\[(.*?)\]\(.*?\)/g, '$1')   // Links
             .replace(/\[\[(.*?)\]\]/g, '$1')      // Wiki links
-            .replace(/\s*```[\s\S]*?```\s*/g, ' ') // Other code blocks
-            .replace(/`([^`]*)`/g, '$1')          // Inline code
-            // .replace(/#+\s+(.*?)\s*(?:\n|$)/g, ' ') // Headings -- REMOVED
-            // .replace(/(?:\n|^)\s*-\s+(.*?)(?:\n|$)/g, ' $1 ') // List items -- REMOVED
-            // .replace(/(?:\n|^)\s*\d+\.\s+(.*?)(?:\n|$)/g, ' $1 ') // Numbered list items -- REMOVED
-            .replace(/--.*?(?:\n|$)/g, ' ')          // SQL comments (but not ON conditions)
-            .replace(/\/\/.*?(?:\n|$)/g, ' ')        // JS comments
-            .replace(/\/\*[\s\S]*?\*\//g, ' ')       // Multi-line comments
-            .replace(/\s*\*\*Review for common mistakes:\*\*[\s\S]*/i, '')
-            .replace(/\s*\*\*Notes:\*\*[\s\S]*/i, '')
-            .replace(/\{\{.*?\}\}/g, ' ')            // Template tags
-            .replace(/\{\%.*?\%\}/g, ' ');           // Template tags
+            .replace(/\{\{.*?\}\}/g, ' ')         // Template tags
+            .replace(/\{\%.*?\%\}/g, ' ');        // Template tags
 
-        // Normalize whitespace but preserve SQL structure
-        sql = sql.replace(/\s+/g, ' ').trim();
+        // Remove SQL and JS comments, but NOT anything inside parentheses or strings
+        sql = sql
+            .replace(/^--.*$/gm, '')              // SQL single line comments
+            .replace(/\/\/.*$/gm, '')             // JS single line comments
+            .replace(/\/\*[\s\S]*?\*\//g, '');    // Multiline comments
+
+        // Replace all \n with a space
+        sql = sql.replace(/\n/g, ' ');
+
+        // Normalize whitespace
+        sql = sql.replace(/[ \t]+/g, ' ').trim();
 
         // Add semicolon if not present
-        if (!sql.endsWith(';')) {
-            sql += ';';
-        }
+        if (!sql.endsWith(';')) sql += ';';
 
         return sql;
+    }
+
+    // Helper function to extract complete SQL queries with proper parentheses balance
+    function extractCompleteSQL(input: string): string | null {
+        // Find the start of a SELECT statement
+        const selectMatch = input.match(/SELECT/i);
+        if (!selectMatch) return null;
+
+        let startIndex = selectMatch.index!;
+        let currentPos = startIndex;
+        let parenthesesCount = 0;
+        let inSingleQuote = false;
+        let inDoubleQuote = false;
+        let inBacktick = false;
+        let sqlEnd = input.length;
+
+        // Track parentheses balance and find natural SQL ending
+        while (currentPos < input.length) {
+            const char = input[currentPos];
+            const nextChar = currentPos + 1 < input.length ? input[currentPos + 1] : '';
+            const prevChar = currentPos > 0 ? input[currentPos - 1] : '';
+
+            // Handle string literals
+            if (char === "'" && !inDoubleQuote && !inBacktick && prevChar !== '\\') {
+                inSingleQuote = !inSingleQuote;
+            } else if (char === '"' && !inSingleQuote && !inBacktick && prevChar !== '\\') {
+                inDoubleQuote = !inDoubleQuote;
+            } else if (char === '`' && !inSingleQuote && !inDoubleQuote && prevChar !== '\\') {
+                inBacktick = !inBacktick;
+            }
+
+            // Only process non-string characters
+            if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
+                if (char === '(') {
+                    parenthesesCount++;
+                } else if (char === ')') {
+                    parenthesesCount--;
+                }
+
+                // Check for natural SQL endings when parentheses are balanced
+                if (parenthesesCount === 0) {
+                    // Look for semicolon
+                    if (char === ';') {
+                        sqlEnd = currentPos + 1;
+                        break;
+                    }
+
+                    // Look for natural text boundaries that indicate SQL end
+                    const remainingText = input.substring(currentPos);
+                    if (remainingText.match(/^\s*(?:Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s|\*\*|\#\#|```|\[\[|\]\])/i)) {
+                        sqlEnd = currentPos;
+                        break;
+                    }
+
+                    // Look for line breaks followed by non-SQL content
+                    if (char === '\n' && nextChar && !nextChar.match(/\s/)) {
+                        const nextLine = input.substring(currentPos + 1).split('\n')[0];
+                        if (nextLine && !nextLine.match(/^\s*(SELECT|FROM|WHERE|JOIN|GROUP|ORDER|HAVING|LIMIT|UNION|AND|OR)/i)) {
+                            // Check if this looks like explanatory text, not SQL continuation
+                            if (nextLine.match(/^[A-Z].*[.!?]$/) || nextLine.match(/^This|^The|^Note:|^Result|^Error/)) {
+                                sqlEnd = currentPos;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            currentPos++;
+        }
+
+        // Extract the SQL from start to the determined end
+        let extractedSQL = input.substring(startIndex, sqlEnd).trim();
+
+        // Clean up any trailing non-SQL text
+        extractedSQL = extractedSQL.replace(/\s+(Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s).*$/i, '');
+
+        // Validate that we have a complete SQL statement
+        if (extractedSQL.match(/SELECT\s+[\s\S]*?\s+FROM\s+/i)) {
+            return extractedSQL;
+        }
+
+        return null;
     }
 
 
