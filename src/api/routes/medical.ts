@@ -4287,62 +4287,6 @@ USER QUERY: ${query}
                 // Skip column name correction and trust the sqlAgent to generate correct queries
                 console.log('📊 Step 3.5: Using original SQL from agent without column name modifications');
 
-                // NEW: Enhanced MySQL GROUP BY validation for only_full_group_by mode
-                console.log('📊 Step 3.6: MySQL GROUP BY compliance validation...');
-                if (dbConfig.type.toLocaleLowerCase() === 'mysql' && mysqlVersionInfo && mysqlVersionInfo.hasOnlyFullGroupBy) {
-                    const groupByValidation = validateMySQLGroupByCompliance(finalSQL);
-
-                    if (!groupByValidation.isCompliant) {
-                        console.log('🚨 MySQL GROUP BY compliance issues detected:', groupByValidation.issues);
-                        debugInfo.sqlCorrections.push(`GROUP BY compliance issues: ${groupByValidation.issues.join(', ')}`);
-
-                        // Try to fix the GROUP BY issues automatically
-                        if (groupByValidation.suggestedFix) {
-                            console.log('🔧 Attempting automatic GROUP BY fix...');
-                            console.log('🔧 Original SQL:', finalSQL);
-                            console.log('🔧 Suggested fix:', groupByValidation.suggestedFix);
-
-                            finalSQL = groupByValidation.suggestedFix;
-                            debugInfo.sqlCorrections.push('Applied automatic GROUP BY compliance fix');
-
-                            // Re-validate the fixed SQL
-                            const revalidation = validateMySQLGroupByCompliance(finalSQL);
-                            if (revalidation.isCompliant) {
-                                console.log('✅ GROUP BY fix successful');
-                                debugInfo.sqlCorrections.push('GROUP BY compliance fix successful');
-                            } else {
-                                console.log('⚠️ GROUP BY fix partially successful, remaining issues:', revalidation.issues);
-                                debugInfo.sqlCorrections.push(`Partial GROUP BY fix, remaining issues: ${revalidation.issues.join(', ')}`);
-                            }
-                        } else {
-                            console.log('❌ Could not automatically fix GROUP BY compliance issues');
-                            return res.status(400).json({
-                                error: 'MySQL GROUP BY compliance validation failed',
-                                message: `The generated SQL query violates MySQL's only_full_group_by mode. Issues: ${groupByValidation.issues.join(', ')}`,
-                                extracted_sql: extractedSQL,
-                                final_sql: finalSQL,
-                                groupby_issues: groupByValidation.issues,
-                                debug_info: debugInfo,
-                                suggestions: [
-                                    'Make sure all non-aggregated columns in SELECT are included in GROUP BY',
-                                    'If using aggregation functions, either aggregate all columns or add them to GROUP BY',
-                                    'Consider removing GROUP BY if no aggregation is needed',
-                                    'Use AVG(), MAX(), MIN(), COUNT(), SUM() for columns that should be aggregated'
-                                ],
-                                mysql_info: {
-                                    version: mysqlVersionInfo.full,
-                                    only_full_group_by_enabled: mysqlVersionInfo.hasOnlyFullGroupBy
-                                },
-                                timestamp: new Date().toISOString()
-                            });
-                        }
-                    } else {
-                        console.log('✅ MySQL GROUP BY compliance validation passed');
-                        debugInfo.sqlCorrections.push('MySQL GROUP BY compliance validation passed');
-                    }
-                } else {
-                    console.log('ℹ️ Skipping GROUP BY validation (not MySQL or only_full_group_by disabled)');
-                }
 
                 // Add a note to debug info
                 debugInfo.sqlCorrections.push('Using SQL directly from agent without column name corrections');
@@ -4350,7 +4294,7 @@ USER QUERY: ${query}
                 console.log('✅ Final SQL:', finalSQL);
 
                 // Step 3.5: Double-check SQL Query Against Original Query Criteria
-                console.log('📊 Step 3.5: Double-checking SQL query against original query criteria...');
+                // console.log('📊 Step 3.5: Double-checking SQL query against original query criteria...');
 
                 // let sqlValidationResult = await validateSQLAgainstCriteria(finalSQL, query, langchainApp, organizationId, dbConfig);
 
