@@ -7,7 +7,49 @@ import { v4 as uuidv4 } from 'uuid';
 import databaseService from '../../services/databaseService';
 import multiTenantLangChainService from '../../services/multiTenantLangChainService';
 import { AzureOpenAI } from 'openai';
+/**
+ * Recursively parses stringified JSON data within the input.
+ * @param rows - The data that may contain stringified JSON at any nesting level.
+ * @returns The fully parsed data with all stringified JSON parsed.
+ */
+export function parseRows<T = any>(rows: unknown): T {
+    // Handle null/undefined
+    if (rows == null) {
+        return rows as T;
+    }
 
+    // Handle strings - try to parse as JSON
+    if (typeof rows === 'string') {
+        try {
+            const parsed = JSON.parse(rows);
+            // Continue parsing in case the parsed result contains more stringified JSON
+            return parseRows(parsed);
+        } catch {
+            // Not valid JSON, return as-is
+            return rows as T;
+        }
+    }
+
+    // Handle arrays - recursively parse each element
+    if (Array.isArray(rows)) {
+        return rows.map(item => parseRows(item)) as T;
+    }
+
+    // Handle objects - recursively parse each property value
+    if (typeof rows === 'object') {
+        const result: Record<string, any> = {};
+        for (const key in rows) {
+            if (Object.prototype.hasOwnProperty.call(rows, key)) {
+                const value = (rows as Record<string, unknown>)[key];
+                result[key] = parseRows(value);
+            }
+        }
+        return result as T;
+    }
+
+    // For primitives (number, boolean, etc.) - return as is
+    return rows as T;
+}
 // Graph Types Enum
 enum GraphType {
     BAR_CHART = 'bar_chart',
@@ -190,7 +232,7 @@ async function generateRestructuredSQL(
             const sqlWithoutComments = originalSQL.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
             const tableNamePattern = /(?:FROM|JOIN)\s+(?:(?:\w+\.)?"?(\w+)"?(?:\s+(?:AS\s+)?"?(\w+)"?)?|\([\s\S]*?\)(?:\s+(?:AS\s+)?"?(\w+)"?)?)/gi;
             const tableMatches = [...sqlWithoutComments.matchAll(tableNamePattern)];
-            
+
             // Extract table names and remove SQL keywords
             const tableNames = [...new Set(tableMatches
                 .flatMap(match => [match[1], match[2], match[3]].filter(Boolean))
@@ -216,7 +258,7 @@ async function generateRestructuredSQL(
 
                     for (const line of lines) {
                         const lowerLine = line.toLowerCase();
-                        
+
                         // Better table detection pattern
                         if (lowerLine.includes('table') && (lowerLine.includes('schema') || lowerLine.includes('structure') || lowerLine.includes('columns'))) {
                             for (const tableName of tableNames) {
@@ -238,12 +280,12 @@ async function generateRestructuredSQL(
                             if (lowerLine.includes('column') && (lowerLine.includes('type') || lowerLine.includes('data type'))) {
                                 continue;
                             }
-                            
+
                             // Handle both markdown tables and lists
                             if (lowerLine.includes('|') || lowerLine.match(/^\s*[\-\*\•]\s+\w+/) || lowerLine.match(/^\s*\d+\.\s+\w+/)) {
                                 // For markdown tables, typically the column name is in the first cell
                                 let columnName = '';
-                                
+
                                 if (lowerLine.includes('|')) {
                                     const cells = lowerLine.split('|').map(cell => cell.trim());
                                     // First non-empty cell is usually the column name
@@ -255,17 +297,17 @@ async function generateRestructuredSQL(
                                         columnName = match[1];
                                     }
                                 }
-                                
+
                                 // Clean up the column name and filter out data type words
                                 if (columnName) {
                                     // Remove data type information if present in the same string
                                     columnName = columnName.split(/\s+/)[0];
-                                    
+
                                     // Skip known data type words and SQL keywords
-                                    const skipWords = ['varchar', 'int', 'text', 'date', 'timestamp', 'boolean', 'float', 'double', 
-                                                      'decimal', 'char', 'null', 'not', 'primary', 'key', 'foreign', 'references',
-                                                      'unique', 'index', 'constraint', 'default', 'auto_increment', 'serial'];
-                                    
+                                    const skipWords = ['varchar', 'int', 'text', 'date', 'timestamp', 'boolean', 'float', 'double',
+                                        'decimal', 'char', 'null', 'not', 'primary', 'key', 'foreign', 'references',
+                                        'unique', 'index', 'constraint', 'default', 'auto_increment', 'serial'];
+
                                     if (columnName.length > 1 && !skipWords.includes(columnName.toLowerCase())) {
                                         if (!validatedColumns[currentTable].includes(columnName)) {
                                             validatedColumns[currentTable].push(columnName);
@@ -274,7 +316,7 @@ async function generateRestructuredSQL(
                                 }
                             }
                         }
-                        
+
                         // Detect end of table definition
                         if (inTableDefinition && (line.trim() === '' || (lowerLine.includes('table') && !lowerLine.includes(currentTable.toLowerCase())))) {
                             inTableDefinition = false;
@@ -588,7 +630,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
  */
 function getDatabaseSyntaxRules(dbType: string, dbVersion: string): any {
     const lowerType = dbType.toLowerCase();
-    
+
     if (lowerType === 'mysql') {
         return {
             general: `
@@ -909,36 +951,36 @@ function validateSQLSyntax(sql: string, dbType: string, dbVersion: string): { is
     try {
         const lowerType = dbType.toLowerCase();
         const versionNumber = parseFloat(dbVersion);
-        
+
         // Basic validation checks that apply to all SQL dialects
         if (!sql.trim()) {
             return { isValid: false, error: "SQL query is empty" };
         }
-        
+
         // Check for balanced parentheses
         const openParens = (sql.match(/\(/g) || []).length;
         const closeParens = (sql.match(/\)/g) || []).length;
         if (openParens !== closeParens) {
             return { isValid: false, error: "Unbalanced parentheses in SQL query" };
         }
-        
+
         // Check for basic SQL clause structure
         if (!sql.toLowerCase().includes("select")) {
             return { isValid: false, error: "Missing SELECT clause" };
         }
-        
+
         if (!sql.toLowerCase().includes("from")) {
             return { isValid: false, error: "Missing FROM clause" };
         }
-        
+
         // Check for GROUP BY when using aggregation functions
         const hasAggregation = /json_agg|json_arrayagg|array_agg|group_concat|count\s*\(|sum\s*\(|avg\s*\(|min\s*\(|max\s*\(/i.test(sql);
         const hasGroupBy = /group\s+by/i.test(sql);
-        
+
         if (hasAggregation && !hasGroupBy) {
             return { isValid: false, error: "Aggregation functions used without GROUP BY clause" };
         }
-        
+
         // Database-specific validation
         if (lowerType === 'mysql') {
             // MySQL-specific validation
@@ -947,7 +989,7 @@ function validateSQLSyntax(sql: string, dbType: string, dbVersion: string): { is
                 if (sql.toLowerCase().includes("json_arrayagg(distinct")) {
                     return { isValid: false, error: "MySQL does not support DISTINCT inside JSON_ARRAYAGG" };
                 }
-                
+
                 // Check for potential JSON function syntax errors
                 const jsonFunctions = ["json_object", "json_arrayagg", "json_array"];
                 for (const func of jsonFunctions) {
@@ -959,7 +1001,7 @@ function validateSQLSyntax(sql: string, dbType: string, dbVersion: string): { is
                 // Older MySQL versions don't support JSON functions
                 return { isValid: false, error: `JSON functions not fully supported in MySQL ${dbVersion}` };
             }
-            
+
             // For MySQL < 8.0, check for using aliases in ORDER BY
             if (versionNumber < 8.0) {
                 // Extract aliases from SELECT clause
@@ -967,31 +1009,31 @@ function validateSQLSyntax(sql: string, dbType: string, dbVersion: string): { is
                 const aliasPattern = /\b(as\s+)?"?([a-zA-Z0-9_]+)"?\s*(?:,|FROM|$)/gi;
                 const aliases = [];
                 let match;
-                
+
                 while ((match = aliasPattern.exec(selectClause)) !== null) {
                     if (match[2] && match[2].trim() && match[2].trim().toLowerCase() !== "from") {
                         aliases.push(match[2].trim().toLowerCase());
                     }
                 }
-                
+
                 // Check if any aliases are used in ORDER BY
                 if (sql.toLowerCase().includes("order by")) {
                     const orderByClause = sql.substring(sql.toLowerCase().indexOf("order by") + 8);
-                    
+
                     for (const alias of aliases) {
                         // Only check for "word boundary" alias to avoid partial matches
                         const aliasRegex = new RegExp(`\\b${alias}\\b`, 'i');
-                        
+
                         // Exclude aliases used in COUNT(alias) or other functions
                         if (aliasRegex.test(orderByClause) && !new RegExp(`\\w+\\s*\\(.*\\b${alias}\\b.*\\)`, 'i').test(orderByClause)) {
                             // Check if this might be a column name rather than an alias
                             // This is a simple heuristic - we're checking if the name also appears in other parts of the query
                             const aliasAppearancesInQuery = (sql.toLowerCase().match(new RegExp(`\\b${alias}\\b`, 'g')) || []).length;
-                            
+
                             if (aliasAppearancesInQuery <= 2) { // Likely an alias (appears in SELECT and ORDER BY only)
-                                return { 
-                                    isValid: false, 
-                                    error: `MySQL ${dbVersion} does not support using column aliases (${alias}) in ORDER BY. Use the full expression or a position number instead.` 
+                                return {
+                                    isValid: false,
+                                    error: `MySQL ${dbVersion} does not support using column aliases (${alias}) in ORDER BY. Use the full expression or a position number instead.`
                                 };
                             }
                         }
@@ -1003,12 +1045,12 @@ function validateSQLSyntax(sql: string, dbType: string, dbVersion: string): { is
             if (versionNumber < 9.2 && sql.toLowerCase().includes("json_")) {
                 return { isValid: false, error: `JSON functions not fully supported in PostgreSQL ${dbVersion}` };
             }
-            
+
             if (versionNumber < 9.4 && sql.toLowerCase().includes("json_build_")) {
                 return { isValid: false, error: `json_build_* functions require PostgreSQL 9.4+` };
             }
         }
-        
+
         return { isValid: true };
     } catch (error: any) {
         return { isValid: false, error: `Validation error: ${error.message}` };
@@ -1023,65 +1065,65 @@ function autoFixSQLSyntax(sql: string, dbType: string, dbVersion: string): strin
         const lowerType = dbType.toLowerCase();
         const versionNumber = parseFloat(dbVersion);
         let fixedSQL = sql;
-        
+
         // Fix for MySQL alias in ORDER BY (MySQL < 8.0)
         if (lowerType === 'mysql' && versionNumber < 8.0) {
             // First, extract all aliases from the SELECT clause
             const selectClause = sql.substring(0, sql.toLowerCase().indexOf(" from "));
             const orderByIndex = sql.toLowerCase().indexOf("order by");
-            
+
             if (orderByIndex !== -1) {
                 // Extract the ORDER BY clause
                 const orderByClause = sql.substring(orderByIndex + 8);
                 const aliasPattern = /(\w+)\s+as\s+(\w+)|(\w+\([^)]*\))\s+as\s+(\w+)|"([^"]+)"\s+as\s+(\w+)|(\w+)\.(\w+)\s+as\s+(\w+)/gi;
-                
+
                 // Find all defined aliases
                 const aliases = new Map();
                 let match;
                 const aliasRegex = /\b(\w+)\s+as\s+"?(\w+)"?|\b(\w+\([^)]*\))\s+as\s+"?(\w+)"?|"([^"]+)"\s+as\s+"?(\w+)"?|(\w+)\.(\w+)\s+as\s+"?(\w+)"?/gi;
-                
+
                 while ((match = aliasRegex.exec(selectClause)) !== null) {
                     // The alias could be in different capture groups depending on the pattern matched
                     // Check all possible positions and use the first non-undefined one
                     const expression = match[1] || match[3] || match[5] || `${match[7]}.${match[8]}` || '';
                     const alias = match[2] || match[4] || match[6] || match[9] || '';
-                    
+
                     if (expression && alias) {
                         aliases.set(alias.toLowerCase(), expression);
                     }
                 }
-                
+
                 // Also handle column aliases without "AS" keyword
                 const implicitAliasRegex = /\b(\w+\([^)]*\))\s+"?(\w+)"?|\b(\w+\.\w+)\s+"?(\w+)"?|\b(\w+)\s+"?(\w+)"?(?!\()/gi;
-                
+
                 while ((match = implicitAliasRegex.exec(selectClause)) !== null) {
                     const expression = match[1] || match[3] || match[5] || '';
                     const alias = match[2] || match[4] || match[6] || '';
-                    
+
                     // Only add if it's likely an alias (expression and alias are different)
                     if (expression && alias && expression.toLowerCase() !== alias.toLowerCase()) {
                         aliases.set(alias.toLowerCase(), expression);
                     }
                 }
-                
+
                 // Check for aggregation expressions
                 const aggExpressions = new Map();
                 const aggRegex = /\b(count\([^)]*\)|sum\([^)]*\)|avg\([^)]*\)|min\([^)]*\)|max\([^)]*\))\s+as\s+"?(\w+)"?/gi;
-                
+
                 while ((match = aggRegex.exec(selectClause)) !== null) {
                     if (match[1] && match[2]) {
                         aggExpressions.set(match[2].toLowerCase(), match[1]);
                     }
                 }
-                
+
                 // Find aliases used in ORDER BY
                 let newOrderByClause = orderByClause;
-                
+
                 // Replace aliases in ORDER BY with their expressions
                 for (const [alias, expression] of aliases) {
                     // Use word boundary in regex to avoid partial matches
                     const aliasRegex = new RegExp(`\\b${alias}\\b(?!\\s*\\()`, 'gi');
-                    
+
                     if (aliasRegex.test(newOrderByClause)) {
                         // Check if it's an aggregation expression
                         if (aggExpressions.has(alias)) {
@@ -1091,16 +1133,16 @@ function autoFixSQLSyntax(sql: string, dbType: string, dbVersion: string): strin
                         }
                     }
                 }
-                
+
                 // Replace the ORDER BY clause
                 fixedSQL = sql.substring(0, orderByIndex + 8) + newOrderByClause;
             }
         }
-        
+
         // Fix for unbalanced parentheses
         const openParens = (fixedSQL.match(/\(/g) || []).length;
         const closeParens = (fixedSQL.match(/\)/g) || []).length;
-        
+
         if (openParens > closeParens) {
             // Add missing closing parentheses
             fixedSQL += ')'.repeat(openParens - closeParens);
@@ -1109,7 +1151,7 @@ function autoFixSQLSyntax(sql: string, dbType: string, dbVersion: string): strin
             // Let's try a simple approach of removing extra closing parentheses from the end
             let lastIndex = fixedSQL.length - 1;
             let parensToRemove = closeParens - openParens;
-            
+
             while (parensToRemove > 0 && lastIndex >= 0) {
                 if (fixedSQL[lastIndex] === ')') {
                     fixedSQL = fixedSQL.substring(0, lastIndex) + fixedSQL.substring(lastIndex + 1);
@@ -1118,16 +1160,16 @@ function autoFixSQLSyntax(sql: string, dbType: string, dbVersion: string): strin
                 lastIndex--;
             }
         }
-        
+
         // Fix missing GROUP BY for aggregation functions
         const hasAggregation = /json_agg|json_arrayagg|array_agg|group_concat|count\s*\(|sum\s*\(|avg\s*\(|min\s*\(|max\s*\(/i.test(fixedSQL);
         const hasGroupBy = /group\s+by/i.test(fixedSQL);
-        
+
         if (hasAggregation && !hasGroupBy) {
             // This is a more complex fix that would require understanding the query structure
             // For now, we won't attempt to automatically add a GROUP BY clause
         }
-        
+
         return fixedSQL;
     } catch (error) {
         // If any error occurs during fixing, return the original SQL
@@ -1140,10 +1182,10 @@ function autoFixSQLSyntax(sql: string, dbType: string, dbVersion: string): strin
  */
 function getJsonFunctionsForDatabase(dbType: string, dbVersion: string): any {
     const lowerType = dbType.toLowerCase();
-    
+
     if (lowerType === 'mysql') {
         const versionNumber = parseFloat(dbVersion);
-        
+
         // MySQL 5.7+ supports JSON functions
         if (versionNumber >= 5.7) {
             return {
@@ -1256,7 +1298,7 @@ FINAL REMINDER FOR OLDER MYSQL ${dbVersion}:
         }
     } else if (lowerType === 'postgresql') {
         const versionNumber = parseFloat(dbVersion);
-        
+
         // PostgreSQL 9.3+ has good JSON support
         if (versionNumber >= 9.3) {
             return {
@@ -4883,7 +4925,7 @@ Return only valid, semantic HTML.`;
                         sql_final: finalSQL,
                         sql_results: {
                             resultExplanation,
-                            sql_final: rows,
+                            sql_final: parseRows(rows),
                             processing_time: `${processingTime.toFixed(2)}ms`,
                             // Add graph data to sql_results if available
                             ...(graphData ? { graph_data: graphData } : {})
@@ -5027,7 +5069,7 @@ Return only valid, semantic HTML.`;
                                     console.log(`✅ Restructured query executed successfully, returned ${Array.isArray(restructuredRows) ? restructuredRows.length : 0} structured rows`);
 
                                     // Add restructured data to sql_results
-                                    (response.sql_results as any).sql_final = restructuredRows;
+                                    (response.sql_results as any).sql_final = parseRows(restructuredRows);
                                     (response.sql_results as any).restructure_info = {
                                         success: true,
                                         message: "Successfully executed restructured SQL query",
