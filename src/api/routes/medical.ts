@@ -3973,19 +3973,19 @@ USER QUERY: ${query}
                         console.log('🔍 Agent raw response:', rawAgentResponse);
 
                         // Also try to extract SQL from the final output with version compatibility check
-                        if (agentResult.output && typeof agentResult.output === 'string') {
-                            const cleanedSql = cleanSQLQuery(agentResult.output);
-                            if (cleanedSql) {
-                                // Verify the SQL is version-compatible before adding it
-                                console.log('✅ Captured version-compatible SQL from final output:', cleanedSql);
-                                capturedSQLQueries.push(cleanedSql);
-                                // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
-                                // } else {
-                                //     console.log('⚠️ Rejected non-version-compatible SQL from final output:', cleanedSql);
-                                //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL from final output: ' + cleanedSql);
-                                // }
-                            }
-                        }
+                        // if (agentResult.output && typeof agentResult.output === 'string') {
+                        //     const cleanedSql = cleanSQLQuery(agentResult.output);
+                        //     if (cleanedSql) {
+                        //         // Verify the SQL is version-compatible before adding it
+                        //         console.log('✅ Captured version-compatible SQL from final output:', cleanedSql);
+                        //         capturedSQLQueries.push(cleanedSql);
+                        //         // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                        //         // } else {
+                        //         //     console.log('⚠️ Rejected non-version-compatible SQL from final output:', cleanedSql);
+                        //         //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL from final output: ' + cleanedSql);
+                        //         // }
+                        //     }
+                        // }
 
                     } catch (agentError: any) {
                         console.error('❌ SQL Agent error:', agentError.message);
@@ -4105,21 +4105,21 @@ USER QUERY: ${query}
 
                         if (validQueries.length > 0) {
                             // Sort by completeness and length - prefer complete queries
-                            const sortedQueries = validQueries.sort((a, b) => {
-                                const aComplete = isCompleteSQLQuery(a);
-                                const bComplete = isCompleteSQLQuery(b);
+                            // const sortedQueries = validQueries.sort((a, b) => {
+                            //     const aComplete = isCompleteSQLQuery(a);
+                            //     const bComplete = isCompleteSQLQuery(b);
 
-                                // Prioritize complete queries
-                                if (aComplete && !bComplete) return -1;
-                                if (!aComplete && bComplete) return 1;
+                            //     // Prioritize complete queries
+                            //     if (aComplete && !bComplete) return -1;
+                            //     if (!aComplete && bComplete) return 1;
 
-                                // If both complete or both incomplete, sort by length
-                                return b.length - a.length;
-                            });
+                            //     // If both complete or both incomplete, sort by length
+                            //     return b.length - a.length;
+                            // });
 
                             // Get the best SQL query
-                            console.log('ajajajaj', sortedQueries)
-                            extractedSQL = sortedQueries[sortedQueries.length - 1];
+                            console.log('ajajajaj', validQueries)
+                            extractedSQL = validQueries[validQueries.length - 1];
                             debugInfo.extractionAttempts.push(`Selected best query: ${extractedSQL}`);
                             console.log('✅ Found valid SQL from captured queries:', extractedSQL);
                         } else {
