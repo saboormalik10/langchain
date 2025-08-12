@@ -382,8 +382,10 @@ RESTRUCTURING REQUIREMENTS:
 3. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original query
 4. **BE LOGICAL**: Structure should make business sense for the data domain
 5. **USE APPROPRIATE GROUPING**: Identify the main entity and group related data under it
-6. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
-7. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
+6. **PREVENT DUPLICATE DATA**: Ensure no duplicate records appear in any field of the response - each record should be unique
+7. **MYSQL GROUP BY STRICT COMPLIANCE**: For MySQL, ensure every non-aggregated column in SELECT appears in GROUP BY clause (sql_mode=only_full_group_by)
+8. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
+9. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
 
 DATABASE-SPECIFIC SYNTAX RULES FOR ${dbType.toUpperCase()} ${dbVersion}:
 ${dbSyntaxRules.general}
@@ -415,6 +417,10 @@ Return a JSON object with this structure:
   "expected_structure": "Description of the JSON structure the new query will produce",
   "main_entity": "The primary entity being grouped (e.g., 'patient', 'medication', 'lab_test')"
 }
+**Orignal SQL :- you need to use same table names from original SQL**
+
+${originalSQL}
+
 
 CRITICAL REQUIREMENTS:
 - Generate a complete, executable SQL query that uses JSON functions compatible with ${dbType.toUpperCase()} ${dbVersion}
@@ -433,6 +439,9 @@ CRITICAL REQUIREMENTS:
 - VERIFY COLUMN REFERENCES: All columns must exist in the referenced tables and be properly qualified
 - CHECK JOIN CONDITIONS: All joins must have proper conditions and table relationships
 - ENSURE PROPER GROUPING: All non-aggregated columns must be included in GROUP BY clauses
+- **MYSQL GROUP BY COMPLIANCE**: For MySQL with sql_mode=only_full_group_by, ALL non-aggregated columns in SELECT must appear in GROUP BY clause
+- **PREVENT GROUP BY VIOLATIONS**: Never use aggregated expressions from subqueries without proper grouping
+- **SUBQUERY AGGREGATION RULES**: When using aggregated columns from subqueries, ensure main query groups by all non-aggregated columns
 - AVOID SYNTAX ERRORS: Pay special attention to database-specific syntax requirements
 - HANDLE NULL VALUES: Use appropriate NULL handling for the specific database type (COALESCE, IFNULL)
 - FOLLOW EXACT VERSION CONSTRAINTS: Only use functions available in ${dbType.toUpperCase()} ${dbVersion}
@@ -443,11 +452,13 @@ BEFORE FINALIZING THE QUERY:
 2. Verify all column references match the validated schema
 3. Ensure JSON function nesting is correct and properly closed
 4. Confirm GROUP BY clauses include all non-aggregated columns
-5. Check that all JOIN conditions are logical and will maintain data relationships
-6. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
-7. Double-check all parentheses, commas, and syntax elements
-8. Verify ORDER BY clause uses either full expressions or positional references, not aliases
-9. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
+5. **FOR MYSQL: Verify sql_mode=only_full_group_by compliance - every non-aggregated column in SELECT must be in GROUP BY**
+6. **CHECK SUBQUERY AGGREGATIONS: Ensure aggregated columns from subqueries don't violate GROUP BY rules in main query**
+7. Check that all JOIN conditions are logical and will maintain data relationships
+8. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
+9. Double-check all parentheses, commas, and syntax elements
+10. Verify ORDER BY clause uses either full expressions or positional references, not aliases
+11. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
 
 DO NOT INCLUDE ANY EXPERIMENTAL OR UNTESTED SYNTAX. Only use proven, standard SQL constructs that are guaranteed to work with ${dbType.toUpperCase()} ${dbVersion}.
 
@@ -3298,6 +3309,148 @@ CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase(
                                 .join('\n') + '\n\n';
                         }
 
+                        // Get all database tables and columns with AI-generated purpose descriptions
+                        let tableDescriptions = '';
+                        try {
+                            console.log('🔍 Getting all database tables and columns for AI analysis...');
+
+                            // Get all tables for this organization
+                            const allTables = await databaseService.getOrganizationTables(organizationId);
+                            console.log(`📊 Found ${allTables.length} tables:`, allTables);
+
+                            if (allTables.length > 0) {
+                                const tableSchemaData: any = {};
+
+                                // Get schema for each table
+                                for (const tableName of allTables) {
+                                    try {
+                                        let columnInfo: any[] = [];
+
+                                        if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
+                                            const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                            const [rows] = await connection.execute(
+                                                `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT 
+                                                 FROM INFORMATION_SCHEMA.COLUMNS 
+                                                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? 
+                                                 ORDER BY ORDINAL_POSITION`,
+                                                [tableName]
+                                            );
+                                            columnInfo = rows as any[];
+                                            await connection.end();
+                                        } else if (databaseType.toLowerCase() === 'postgresql') {
+                                            const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                            const result = await client.query(
+                                                `SELECT column_name as "COLUMN_NAME", data_type as "DATA_TYPE", is_nullable as "IS_NULLABLE", column_default as "COLUMN_DEFAULT", '' as "COLUMN_COMMENT"
+                                                 FROM information_schema.columns 
+                                                 WHERE table_schema = 'public' AND table_name = $1 
+                                                 ORDER BY ordinal_position`,
+                                                [tableName]
+                                            );
+                                            columnInfo = result.rows;
+                                            await client.end();
+                                        }
+
+                                        tableSchemaData[tableName] = Array.isArray(columnInfo) ? columnInfo : [];
+                                        console.log(`✅ Got schema for table ${tableName}: ${tableSchemaData[tableName].length} columns`);
+                                    } catch (schemaError) {
+                                        console.warn(`⚠️ Could not get schema for table ${tableName}:`, schemaError);
+                                        tableSchemaData[tableName] = [];
+                                    }
+                                }
+
+                                // Generate AI descriptions for all tables
+                                const azureClient = getAzureOpenAIClient();
+                                if (azureClient) {
+                                    console.log('🤖 Generating AI purpose descriptions for database tables...');
+                                    try {
+                                        const schemaDescription = Object.entries(tableSchemaData)
+                                            .map(([tableName, columns]: [string, any]) => {
+                                                return `Table: ${tableName}`;
+                                            })
+                                            .join('\n');
+
+                                        const aiPrompt = `You are a database schema analyst helping an SQL agent choose the correct tables for a specific query. 
+
+User Query: "${query}"
+
+Database Tables: ${schemaDescription}
+
+Based on the user's specific query "${query}", analyze each table name and provide targeted descriptions that help the SQL agent understand which tables are most relevant for this specific query. Focus on:
+1. Which tables likely contain the data needed for this specific query
+2. Which tables should be prioritized for this type of question
+3. Which tables might be confused with each other and clarify the differences
+
+Provide descriptions in this format:
+**Table: table_name** - Relevance to query "${query}": [High/Medium/Low] - Brief description focusing on why this table is/isn't suitable for this specific query
+
+Keep descriptions concise (1-2 sentences) and focus on helping the SQL agent choose the RIGHT tables for this specific user query.`;
+
+                                        const aiResponse = await azureClient.chat.completions.create({
+                                            model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4.1",
+                                            messages: [{
+                                                role: "user",
+                                                content: aiPrompt
+                                            }],
+                                            max_tokens: 2000,
+                                            temperature: 0.3,
+                                        });
+
+                                        if (aiResponse.choices && aiResponse.choices[0]?.message?.content) {
+                                            tableDescriptions = `
+
+=== DATABASE TABLE PURPOSE DESCRIPTIONS (AI-Generated) ===
+${aiResponse.choices[0].message.content}
+
+This database contains ${allTables.length} tables with the following medical data purposes:
+${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
+                                                const columnCount = Array.isArray(columns) ? columns.length : 0;
+                                                return `• ${tableName} (${columnCount} columns)`;
+                                            }).join('\n')}
+========================`;
+                                            console.log('✅ Successfully generated AI table descriptions', tableDescriptions);
+                                        } else {
+                                            console.warn('⚠️ Azure OpenAI returned empty response for table descriptions');
+                                        }
+                                    } catch (aiError) {
+                                        console.warn('⚠️ Could not generate AI descriptions for tables:', aiError);
+                                        // Fallback: create basic descriptions without AI
+                                        tableDescriptions = `
+
+=== DATABASE TABLES OVERVIEW ===
+This database contains ${allTables.length} tables:
+${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
+                                            const columnCount = Array.isArray(columns) ? columns.length : 0;
+                                            const sampleColumns = Array.isArray(columns) && columns.length > 0
+                                                ? columns.slice(0, 5).map((col: any) => col.COLUMN_NAME).join(', ')
+                                                : 'No columns available';
+                                            return `• **${tableName}** (${columnCount} columns) - Contains: ${sampleColumns}${columns.length > 5 ? ', ...' : ''}`;
+                                        }).join('\n')}
+========================`;
+                                    }
+                                } else {
+                                    console.warn('⚠️ Azure OpenAI not available, creating basic table overview');
+                                    // Fallback: create basic descriptions without AI
+                                    tableDescriptions = `
+
+=== DATABASE TABLES OVERVIEW ===
+This database contains ${allTables.length} tables:
+${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
+                                        const columnCount = Array.isArray(columns) ? columns.length : 0;
+                                        const sampleColumns = Array.isArray(columns) && columns.length > 0
+                                            ? columns.slice(0, 5).map((col: any) => col.COLUMN_NAME).join(', ')
+                                            : 'No columns available';
+                                        return `• **${tableName}** (${columnCount} columns) - Contains: ${sampleColumns}${columns.length > 5 ? ', ...' : ''}`;
+                                    }).join('\n')}
+========================`;
+                                }
+                            } else {
+                                tableDescriptions = '\n=== DATABASE TABLES ===\nNo tables found in the database.\n========================';
+                            }
+                        } catch (tableError) {
+                            console.error('❌ Error getting table descriptions:', tableError);
+                            tableDescriptions = '\n=== DATABASE TABLES ===\nError retrieving table information.\n========================';
+                        }
+
                         // The enhanced prompt with structured step-by-step approach and database version enforcement
                         const enhancedQuery = `
 🎯 You are an expert SQL database analyst. Your task is to generate a WORKING SQL query that answers the user's question.
@@ -3373,6 +3526,8 @@ Available Features:
 
 CRITICAL: Your queries will be executed against this specific database instance. Ensure compatibility with the version and features listed above.
 ========================
+
+${tableDescriptions}
 
 ${conversationalContext ? `=== CONVERSATION CONTEXT ===${conversationalContext}========================` : ''}
 
