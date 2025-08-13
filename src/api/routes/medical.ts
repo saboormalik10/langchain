@@ -12,43 +12,42 @@ import { AzureOpenAI } from 'openai';
  * @param rows - The data that may contain stringified JSON at any nesting level.
  * @returns The fully parsed data with all stringified JSON parsed.
  */
-export function parseRows<T = any>(rows: unknown): T {
-    // Handle null/undefined
-    if (rows == null) {
-        return rows as T;
+export function parseRows<T = any>(data: unknown): T {
+    // Handle arrays
+    if (Array.isArray(data)) {
+        return data.map(item => parseRows(item)) as T;
     }
 
-    // Handle strings - try to parse as JSON
-    if (typeof rows === 'string') {
-        try {
-            const parsed = JSON.parse(rows);
-            // Continue parsing in case the parsed result contains more stringified JSON
-            return parseRows(parsed);
-        } catch {
-            // Not valid JSON, return as-is
-            return rows as T;
-        }
-    }
-
-    // Handle arrays - recursively parse each element
-    if (Array.isArray(rows)) {
-        return rows.map(item => parseRows(item)) as T;
-    }
-
-    // Handle objects - recursively parse each property value
-    if (typeof rows === 'object') {
+    // Handle objects
+    if (data && typeof data === 'object') {
         const result: Record<string, any> = {};
-        for (const key in rows) {
-            if (Object.prototype.hasOwnProperty.call(rows, key)) {
-                const value = (rows as Record<string, unknown>)[key];
+
+        for (const [key, value] of Object.entries(data)) {
+            // Skip empty objects
+            if (value && typeof value === 'object' && Object.keys(value).length === 0) {
+                continue;
+            }
+
+            // Special handling for medications_json
+            if (typeof value === 'string') {
+                try {
+                    // Fix the JSON format by wrapping in array brackets
+                    const fixedJson = `[${value}]`;
+                    result[key] = JSON.parse(fixedJson);
+                } catch (e) {
+                    console.error('Error parsing medications_json:', e);
+                    result[key] = value;
+                }
+            } else {
                 result[key] = parseRows(value);
             }
         }
+
         return result as T;
     }
 
-    // For primitives (number, boolean, etc.) - return as is
-    return rows as T;
+    // Return primitives as is
+    return data as T;
 }
 // Graph Types Enum
 enum GraphType {
@@ -241,15 +240,41 @@ async function generateRestructuredSQL(
 
             console.log(`🔍 Detected tables from original SQL: ${tableNames.join(', ')}`);
 
-            // Use SQL Agent to get table list and validate tables
+            // Use SQL Agent to get comprehensive table schema and validate tables
             if (sqlAgent) {
                 const tableListResult = await sqlAgent.call({
-                    input: `List all available tables in the database and show me the schema for these specific tables: ${tableNames.join(', ')}. For each table, show all column names and their data types. Format the response in a clear, structured way with table names and their columns.`
+                    input: `CRITICAL: I need the COMPLETE and ACCURATE schema for these specific tables: ${tableNames.join(', ')}.
+
+For each table, provide:
+1. The EXACT table name (case-sensitive if applicable)
+2. ALL column names (complete list, no abbreviations)
+3. Data types for each column
+4. Primary keys and foreign keys
+5. Any constraints or relationships
+
+Format the response clearly with:
+- Table: [exact_table_name]
+- Columns: [column1, column2, column3, ...]
+
+IMPORTANT: 
+- Show ALL columns for each table, not just a sample
+- Use the EXACT column names as they exist in the database
+- Do NOT assume or guess column names
+- If a column name contains spaces or special characters, show the exact format
+
+Example format:
+Table: patients
+Columns: patient_id, first_name, last_name, date_of_birth, gender, city, phone_number
+
+Table: medications  
+Columns: medication_id, medication_name, dosage, frequency, side_effects
+
+Provide complete schema information for: ${tableNames.join(', ')}`
                 });
 
                 if (tableListResult && tableListResult.output) {
                     tablesInfo = tableListResult.output;
-                    console.log('✅ Got table information from SQL Agent');
+                    console.log('✅ Got comprehensive table information from SQL Agent');
 
                     // Improved extraction of table and column information
                     const lines = tablesInfo.split('\n');
@@ -343,6 +368,15 @@ async function generateRestructuredSQL(
         const restructuringPrompt = `
 You are an expert SQL developer specializing in transforming flat relational queries into structured, hierarchical queries that eliminate redundancy using JSON aggregation functions.
 
+⚠️  CRITICAL COLUMN NAME WARNING ⚠️ 
+DO NOT ASSUME, GUESS, OR MAKE UP COLUMN NAMES. Use ONLY the exact column names from the validated schema provided below. Common errors to AVOID:
+- Using 'patient_id' when the actual column is 'id' or vice versa
+- Using 'medication_histories.patient_id' when no such column exists
+- Assuming standard naming conventions - always use the actual column names
+- Making up foreign key column names without verification
+
+If you cannot find the exact column name in the validated schema, DO NOT USE IT in the query.
+
 USER PROMPT: "${userPrompt}"
 
 ORIGINAL SQL QUERY:
@@ -383,9 +417,13 @@ RESTRUCTURING REQUIREMENTS:
 4. **BE LOGICAL**: Structure should make business sense for the data domain
 5. **USE APPROPRIATE GROUPING**: Identify the main entity and group related data under it
 6. **PREVENT DUPLICATE DATA**: Ensure no duplicate records appear in any field of the response - each record should be unique
-7. **MYSQL GROUP BY STRICT COMPLIANCE**: For MySQL, ensure every non-aggregated column in SELECT appears in GROUP BY clause (sql_mode=only_full_group_by)
-8. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
-9. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
+7. **AVOID IDENTICAL/REPETITIVE DATA**: Do NOT generate queries that return identical values across multiple rows or columns. Use DISTINCT, proper GROUP BY, and JSON aggregation to eliminate repetitive data patterns. Avoid queries that produce the same data values repeated multiple times in the response.
+8. **RETURN PARSED JSON OBJECTS**: Generate SQL that returns properly structured JSON objects, NOT stringified JSON. The JSON functions should produce actual JSON objects that can be directly used without additional parsing. Avoid queries that return JSON data as strings that require further parsing.
+9. **MYSQL GROUP BY STRICT COMPLIANCE**: For MySQL, ensure every non-aggregated column in SELECT appears in GROUP BY clause (sql_mode=only_full_group_by)
+10. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
+11. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
+12. **EXACT COLUMN NAMES**: Do NOT assume, guess, or make up column names. Use ONLY the exact column names provided in the validated schema. If a column name is not in the validated list, DO NOT use it. Never use variations like 'patient_id' when the actual column is 'id', or vice versa.
+13. **STRICT COLUMN VALIDATION**: Before using any column in SELECT, FROM, JOIN, WHERE, or GROUP BY clauses, verify it exists in the validated columns list for that table. Reject any query that references non-existent columns.
 
 DATABASE-SPECIFIC SYNTAX RULES FOR ${dbType.toUpperCase()} ${dbVersion}:
 ${dbSyntaxRules.general}
@@ -427,6 +465,10 @@ CRITICAL REQUIREMENTS:
 - The query should return fewer rows than the original (due to grouping)
 - Each row should contain a JSON object with hierarchical structure
 - Use appropriate GROUP BY clause to eliminate redundancy
+- **ELIMINATE IDENTICAL DATA**: Do NOT generate queries that produce the same values repeated across multiple rows. Use DISTINCT, proper aggregation, and JSON grouping to ensure each piece of data appears only once in the result set.
+- **RETURN NATIVE JSON OBJECTS**: The SQL query must return actual JSON objects, NOT stringified JSON. Use proper JSON functions that produce structured JSON objects directly from the database. Avoid any string concatenation or JSON serialization that would require additional parsing.
+- **MANDATORY COLUMN VALIDATION**: Every single column reference in the query MUST exist in the validated schema above. Do NOT use columns that are not explicitly listed. Do NOT assume column names or guess variations.
+- **STRICT TABLE.COLUMN FORMAT**: Always use the exact table.column format when referencing columns (e.g., patients.patient_id, medications.medication_name). Use the exact names from the validated schema.
 - Include all original data but organized hierarchically
 - Use LEFT JOIN if needed to preserve main entities even without related data
 - Ensure SQL syntax is correct and compatible with ${dbType.toUpperCase()} ${dbVersion}
@@ -436,7 +478,8 @@ CRITICAL REQUIREMENTS:
 ## CRITICAL SQL CORRECTNESS REQUIREMENTS
 - VALIDATE ALL SYNTAX: Double-check every function, clause, and operator for compatibility with ${dbType.toUpperCase()} ${dbVersion}
 - TEST QUERY STRUCTURE: Ensure proper nesting of JSON functions and correct parentheses matching
-- VERIFY COLUMN REFERENCES: All columns must exist in the referenced tables and be properly qualified
+- **VERIFY COLUMN REFERENCES**: All columns must exist in the referenced tables and be properly qualified. Cross-check every column name against the validated schema before using it.
+- **COLUMN EXISTENCE CHECK**: Before generating the query, verify that every column you plan to use exists in the validated columns list for its respective table.
 - CHECK JOIN CONDITIONS: All joins must have proper conditions and table relationships
 - ENSURE PROPER GROUPING: All non-aggregated columns must be included in GROUP BY clauses
 - **MYSQL GROUP BY COMPLIANCE**: For MySQL with sql_mode=only_full_group_by, ALL non-aggregated columns in SELECT must appear in GROUP BY clause
@@ -450,15 +493,20 @@ ${dbSyntaxRules.criticalRequirements}
 BEFORE FINALIZING THE QUERY:
 1. Review the entire query line by line for syntax errors
 2. Verify all column references match the validated schema
-3. Ensure JSON function nesting is correct and properly closed
-4. Confirm GROUP BY clauses include all non-aggregated columns
-5. **FOR MYSQL: Verify sql_mode=only_full_group_by compliance - every non-aggregated column in SELECT must be in GROUP BY**
-6. **CHECK SUBQUERY AGGREGATIONS: Ensure aggregated columns from subqueries don't violate GROUP BY rules in main query**
-7. Check that all JOIN conditions are logical and will maintain data relationships
-8. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
-9. Double-check all parentheses, commas, and syntax elements
-10. Verify ORDER BY clause uses either full expressions or positional references, not aliases
-11. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
+3. **VALIDATE EVERY COLUMN**: Cross-check each column name in SELECT, FROM, JOIN, WHERE, GROUP BY, and ORDER BY clauses against the validated columns list. Ensure every column exists in the specified table.
+4. **CHECK TABLE.COLUMN REFERENCES**: Ensure all column references use the correct table prefix (e.g., table_name.column_name) with exact names from the validated schema.
+5. Ensure JSON function nesting is correct and properly closed
+6. Confirm GROUP BY clauses include all non-aggregated columns
+7. **FOR MYSQL: Verify sql_mode=only_full_group_by compliance - every non-aggregated column in SELECT must be in GROUP BY**
+8. **CHECK SUBQUERY AGGREGATIONS: Ensure aggregated columns from subqueries don't violate GROUP BY rules in main query**
+9. **VERIFY NO IDENTICAL DATA**: Ensure the query will not produce identical values repeated across multiple rows - use DISTINCT and proper grouping
+10. **VERIFY JSON OBJECT STRUCTURE**: Ensure the query returns native JSON objects, NOT stringified JSON. The JSON functions must produce actual structured data that doesn't require additional parsing.
+11. **FINAL COLUMN VALIDATION**: Do one final check that no assumed or guessed column names are used. All columns must be from the validated schema.
+12. Check that all JOIN conditions are logical and will maintain data relationships
+13. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
+14. Double-check all parentheses, commas, and syntax elements
+15. Verify ORDER BY clause uses either full expressions or positional references, not aliases
+16. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
 
 DO NOT INCLUDE ANY EXPERIMENTAL OR UNTESTED SYNTAX. Only use proven, standard SQL constructs that are guaranteed to work with ${dbType.toUpperCase()} ${dbVersion}.
 
@@ -481,7 +529,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             messages: [
                 {
                     role: "system",
-                    content: "You are an expert data analyst specializing in restructuring relational database results into meaningful hierarchical JSON structures. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). Generate only syntactically correct SQL that works with the specific database type and version."
+                    content: "You are an expert data analyst specializing in restructuring relational database results into meaningful hierarchical JSON structures. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). Generate only syntactically correct SQL that works with the specific database type and version. CRITICAL: You must use ONLY the exact table and column names provided in the validated schema - never assume, guess, or make up column names. Verify every column reference against the provided schema before using it."
                 },
                 {
                     role: "user",
@@ -1204,14 +1252,17 @@ function getJsonFunctionsForDatabase(dbType: string, dbVersion: string): any {
                 createArray: 'JSON_ARRAYAGG(JSON_OBJECT(...))',
                 description: `
 MySQL ${dbVersion} JSON Functions:
-- JSON_OBJECT('key', value, 'key2', value2) - creates JSON object
-- JSON_ARRAYAGG(JSON_OBJECT('key', value)) - creates array of JSON objects (MySQL 5.7.22+)
-- JSON_ARRAY(value1, value2, ...) - creates JSON array
+- JSON_OBJECT('key', value, 'key2', value2) - creates NATIVE JSON object (NOT stringified)
+- JSON_ARRAYAGG(JSON_OBJECT('key', value)) - creates array of native JSON objects (MySQL 5.7.22+)
+- JSON_ARRAY(value1, value2, ...) - creates native JSON array
+- These functions return structured JSON objects directly, not strings that need parsing
 - COALESCE(column, default_value) - handles NULL values
-- GROUP_CONCAT(DISTINCT column) - alternative for older MySQL versions
+- GROUP_CONCAT(DISTINCT column) - alternative for older MySQL versions (returns strings)
+
+CRITICAL: These JSON functions produce ACTUAL JSON objects, not stringified JSON. The result can be directly used without JSON.parse().
 `,
                 examples: `
-✅ CORRECT MYSQL EXAMPLE (MySQL ${dbVersion}):
+✅ CORRECT MYSQL EXAMPLE (MySQL ${dbVersion}) - Returns NATIVE JSON objects:
 \`\`\`sql
 SELECT 
     patient.id,
@@ -1222,15 +1273,16 @@ SELECT
             'medication_name', medication.name,
             'dosage', prescription.dosage
         )
-    ) AS medications
+    ) AS medications  -- This returns actual JSON objects, NOT strings
 FROM patient
 LEFT JOIN prescription ON patient.id = prescription.patient_id
 LEFT JOIN medication ON prescription.medication_id = medication.id
 GROUP BY patient.id, patient.name
 \`\`\`
 
-❌ INCORRECT SYNTAX - This will fail:
+❌ INCORRECT SYNTAX - This will fail or return strings:
 \`\`\`sql
+-- This fails in MySQL:
 SELECT 
     patient.id,
     patient.name,
@@ -1239,6 +1291,18 @@ FROM patient
 JOIN prescription ON patient.id = prescription.patient_id
 JOIN medication ON prescription.medication_id = medication.id
 GROUP BY patient.id
+
+-- This returns strings, NOT JSON objects (avoid):
+SELECT 
+    patient.id,
+    patient.name,
+    GROUP_CONCAT(
+        CONCAT('{"medication_id":', medication.id, ',"name":"', medication.name, '"}')
+    ) AS medications_string  -- This is stringified JSON, requires parsing
+FROM patient
+JOIN prescription ON patient.id = prescription.patient_id
+JOIN medication ON prescription.medication_id = medication.id
+GROUP BY patient.id, patient.name
 \`\`\`
 `,
                 considerations: `
@@ -1250,6 +1314,9 @@ GROUP BY patient.id
   - For uniqueness, rely on proper GROUP BY clauses instead of DISTINCT inside JSON functions
   - Handle NULL values with COALESCE() or IFNULL()
   - For older MySQL versions, consider using GROUP_CONCAT() as an alternative
+  - **CRITICAL**: JSON functions return NATIVE JSON objects, not strings requiring JSON.parse()
+  - **AVOID**: String concatenation methods that produce stringified JSON
+  - **USE**: Only native JSON functions that produce structured objects directly
 `,
                 finalReminder: `
 FINAL MYSQL SYNTAX REMINDER FOR ${dbVersion}:
@@ -1258,6 +1325,8 @@ FINAL MYSQL SYNTAX REMINDER FOR ${dbVersion}:
 - For unique values, use proper GROUP BY clauses instead
 - ALL JSON functions must be compatible with MySQL ${dbVersion}
 - Double-check every JSON function call for MySQL compatibility
+- **ENSURE NATIVE JSON**: Query must return actual JSON objects, not stringified JSON
+- **AVOID STRING CONCATENATION**: Don't use CONCAT() to create fake JSON strings
 `
             };
         } else {
@@ -1317,12 +1386,17 @@ FINAL REMINDER FOR OLDER MYSQL ${dbVersion}:
                 createArray: 'json_agg(json_build_object(...))',
                 description: `
 PostgreSQL ${dbVersion} JSON Functions:  
-- json_build_object('key', value, 'key2', value2) - creates JSON object
-- json_agg(json_build_object('key', value)) - creates array of JSON objects
-- json_build_array(value1, value2, ...) - creates JSON array
+- json_build_object('key', value, 'key2', value2) - creates NATIVE JSON object (NOT stringified)
+- json_agg(json_build_object('key', value)) - creates array of native JSON objects
+- json_build_array(value1, value2, ...) - creates native JSON array
+- jsonb_build_object() - creates binary JSON object (faster for operations)
+- jsonb_agg() - creates binary JSON array (faster for operations)
 - array_agg(DISTINCT column) - creates array of values
-- row_to_json(row) - converts entire row to JSON
+- row_to_json(row) - converts entire row to native JSON
 - COALESCE(column, default_value) - handles NULL values
+- These functions return structured JSON objects directly, not strings that need parsing
+
+CRITICAL: These JSON functions produce ACTUAL JSON/JSONB objects, not stringified JSON. The result can be directly used without JSON.parse().
 `,
                 examples: `
 ✅ CORRECT POSTGRESQL EXAMPLE:
