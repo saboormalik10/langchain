@@ -27,22 +27,22 @@ class MultiTenantLangChainService {
       // Check if we have a cached app for this organization
       const cachedApp = this.langchainApps.get(organizationId);
       
-      if (cachedApp) {
-        // Check if cache is still valid
-        const now = new Date();
-        const timeDiff = now.getTime() - cachedApp.lastAccessed.getTime();
+      // if (cachedApp) {
+      //   // Check if cache is still valid
+      //   const now = new Date();
+      //   const timeDiff = now.getTime() - cachedApp.lastAccessed.getTime();
         
-        if (timeDiff < this.CACHE_TIMEOUT_MS) {
-          // Update last accessed time
-          cachedApp.lastAccessed = now;
-          console.log(`✅ Using cached LangChain app for organization ${organizationId}`);
-          return cachedApp.app;
-        } else {
-          // Cache expired, remove it
-          console.log(`⏰ Cache expired for organization ${organizationId}, creating new instance`);
-          this.langchainApps.delete(organizationId);
-        }
-      }
+      //   if (timeDiff < this.CACHE_TIMEOUT_MS) {
+      //     // Update last accessed time
+      //     cachedApp.lastAccessed = now;
+      //     console.log(`✅ Using cached LangChain app for organization ${organizationId}`);
+      //     return cachedApp.app;
+      //   } else {
+      //     // Cache expired, remove it
+      //     console.log(`⏰ Cache expired for organization ${organizationId}, creating new instance`);
+      //     this.langchainApps.delete(organizationId);
+      //   }
+      // }
 
       console.log(`🔧 Creating new LangChain app for organization ${organizationId}`);
 

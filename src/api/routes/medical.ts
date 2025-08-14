@@ -35,7 +35,7 @@ export function parseRows<T = any>(data: unknown): T {
                     const fixedJson = `[${value}]`;
                     result[key] = JSON.parse(fixedJson);
                 } catch (e) {
-                    console.error('Error parsing medications_json:', e);
+                    // console.error('Error parsing medications_json:', e);
                     result[key] = value;
                 }
             } else {
@@ -176,6 +176,47 @@ function getAzureOpenAIClient(): AzureOpenAI | null {
 }
 
 /**
+ * Extract details about column-related errors from SQL error messages
+ * 
+ * @param errorMessage - The SQL error message
+ * @returns Object containing extracted column error details
+ */
+function extractColumnErrorDetails(errorMessage: string): any {
+    const details: any = {};
+
+    // Extract column name from common error patterns
+    const unknownColumnMatch = errorMessage.match(/unknown column ['"](.*?)['"]|unknown column ([\w.]+)/i);
+    const noSuchColumnMatch = errorMessage.match(/no such column[: ]+['"](.*?)['"]|no such column[: ]+([\w.]+)/i);
+    const invalidColumnMatch = errorMessage.match(/invalid column name ['"](.*?)['"]|invalid column name ([\w.]+)/i);
+    const fieldListMatch = errorMessage.match(/['"](.*?)['"] in 'field list'|([\w.]+) in 'field list'/i);
+
+    if (unknownColumnMatch) {
+        details.error_type = 'unknown_column';
+        details.column_name = unknownColumnMatch[1] || unknownColumnMatch[2];
+    } else if (noSuchColumnMatch) {
+        details.error_type = 'no_such_column';
+        details.column_name = noSuchColumnMatch[1] || noSuchColumnMatch[2];
+    } else if (invalidColumnMatch) {
+        details.error_type = 'invalid_column_name';
+        details.column_name = invalidColumnMatch[1] || invalidColumnMatch[2];
+    } else if (fieldListMatch) {
+        details.error_type = 'field_list_error';
+        details.column_name = fieldListMatch[1] || fieldListMatch[2];
+    }
+
+    // Extract table alias or name if present
+    if (details.column_name && details.column_name.includes('.')) {
+        const parts = details.column_name.split('.');
+        details.table_alias = parts[0];
+        details.column_only = parts[1];
+    }
+
+    details.original_message = errorMessage;
+
+    return details;
+}
+
+/**
  * Generate restructured SQL query using Azure OpenAI to produce structured, non-redundant results
  * 
  * This function takes the original SQL query and uses Azure OpenAI to:
@@ -193,6 +234,10 @@ function getAzureOpenAIClient(): AzureOpenAI | null {
  * @param dbType - Database type ('mysql' or 'postgresql') for appropriate JSON syntax
  * @param dbVersion - Database version information for compatibility
  * @param sampleSize - Number of sample records to send to Azure OpenAI for analysis
+ * @param sqlAgent - SQL Agent instance for schema validation
+ * @param organizationId - Organization identifier for database connections
+ * @param tableSampleData - Pre-fetched table sample data (first 3 records per table)
+ * @param isRetryAttempt - Whether this is a retry attempt (prevents infinite recursion)
  * @returns Restructured SQL query with success/failure information
  */
 async function generateRestructuredSQL(
@@ -203,9 +248,18 @@ async function generateRestructuredSQL(
     dbVersion: string,
     sampleSize: number = 3,
     sqlAgent: any,
-    organizationId: string
+    organizationId: string,
+    tableSampleData: { [table: string]: any[] } = {},
+    isRetryAttempt: boolean = false
 ): Promise<any> {
     try {
+        // Log retry attempt status
+        if (isRetryAttempt) {
+            console.log('🔄 GenerateRestructuredSQL - Retry attempt in progress...');
+        } else {
+            console.log('🔄 GenerateRestructuredSQL - First attempt...');
+        }
+
         // Take sample of results for analysis
         const sampleResults = sqlResults.slice(0, sampleSize);
 
@@ -216,7 +270,7 @@ async function generateRestructuredSQL(
                 restructure_message: "No data to restructure"
             };
         }
-
+        console.log({ tableSampleData })
         console.log('🤖 Step 1: Using SQL Agent to get accurate database schema...');
 
         // Step 1: Use SQL Agent to explore and validate schema
@@ -239,6 +293,7 @@ async function generateRestructuredSQL(
             )];
 
             console.log(`🔍 Detected tables from original SQL: ${tableNames.join(', ')}`);
+            console.log(`🔍 Using pre-fetched sample data for ${Object.keys(tableSampleData).length} tables`);
 
             // Use SQL Agent to get comprehensive table schema and validate tables
             if (sqlAgent) {
@@ -408,6 +463,23 @@ VALIDATED COLUMNS BY TABLE:
 ${Object.entries(validatedColumns).map(([table, columns]) => `- ${table}: ${columns.join(', ')}`).join('\n')}
 ` : ''}
 
+${Object.keys(tableSampleData).length > 0 ? `
+TABLE SAMPLE DATA (First 3 records from each table):
+${Object.entries(tableSampleData).map(([table, sampleData]) => {
+            const samples = Array.isArray(sampleData) && sampleData.length > 0 ?
+                `\nSample Data:\n${JSON.stringify(sampleData, null, 2)}` :
+                '\nNo sample data available';
+            return `- ${table}: ${samples}`;
+        }).join('\n')}
+
+**CRITICAL: Use the sample data above to understand:**
+- The actual data types and formats in each table
+- Which tables contain the information relevant to the user query
+- How the data is structured and what values to expect
+- Relationships between tables based on actual data content
+- Which columns have meaningful data vs empty/null values
+` : ''}
+
 TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database.
 
 RESTRUCTURING REQUIREMENTS:
@@ -424,6 +496,24 @@ RESTRUCTURING REQUIREMENTS:
 11. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
 12. **EXACT COLUMN NAMES**: Do NOT assume, guess, or make up column names. Use ONLY the exact column names provided in the validated schema. If a column name is not in the validated list, DO NOT use it. Never use variations like 'patient_id' when the actual column is 'id', or vice versa.
 13. **STRICT COLUMN VALIDATION**: Before using any column in SELECT, FROM, JOIN, WHERE, or GROUP BY clauses, verify it exists in the validated columns list for that table. Reject any query that references non-existent columns.
+14. **SAMPLE DATA VERIFICATION**: Use the provided sample data to VERIFY that columns actually exist and contain the expected data types. Do NOT reference any column that is not visible in the sample data provided.
+15. **COLUMN CROSS-REFERENCE**: Cross-check every single column reference against both the validated schema AND the sample data. If a column is not present in either the schema or sample data, DO NOT use it under any circumstances.
+16. **NO COLUMN ASSUMPTIONS**: Never assume standard column names like 'summary_id', 'patient_id', 'medication_id' etc. Use ONLY the exact column names shown in the sample data and schema.
+17. **SAMPLE DATA ANALYSIS**: Leverage the provided sample data to understand the actual data content, formats, and relationships. Use sample data to verify which tables contain relevant information for the user query and to understand data patterns that should influence your restructuring approach.
+18. **DATA-DRIVEN TABLE SELECTION**: Prioritize tables that contain relevant data based on the sample data analysis. If sample data shows certain tables have meaningful information for the user query while others are empty or irrelevant, focus on the tables with relevant sample data.
+19. **NEVER INVENT COLUMN NAMES**: CRITICAL - Do NOT create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. If you need to count something, use COUNT(*) or COUNT(existing_column_name) but do NOT reference non-existent counting columns.
+20. **FORBIDDEN COLUMN PATTERNS**: NEVER use columns ending in '_count', '_total', '_sum', '_avg' unless they physically exist in the sample data. Do NOT generate queries with aggregated column names that don't exist in the actual database schema.
+21. **SAMPLE DATA IS GROUND TRUTH**: The sample data shows you EXACTLY which columns exist. If a column is not in the sample data, it does NOT exist. Period. No exceptions. No assumptions. No guessing.
+22. **AGGREGATE FUNCTIONS ONLY**: If you need counts, sums, or calculations, use SQL aggregate functions like COUNT(*), SUM(existing_column), AVG(existing_column). Do NOT reference made-up column names to get these values.
+
+**CRITICAL STRUCTURING REQUIREMENTS (MUST DO):**
+- You MUST analyze the main entity from the original SQL and BASE the structured query on this entity.
+- The structured query MUST associate all dependent or related arrays as inner arrays within a single record for each main entity.
+- DO NOT repeat the same entity as separate records in the structured query output. Instead, group all associated data (from dependent tables/entities) into arrays nested under the main entity.
+- If multiple records in the original SQL represent the same main entity, you MUST consolidate them into a single structured record, with their dependents grouped as inner arrays.
+- The structured SQL output should ALWAYS produce a single record per main entity, with all related/dependent data aggregated as arrays inside that record.
+- DO NOT return multiple rows for the same main entity. Structure the query so that each main entity appears only once, and all its related data is nested inside.
+- You MUST avoid redundant/repetitive data by grouping and nesting related data properly.
 
 DATABASE-SPECIFIC SYNTAX RULES FOR ${dbType.toUpperCase()} ${dbVersion}:
 ${dbSyntaxRules.general}
@@ -495,18 +585,25 @@ BEFORE FINALIZING THE QUERY:
 2. Verify all column references match the validated schema
 3. **VALIDATE EVERY COLUMN**: Cross-check each column name in SELECT, FROM, JOIN, WHERE, GROUP BY, and ORDER BY clauses against the validated columns list. Ensure every column exists in the specified table.
 4. **CHECK TABLE.COLUMN REFERENCES**: Ensure all column references use the correct table prefix (e.g., table_name.column_name) with exact names from the validated schema.
-5. Ensure JSON function nesting is correct and properly closed
-6. Confirm GROUP BY clauses include all non-aggregated columns
-7. **FOR MYSQL: Verify sql_mode=only_full_group_by compliance - every non-aggregated column in SELECT must be in GROUP BY**
-8. **CHECK SUBQUERY AGGREGATIONS: Ensure aggregated columns from subqueries don't violate GROUP BY rules in main query**
-9. **VERIFY NO IDENTICAL DATA**: Ensure the query will not produce identical values repeated across multiple rows - use DISTINCT and proper grouping
-10. **VERIFY JSON OBJECT STRUCTURE**: Ensure the query returns native JSON objects, NOT stringified JSON. The JSON functions must produce actual structured data that doesn't require additional parsing.
-11. **FINAL COLUMN VALIDATION**: Do one final check that no assumed or guessed column names are used. All columns must be from the validated schema.
-12. Check that all JOIN conditions are logical and will maintain data relationships
-13. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
-14. Double-check all parentheses, commas, and syntax elements
-15. Verify ORDER BY clause uses either full expressions or positional references, not aliases
-16. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
+5. **CROSS-REFERENCE WITH SAMPLE DATA**: Verify that every column you use appears in the sample data provided. Do NOT use any column that is not visible in the sample data.
+6. **NO INVENTED COLUMNS**: Never create or assume column names like 'summary_id', 'medication_id', 'patient_summary', etc. Use ONLY columns that appear in the sample data.
+7. **SAMPLE DATA COLUMN CHECK**: For each table, look at the sample data and use ONLY the column names that appear in those sample records.
+8. **CRITICAL COLUMN VALIDATION**: Go through your generated SQL character by character and identify every single column reference. For each column reference, ask yourself: "Is this exact column name present in the sample data for this table?" If the answer is NO, REMOVE or REPLACE that column reference.
+9. **NO AGGREGATED COLUMN ASSUMPTIONS**: NEVER use columns like 'medication_count', 'patient_count', 'total_*', '*_sum', '*_avg' unless they physically exist in the sample data. If you need counts, use COUNT(*) or COUNT(existing_column).
+10. **SAMPLE DATA IS TRUTH**: The sample data is the single source of truth for what columns exist. If it's not in the sample data, it doesn't exist. No exceptions.
+11. **VALIDATE HAVING CLAUSE**: If using HAVING clause, ensure all referenced columns either appear in GROUP BY or are aggregate functions. Do NOT reference non-existent columns in HAVING clause.
+12. Ensure JSON function nesting is correct and properly closed
+13. Confirm GROUP BY clauses include all non-aggregated columns
+14. **FOR MYSQL: Verify sql_mode=only_full_group_by compliance - every non-aggregated column in SELECT must be in GROUP BY**
+15. **CHECK SUBQUERY AGGREGATIONS: Ensure aggregated columns from subqueries don't violate GROUP BY rules in main query**
+16. **VERIFY NO IDENTICAL DATA**: Ensure the query will not produce identical values repeated across multiple rows - use DISTINCT and proper grouping
+17. **VERIFY JSON OBJECT STRUCTURE**: Ensure the query returns native JSON objects, NOT stringified JSON. The JSON functions must produce actual structured data that doesn't require additional parsing.
+18. **FINAL COLUMN VALIDATION**: Do one final check that no assumed or guessed column names are used. All columns must be from the validated schema AND visible in sample data.
+19. Check that all JOIN conditions are logical and will maintain data relationships
+20. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
+21. Double-check all parentheses, commas, and syntax elements
+22. Verify ORDER BY clause uses either full expressions or positional references, not aliases
+23. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
 
 DO NOT INCLUDE ANY EXPERIMENTAL OR UNTESTED SYNTAX. Only use proven, standard SQL constructs that are guaranteed to work with ${dbType.toUpperCase()} ${dbVersion}.
 
@@ -529,7 +626,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             messages: [
                 {
                     role: "system",
-                    content: "You are an expert data analyst specializing in restructuring relational database results into meaningful hierarchical JSON structures. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). Generate only syntactically correct SQL that works with the specific database type and version. CRITICAL: You must use ONLY the exact table and column names provided in the validated schema - never assume, guess, or make up column names. Verify every column reference against the provided schema before using it."
+                    content: "You are an expert data analyst specializing in restructuring relational database results into meaningful hierarchical JSON structures. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). Generate only syntactically correct SQL that works with the specific database type and version. CRITICAL COLUMN VALIDATION: You must use ONLY the exact table and column names provided in the validated schema and sample data - never assume, guess, or make up column names. Verify every column reference against the provided schema before using it. FORBIDDEN: NEVER create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. These types of errors cause SQL failures like 'Unknown column mc.medication_count in having clause'. SAMPLE DATA IS TRUTH: The sample data shows EXACTLY which columns exist. If a column is not visible in the sample data, it does NOT exist. Use only columns that physically appear in the provided sample records. AGGREGATE FUNCTIONS: If you need counts or calculations, use SQL functions like COUNT(*), SUM(existing_column), AVG(existing_column) - do NOT reference made-up aggregated column names. ERROR PREVENTION: Before finalizing your SQL, mentally check every column reference against the sample data. Ask yourself: 'Is this exact column name present in the sample data?' If NO, remove or replace it."
                 },
                 {
                     role: "user",
@@ -668,17 +765,65 @@ Return only valid JSON without any markdown formatting, comments, or explanation
     } catch (error: any) {
         console.error('❌ Error generating restructured SQL with Azure OpenAI:', error.message);
 
-        return {
-            restructured_sql: originalSQL, // Fallback to original SQL
-            restructure_success: false,
-            restructure_message: `SQL restructuring failed: ${error.message}`,
-            error_details: error.message,
-            explanation: "Error occurred during SQL restructuring",
-            grouping_logic: "No grouping applied due to error",
-            expected_structure: "Original flat structure maintained",
-            database_type: dbType,
-            database_version: dbVersion
-        };
+        // Retry logic: If this is the first attempt, retry once after 5 seconds
+        if (!isRetryAttempt) {
+            console.log('🔄 First attempt failed, retrying in 5 seconds...');
+
+            try {
+                // Wait for 5 seconds before retry
+                await new Promise(resolve => setTimeout(resolve, 5000));
+
+                console.log('🔄 Attempting retry for generateRestructuredSQL...');
+
+                // Call the function again with isRetryAttempt = true to prevent infinite recursion
+                return await generateRestructuredSQL(
+                    originalSQL,
+                    sqlResults,
+                    userPrompt,
+                    dbType,
+                    dbVersion,
+                    sampleSize,
+                    sqlAgent,
+                    organizationId,
+                    tableSampleData, // Pass the existing table sample data
+                    true // Mark as retry attempt
+                );
+
+            } catch (retryError: any) {
+                console.error('❌ Retry attempt also failed:', retryError.message);
+
+                return {
+                    restructured_sql: originalSQL, // Fallback to original SQL
+                    restructure_success: false,
+                    restructure_message: `SQL restructuring failed after retry: Original error: ${error.message}, Retry error: ${retryError.message}`,
+                    error_details: `Original: ${error.message}, Retry: ${retryError.message}`,
+                    explanation: "Error occurred during SQL restructuring (failed twice)",
+                    grouping_logic: "No grouping applied due to error",
+                    expected_structure: "Original flat structure maintained",
+                    database_type: dbType,
+                    database_version: dbVersion,
+                    retry_attempted: true,
+                    retry_failed: true
+                };
+            }
+        } else {
+            // This is already a retry attempt, don't retry again
+            console.log('❌ Retry attempt failed, not attempting third try');
+
+            return {
+                restructured_sql: originalSQL, // Fallback to original SQL
+                restructure_success: false,
+                restructure_message: `SQL restructuring retry failed: ${error.message}`,
+                error_details: error.message,
+                explanation: "Error occurred during SQL restructuring retry (no third attempt)",
+                grouping_logic: "No grouping applied due to retry failure",
+                expected_structure: "Original flat structure maintained",
+                database_type: dbType,
+                database_version: dbVersion,
+                retry_attempted: true,
+                retry_failed: true
+            };
+        }
     }
 }
 
@@ -2845,312 +2990,323 @@ Generate ONLY the corrected SQL query without explanations.
                 // No schema validations since we're trusting the sqlAgent
             };
 
-            try {
-                const errors = validationResult(req);
-                if (!errors.isEmpty()) {
-                    return res.status(400).json({
-                        error: 'Validation failed',
-                        details: errors.array()
-                    });
-                }
+            // Declare tableSampleData at higher scope for reuse in restructured SQL
+            let globalTableSampleData: { [table: string]: any[] } = {};
 
-                const {
-                    organizationId,
-                    query,
-                    context = 'Medical database query',
-                    conversational = false,
-                    generateDescription = true, // Default to true for better user experience
-                    sessionId = uuidv4(),
-                    // Enhanced parameters
-                    enableAutoCorrect = false,
-                    summarizeResults = false,
-                    enableMultiAgent = false,
-                    enableSchemaCache = true,
-                    enableToolTracing = false,
-                    friendlyErrors = true,
-                    enableAgentQuestions = false,
-                    enableAutoComplete = true,
-                    maxRetries = 3,
-                    analyzePatterns = false,
-                    returnSQLExplanation = false,
-                    // Chain parameters
-                    chainType = 'simple',
-                    preferredChain = '',
-                    // Graph parameters
-                    generateGraph = false,
-                    graphType = GraphType.BAR_CHART,
-                    graphCategory = undefined,
-                    graphConfig = {}
-                } = req.body;
+            // ========== RETRY LOOP FOR ZERO RECORDS ==========
+            let maxRetryAttempts = 2; // Total of 2 attempts (original + 1 retry)
+            let currentAttempt = 1;
+            let finalResult: any = null;
 
-                // Make useChains mutable so we can reset it if chains fail
-                let useChains = req.body.useChains || false;
+            while (currentAttempt <= maxRetryAttempts && !finalResult) {
+                console.log(`🔄 Starting API execution attempt ${currentAttempt} of ${maxRetryAttempts}...`);
 
-                console.log(`🚀 Processing SQL manual query for organization ${organizationId}: "${query}" ${conversational ? 'with conversation' : ''}`);
-
-                // Test organization database connection first
                 try {
-                    const connectionTest = await databaseService.testOrganizationConnection(organizationId);
-                    if (!connectionTest) {
+                    const errors = validationResult(req);
+                    if (!errors.isEmpty()) {
                         return res.status(400).json({
-                            error: 'Database connection failed',
-                            message: `Unable to connect to database for organization: ${organizationId}`,
+                            error: 'Validation failed',
+                            details: errors.array()
+                        });
+                    }
+
+                    const {
+                        organizationId,
+                        query,
+                        context = 'Medical database query',
+                        conversational = false,
+                        generateDescription = true, // Default to true for better user experience
+                        sessionId = uuidv4(),
+                        // Enhanced parameters
+                        enableAutoCorrect = false,
+                        summarizeResults = false,
+                        enableMultiAgent = false,
+                        enableSchemaCache = true,
+                        enableToolTracing = false,
+                        friendlyErrors = true,
+                        enableAgentQuestions = false,
+                        enableAutoComplete = true,
+                        maxRetries = 3,
+                        analyzePatterns = false,
+                        returnSQLExplanation = false,
+                        // Chain parameters
+                        chainType = 'simple',
+                        preferredChain = '',
+                        // Graph parameters
+                        generateGraph = false,
+                        graphType = GraphType.BAR_CHART,
+                        graphCategory = undefined,
+                        graphConfig = {}
+                    } = req.body;
+
+                    // Make useChains mutable so we can reset it if chains fail
+                    let useChains = req.body.useChains || false;
+
+                    console.log(`🚀 Processing SQL manual query for organization ${organizationId}: "${query}" ${conversational ? 'with conversation' : ''}`);
+
+                    // Test organization database connection first
+                    try {
+                        const connectionTest = await databaseService.testOrganizationConnection(organizationId);
+                        if (!connectionTest) {
+                            return res.status(400).json({
+                                error: 'Database connection failed',
+                                message: `Unable to connect to database for organization: ${organizationId}`,
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+                        console.log(`✅ Database connection verified for organization: ${organizationId}`);
+                    } catch (connectionError: any) {
+                        console.error(`❌ Database connection error for organization ${organizationId}:`, connectionError.message);
+                        return res.status(500).json({
+                            error: 'Database connection error',
+                            message: connectionError.message,
                             timestamp: new Date().toISOString()
                         });
                     }
-                    console.log(`✅ Database connection verified for organization: ${organizationId}`);
-                } catch (connectionError: any) {
-                    console.error(`❌ Database connection error for organization ${organizationId}:`, connectionError.message);
-                    return res.status(500).json({
-                        error: 'Database connection error',
-                        message: connectionError.message,
-                        timestamp: new Date().toISOString()
-                    });
-                }
 
-                // Get organization-specific LangChain app
-                let langchainApp: MedicalDatabaseLangChainApp;
-                try {
-                    langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
-                    console.log(`✅ LangChain app initialized for organization: ${organizationId}`);
-                } catch (langchainError: any) {
-                    console.error(`❌ LangChain initialization error for organization ${organizationId}:`, langchainError.message);
-                    return res.status(500).json({
-                        error: 'LangChain initialization error',
-                        message: langchainError.message,
-                        timestamp: new Date().toISOString()
-                    });
-                }
-
-                // Get or create conversation memory for this session if using conversational mode
-                let sessionData = null;
-                let chatHistory: any[] = [];
-
-                if (conversational) {
-                    console.log(`💬 Using conversational mode with session: ${sessionId}`);
-                    sessionData = conversationSessions.get(sessionId);
-
-                    if (!sessionData) {
-                        console.log(`🆕 Creating new conversation session: ${sessionId}`);
-                        const memory = new BufferMemory({
-                            memoryKey: 'chat_history',
-                            returnMessages: true,
-                            inputKey: 'input',
-                            outputKey: 'output',
+                    // Get organization-specific LangChain app
+                    let langchainApp: MedicalDatabaseLangChainApp;
+                    try {
+                        langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
+                        console.log(`✅ LangChain app initialized for organization: ${organizationId}`);
+                    } catch (langchainError: any) {
+                        console.error(`❌ LangChain initialization error for organization ${organizationId}:`, langchainError.message);
+                        return res.status(500).json({
+                            error: 'LangChain initialization error',
+                            message: langchainError.message,
+                            timestamp: new Date().toISOString()
                         });
-                        sessionData = {
-                            memory,
-                            lastAccess: new Date()
-                        };
-                        conversationSessions.set(sessionId, sessionData);
-                    } else {
-                        // Update last access time
-                        sessionData.lastAccess = new Date();
-                        console.log(`📝 Using existing conversation session: ${sessionId}`);
                     }
 
-                    // Retrieve conversation history if available
-                    try {
-                        const memoryVariables = await sessionData.memory.loadMemoryVariables({});
-                        chatHistory = memoryVariables.chat_history || [];
-                        console.log(`📜 Retrieved conversation history with ${Array.isArray(chatHistory) ? chatHistory.length : 0} messages`);
-                    } catch (memoryError) {
-                        console.error('❌ Error retrieving conversation history:', memoryError);
-                        // Continue without history if there's an error
-                    }
-                }
+                    // Get or create conversation memory for this session if using conversational mode
+                    let sessionData = null;
+                    let chatHistory: any[] = [];
 
-                const sqlAgent = langchainApp.getSqlAgent();
+                    if (conversational) {
+                        console.log(`💬 Using conversational mode with session: ${sessionId}`);
+                        sessionData = conversationSessions.get(sessionId);
 
-                if (!sqlAgent) {
-                    return res.status(503).json({
-                        error: 'SQL Agent not available',
-                        message: 'Service temporarily unavailable',
-                        timestamp: new Date().toISOString()
-                    });
-                }
-
-                // Let sqlAgent handle most of the schema exploration
-                // We'll just do minimal setup to ensure the agent understands the task
-                console.log('📊 Preparing to let sqlAgent explore database schema');
-
-                // Get database configuration to determine type
-                const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
-                console.log(`📊 Database type: ${dbConfig.type.toLocaleLowerCase()}`);
-
-                // Get minimal database information to guide the agent
-                try {
-                    let tables: string[] = [];
-
-                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                        // MySQL connection and table discovery
-                        const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                        console.log('📊 Getting high-level MySQL database structure');
-
-                        const [tableResults] = await connection.execute(
-                            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                            [dbConfig.database]
-                        );
-
-                        if (Array.isArray(tableResults) && tableResults.length > 0) {
-                            tables = tableResults.map((table: any) => table.TABLE_NAME);
-                            console.log('✅ MySQL database contains these tables:', tables.join(', '));
-                            debugInfo.sqlCorrections.push(`Available tables: ${tables.join(', ')}`);
+                        if (!sessionData) {
+                            console.log(`🆕 Creating new conversation session: ${sessionId}`);
+                            const memory = new BufferMemory({
+                                memoryKey: 'chat_history',
+                                returnMessages: true,
+                                inputKey: 'input',
+                                outputKey: 'output',
+                            });
+                            sessionData = {
+                                memory,
+                                lastAccess: new Date()
+                            };
+                            conversationSessions.set(sessionId, sessionData);
                         } else {
-                            console.log('⚠️ No tables found in the MySQL database');
+                            // Update last access time
+                            sessionData.lastAccess = new Date();
+                            console.log(`📝 Using existing conversation session: ${sessionId}`);
                         }
 
-                        await connection.end();
-                        console.log('✅ Basic MySQL database structure check complete');
-
-                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                        // PostgreSQL connection and table discovery
-                        const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                        console.log('📊 Getting high-level PostgreSQL database structure');
-
-                        const result = await client.query(
-                            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-                        );
-
-                        if (result.rows && result.rows.length > 0) {
-                            tables = result.rows.map((row: any) => row.tablename);
-                            console.log('✅ PostgreSQL database contains these tables:', tables.join(', '));
-                            debugInfo.sqlCorrections.push(`Available tables: ${tables.join(', ')}`);
-                        } else {
-                            console.log('⚠️ No tables found in the PostgreSQL database');
-                        }
-
-                        await client.end();
-                        console.log('✅ Basic PostgreSQL database structure check complete');
-
-                    } else {
-                        throw new Error(`Unsupported database type: ${dbConfig.type.toLocaleLowerCase()}`);
-                    }
-
-                } catch (schemaError: any) {
-                    console.error('❌ Failed to get basic database structure:', schemaError.message);
-                }
-
-                // ========== DATABASE VERSION DETECTION ==========
-                // Detect database version for both chain and non-chain modes
-                console.log('🔍 Detecting database version for query optimization...');
-
-                try {
-                    // Get database version information
-                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                        const versionConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
-
-                        const [rows] = await versionConnection.execute('SELECT VERSION() as version');
-                        if (rows && Array.isArray(rows) && rows[0] && (rows[0] as any).version) {
-                            mySQLVersionString = (rows[0] as any).version;
-
-                            // Parse version string
-                            const versionMatch = mySQLVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
-                            if (versionMatch) {
-                                const major = parseInt(versionMatch[1]);
-                                const minor = parseInt(versionMatch[2]);
-                                const patch = parseInt(versionMatch[3]);
-
-                                // Check MySQL sql_mode for only_full_group_by
-                                let hasOnlyFullGroupBy = false;
-                                try {
-                                    const [sqlModeRows] = await versionConnection.execute("SELECT @@sql_mode as sql_mode");
-                                    if (sqlModeRows && Array.isArray(sqlModeRows) && sqlModeRows[0] && (sqlModeRows[0] as any).sql_mode) {
-                                        const sqlMode = (sqlModeRows[0] as any).sql_mode;
-                                        hasOnlyFullGroupBy = sqlMode.includes('ONLY_FULL_GROUP_BY');
-                                        console.log(`🔍 MySQL sql_mode: ${sqlMode}`);
-                                        console.log(`🚨 only_full_group_by enabled: ${hasOnlyFullGroupBy}`);
-                                    }
-                                } catch (sqlModeError) {
-                                    console.warn('⚠️ Could not detect sql_mode, assuming only_full_group_by is enabled for safety');
-                                    hasOnlyFullGroupBy = true; // Assume enabled for safety
-                                }
-
-                                mysqlVersionInfo = {
-                                    full: mySQLVersionString,
-                                    major,
-                                    minor,
-                                    patch,
-                                    supportsJSON: major >= 5 && minor >= 7,
-                                    supportsWindowFunctions: major >= 8,
-                                    supportsCTE: major >= 8,
-                                    supportsRegex: true,
-                                    hasOnlyFullGroupBy: hasOnlyFullGroupBy
-                                };
-
-                                console.log(`✅ MySQL Version detected: ${mySQLVersionString} (${major}.${minor}.${patch})`);
-                                console.log(`📋 Feature support: JSON=${mysqlVersionInfo.supportsJSON}, Windows=${mysqlVersionInfo.supportsWindowFunctions}, CTE=${mysqlVersionInfo.supportsCTE}`);
-                                console.log(`🚨 only_full_group_by mode: ${hasOnlyFullGroupBy ? 'ENABLED (strict GROUP BY required)' : 'DISABLED'}`);
-                            }
-                        }
-
-                        await versionConnection.end();
-                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                        const versionConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-
-                        const result = await versionConnection.query('SELECT version()');
-                        if (result.rows && result.rows[0] && result.rows[0].version) {
-                            mySQLVersionString = result.rows[0].version; // Use same variable name for consistency
-                            console.log(`✅ PostgreSQL Version detected: ${mySQLVersionString}`);
-
-                            // Parse PostgreSQL version for features
-                            const versionMatch = mySQLVersionString.match(/PostgreSQL (\d+)\.(\d+)/);
-                            if (versionMatch) {
-                                const major = parseInt(versionMatch[1]);
-                                const minor = parseInt(versionMatch[2]);
-
-                                mysqlVersionInfo = {
-                                    full: mySQLVersionString,
-                                    major,
-                                    minor,
-                                    patch: 0,
-                                    supportsJSON: major >= 9 && minor >= 2,
-                                    supportsWindowFunctions: major >= 8,
-                                    supportsCTE: major >= 8 && minor >= 4,
-                                    supportsRegex: true
-                                };
-                            }
-                        }
-
-                        await versionConnection.end();
-                    }
-                } catch (versionError) {
-                    console.error('❌ Failed to get database version:', versionError);
-                    // Continue with unknown version
-                }
-
-                // ========== CHAIN EXECUTION LOGIC ==========
-
-                // Check if chains should be used for SQL generation instead of direct SQL agent
-                let enhancedQuery = query;
-                let chainSQLGenerated = '';
-                let chainMetadata = {};
-
-                if (useChains) {
-                    console.log(`🔗 Using LangChain chains for SQL generation: ${chainType}`);
-
-                    try {
-                        // Get complete database knowledge for chains - schema info
-                        console.log('🔍 Getting complete database knowledge for chain execution...');
-
-                        let databaseSchemaInfo = "";
-
-                        // Get database schema information using the SQL database connection
+                        // Retrieve conversation history if available
                         try {
-                            console.log('📊 Getting complete database schema for chains...');
-                            const sqlDatabase = langchainApp.getSqlDatabase();
-                            if (sqlDatabase) {
-                                databaseSchemaInfo = await sqlDatabase.getTableInfo();
-                                console.log(`✅ Retrieved database schema info for chains (${databaseSchemaInfo.length} characters)`);
+                            const memoryVariables = await sessionData.memory.loadMemoryVariables({});
+                            chatHistory = memoryVariables.chat_history || [];
+                            console.log(`📜 Retrieved conversation history with ${Array.isArray(chatHistory) ? chatHistory.length : 0} messages`);
+                        } catch (memoryError) {
+                            console.error('❌ Error retrieving conversation history:', memoryError);
+                            // Continue without history if there's an error
+                        }
+                    }
+
+                    const sqlAgent = langchainApp.getSqlAgent();
+
+                    if (!sqlAgent) {
+                        return res.status(503).json({
+                            error: 'SQL Agent not available',
+                            message: 'Service temporarily unavailable',
+                            timestamp: new Date().toISOString()
+                        });
+                    }
+
+                    // Let sqlAgent handle most of the schema exploration
+                    // We'll just do minimal setup to ensure the agent understands the task
+                    console.log('📊 Preparing to let sqlAgent explore database schema');
+
+                    // Get database configuration to determine type
+                    const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                    console.log(`📊 Database type: ${dbConfig.type.toLocaleLowerCase()}`);
+
+                    // Get minimal database information to guide the agent
+                    try {
+                        let tables: string[] = [];
+
+                        if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                            // MySQL connection and table discovery
+                            const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                            console.log('📊 Getting high-level MySQL database structure');
+
+                            const [tableResults] = await connection.execute(
+                                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                [dbConfig.database]
+                            );
+
+                            if (Array.isArray(tableResults) && tableResults.length > 0) {
+                                tables = tableResults.map((table: any) => table.TABLE_NAME);
+                                console.log('✅ MySQL database contains these tables:', tables.join(', '));
+                                debugInfo.sqlCorrections.push(`Available tables: ${tables.join(', ')}`);
                             } else {
-                                console.log('⚠️ SQL Database not available, chains will work without schema info');
+                                console.log('⚠️ No tables found in the MySQL database');
                             }
-                        } catch (schemaError) {
-                            console.error('❌ Failed to get database schema for chains:', schemaError);
+
+                            await connection.end();
+                            console.log('✅ Basic MySQL database structure check complete');
+
+                        } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                            // PostgreSQL connection and table discovery
+                            const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                            console.log('📊 Getting high-level PostgreSQL database structure');
+
+                            const result = await client.query(
+                                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                            );
+
+                            if (result.rows && result.rows.length > 0) {
+                                tables = result.rows.map((row: any) => row.tablename);
+                                console.log('✅ PostgreSQL database contains these tables:', tables.join(', '));
+                                debugInfo.sqlCorrections.push(`Available tables: ${tables.join(', ')}`);
+                            } else {
+                                console.log('⚠️ No tables found in the PostgreSQL database');
+                            }
+
+                            await client.end();
+                            console.log('✅ Basic PostgreSQL database structure check complete');
+
+                        } else {
+                            throw new Error(`Unsupported database type: ${dbConfig.type.toLocaleLowerCase()}`);
                         }
 
-                        // Create comprehensive database-aware query for chains
-                        const comprehensiveQuery = `${query}
+                    } catch (schemaError: any) {
+                        console.error('❌ Failed to get basic database structure:', schemaError.message);
+                    }
+
+                    // ========== DATABASE VERSION DETECTION ==========
+                    // Detect database version for both chain and non-chain modes
+                    console.log('🔍 Detecting database version for query optimization...');
+
+                    try {
+                        // Get database version information
+                        if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                            const versionConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+
+                            const [rows] = await versionConnection.execute('SELECT VERSION() as version');
+                            if (rows && Array.isArray(rows) && rows[0] && (rows[0] as any).version) {
+                                mySQLVersionString = (rows[0] as any).version;
+
+                                // Parse version string
+                                const versionMatch = mySQLVersionString.match(/(\d+)\.(\d+)\.(\d+)/);
+                                if (versionMatch) {
+                                    const major = parseInt(versionMatch[1]);
+                                    const minor = parseInt(versionMatch[2]);
+                                    const patch = parseInt(versionMatch[3]);
+
+                                    // Check MySQL sql_mode for only_full_group_by
+                                    let hasOnlyFullGroupBy = false;
+                                    try {
+                                        const [sqlModeRows] = await versionConnection.execute("SELECT @@sql_mode as sql_mode");
+                                        if (sqlModeRows && Array.isArray(sqlModeRows) && sqlModeRows[0] && (sqlModeRows[0] as any).sql_mode) {
+                                            const sqlMode = (sqlModeRows[0] as any).sql_mode;
+                                            hasOnlyFullGroupBy = sqlMode.includes('ONLY_FULL_GROUP_BY');
+                                            console.log(`🔍 MySQL sql_mode: ${sqlMode}`);
+                                            console.log(`🚨 only_full_group_by enabled: ${hasOnlyFullGroupBy}`);
+                                        }
+                                    } catch (sqlModeError) {
+                                        console.warn('⚠️ Could not detect sql_mode, assuming only_full_group_by is enabled for safety');
+                                        hasOnlyFullGroupBy = true; // Assume enabled for safety
+                                    }
+
+                                    mysqlVersionInfo = {
+                                        full: mySQLVersionString,
+                                        major,
+                                        minor,
+                                        patch,
+                                        supportsJSON: major >= 5 && minor >= 7,
+                                        supportsWindowFunctions: major >= 8,
+                                        supportsCTE: major >= 8,
+                                        supportsRegex: true,
+                                        hasOnlyFullGroupBy: hasOnlyFullGroupBy
+                                    };
+
+                                    console.log(`✅ MySQL Version detected: ${mySQLVersionString} (${major}.${minor}.${patch})`);
+                                    console.log(`📋 Feature support: JSON=${mysqlVersionInfo.supportsJSON}, Windows=${mysqlVersionInfo.supportsWindowFunctions}, CTE=${mysqlVersionInfo.supportsCTE}`);
+                                    console.log(`🚨 only_full_group_by mode: ${hasOnlyFullGroupBy ? 'ENABLED (strict GROUP BY required)' : 'DISABLED'}`);
+                                }
+                            }
+
+                            await versionConnection.end();
+                        } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                            const versionConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+
+                            const result = await versionConnection.query('SELECT version()');
+                            if (result.rows && result.rows[0] && result.rows[0].version) {
+                                mySQLVersionString = result.rows[0].version; // Use same variable name for consistency
+                                console.log(`✅ PostgreSQL Version detected: ${mySQLVersionString}`);
+
+                                // Parse PostgreSQL version for features
+                                const versionMatch = mySQLVersionString.match(/PostgreSQL (\d+)\.(\d+)/);
+                                if (versionMatch) {
+                                    const major = parseInt(versionMatch[1]);
+                                    const minor = parseInt(versionMatch[2]);
+
+                                    mysqlVersionInfo = {
+                                        full: mySQLVersionString,
+                                        major,
+                                        minor,
+                                        patch: 0,
+                                        supportsJSON: major >= 9 && minor >= 2,
+                                        supportsWindowFunctions: major >= 8,
+                                        supportsCTE: major >= 8 && minor >= 4,
+                                        supportsRegex: true
+                                    };
+                                }
+                            }
+
+                            await versionConnection.end();
+                        }
+                    } catch (versionError) {
+                        console.error('❌ Failed to get database version:', versionError);
+                        // Continue with unknown version
+                    }
+
+                    // ========== CHAIN EXECUTION LOGIC ==========
+
+                    // Check if chains should be used for SQL generation instead of direct SQL agent
+                    let enhancedQuery = query;
+                    let chainSQLGenerated = '';
+                    let chainMetadata = {};
+
+                    if (useChains) {
+                        console.log(`🔗 Using LangChain chains for SQL generation: ${chainType}`);
+
+                        try {
+                            // Get complete database knowledge for chains - schema info
+                            console.log('🔍 Getting complete database knowledge for chain execution...');
+
+                            let databaseSchemaInfo = "";
+
+                            // Get database schema information using the SQL database connection
+                            try {
+                                console.log('📊 Getting complete database schema for chains...');
+                                const sqlDatabase = langchainApp.getSqlDatabase();
+                                if (sqlDatabase) {
+                                    databaseSchemaInfo = await sqlDatabase.getTableInfo();
+                                    console.log(`✅ Retrieved database schema info for chains (${databaseSchemaInfo.length} characters)`);
+                                } else {
+                                    console.log('⚠️ SQL Database not available, chains will work without schema info');
+                                }
+                            } catch (schemaError) {
+                                console.error('❌ Failed to get database schema for chains:', schemaError);
+                            }
+
+                            // Create comprehensive database-aware query for chains
+                            const comprehensiveQuery = `${query}
 
 === COMPLETE DATABASE KNOWLEDGE FOR CHAIN EXECUTION ===
 
@@ -3174,170 +3330,170 @@ CRITICAL INSTRUCTIONS FOR CHAINS:
 
 ===============================================`;
 
-                        let chainResult;
+                            let chainResult;
 
-                        switch (chainType) {
-                            case 'simple':
-                                chainResult = await langchainApp.executeSimpleSequentialChain(comprehensiveQuery);
-                                break;
-                            case 'sequential':
-                                chainResult = await langchainApp.executeSequentialChain(comprehensiveQuery);
-                                break;
-                            case 'router':
-                                chainResult = await langchainApp.executeRouterChain(comprehensiveQuery);
-                                break;
-                            case 'multiprompt':
-                                chainResult = await langchainApp.executeMultiPromptChain(comprehensiveQuery);
-                                break;
-                            default:
-                                throw new Error(`Unsupported chain type: ${chainType}`);
-                        }
-
-                        if (chainResult.success) {
-                            console.log(`✅ Chain SQL generation successful: ${chainResult.chainType}`);
-
-                            // Extract SQL from chain result
-                            if (chainResult.finalSQL) {
-                                chainSQLGenerated = chainResult.finalSQL;
-                                console.log(`🔗 Chain generated SQL from finalSQL: ${chainSQLGenerated.substring(0, 100)}...`);
-                            } else if (chainResult.sql) {
-                                chainSQLGenerated = chainResult.sql;
-                                console.log(`🔗 Chain generated SQL from sql: ${chainSQLGenerated.substring(0, 100)}...`);
-                            } else if (chainResult.result) {
-                                // Try to extract SQL from the chain result text
-                                const resultText = typeof chainResult.result === 'string' ? chainResult.result : JSON.stringify(chainResult.result);
-                                const sqlPattern = /```sql\s*([\s\S]*?)\s*```|SELECT[\s\S]*?;/i;
-                                const sqlMatch = resultText.match(sqlPattern);
-                                if (sqlMatch) {
-                                    chainSQLGenerated = sqlMatch[1] || sqlMatch[0];
-                                    console.log(`🔗 Extracted SQL from chain result: ${chainSQLGenerated.substring(0, 100)}...`);
-                                }
+                            switch (chainType) {
+                                case 'simple':
+                                    chainResult = await langchainApp.executeSimpleSequentialChain(comprehensiveQuery);
+                                    break;
+                                case 'sequential':
+                                    chainResult = await langchainApp.executeSequentialChain(comprehensiveQuery);
+                                    break;
+                                case 'router':
+                                    chainResult = await langchainApp.executeRouterChain(comprehensiveQuery);
+                                    break;
+                                case 'multiprompt':
+                                    chainResult = await langchainApp.executeMultiPromptChain(comprehensiveQuery);
+                                    break;
+                                default:
+                                    throw new Error(`Unsupported chain type: ${chainType}`);
                             }
 
-                            // Store chain metadata for final response including MySQL version and schema info
-                            chainMetadata = {
-                                chain_used: chainResult.chainType,
-                                chain_analysis: chainResult.analysis || 'No analysis available',
-                                chain_validation: chainResult.schemaValidation || 'No validation available',
-                                chain_steps: chainResult.steps || [],
-                                chain_timestamp: chainResult.timestamp,
-                                mysql_version: mySQLVersionString,
-                                mysql_features: mysqlVersionInfo ? {
-                                    json_support: mysqlVersionInfo.supportsJSON,
-                                    window_functions: mysqlVersionInfo.supportsWindowFunctions,
-                                    cte_support: mysqlVersionInfo.supportsCTE,
-                                    regex_support: mysqlVersionInfo.supportsRegex
-                                } : null,
-                                database_schema_provided: !!databaseSchemaInfo,
-                                schema_info_length: databaseSchemaInfo ? databaseSchemaInfo.length : 0,
-                                comprehensive_database_knowledge: true
-                            };
+                            if (chainResult.success) {
+                                console.log(`✅ Chain SQL generation successful: ${chainResult.chainType}`);
 
-                            // Save conversation if in conversational mode
-                            if (conversational && sessionData) {
-                                try {
-                                    const contextSummary = `Chain ${chainResult.chainType} generated SQL with complete database schema (${databaseSchemaInfo ? databaseSchemaInfo.length : 0} chars) and MySQL version ${mySQLVersionString}`;
-                                    await sessionData.memory.saveContext(
-                                        { input: query },
-                                        { output: `${contextSummary}: ${chainSQLGenerated || 'No SQL extracted'}` }
-                                    );
-                                    console.log('💾 Saved comprehensive chain SQL generation to conversation context');
-                                } catch (saveError) {
-                                    console.error('❌ Error saving chain conversation:', saveError);
+                                // Extract SQL from chain result
+                                if (chainResult.finalSQL) {
+                                    chainSQLGenerated = chainResult.finalSQL;
+                                    console.log(`🔗 Chain generated SQL from finalSQL: ${chainSQLGenerated.substring(0, 100)}...`);
+                                } else if (chainResult.sql) {
+                                    chainSQLGenerated = chainResult.sql;
+                                    console.log(`🔗 Chain generated SQL from sql: ${chainSQLGenerated.substring(0, 100)}...`);
+                                } else if (chainResult.result) {
+                                    // Try to extract SQL from the chain result text
+                                    const resultText = typeof chainResult.result === 'string' ? chainResult.result : JSON.stringify(chainResult.result);
+                                    const sqlPattern = /```sql\s*([\s\S]*?)\s*```|SELECT[\s\S]*?;/i;
+                                    const sqlMatch = resultText.match(sqlPattern);
+                                    if (sqlMatch) {
+                                        chainSQLGenerated = sqlMatch[1] || sqlMatch[0];
+                                        console.log(`🔗 Extracted SQL from chain result: ${chainSQLGenerated.substring(0, 100)}...`);
+                                    }
                                 }
+
+                                // Store chain metadata for final response including MySQL version and schema info
+                                chainMetadata = {
+                                    chain_used: chainResult.chainType,
+                                    chain_analysis: chainResult.analysis || 'No analysis available',
+                                    chain_validation: chainResult.schemaValidation || 'No validation available',
+                                    chain_steps: chainResult.steps || [],
+                                    chain_timestamp: chainResult.timestamp,
+                                    mysql_version: mySQLVersionString,
+                                    mysql_features: mysqlVersionInfo ? {
+                                        json_support: mysqlVersionInfo.supportsJSON,
+                                        window_functions: mysqlVersionInfo.supportsWindowFunctions,
+                                        cte_support: mysqlVersionInfo.supportsCTE,
+                                        regex_support: mysqlVersionInfo.supportsRegex
+                                    } : null,
+                                    database_schema_provided: !!databaseSchemaInfo,
+                                    schema_info_length: databaseSchemaInfo ? databaseSchemaInfo.length : 0,
+                                    comprehensive_database_knowledge: true
+                                };
+
+                                // Save conversation if in conversational mode
+                                if (conversational && sessionData) {
+                                    try {
+                                        const contextSummary = `Chain ${chainResult.chainType} generated SQL with complete database schema (${databaseSchemaInfo ? databaseSchemaInfo.length : 0} chars) and MySQL version ${mySQLVersionString}`;
+                                        await sessionData.memory.saveContext(
+                                            { input: query },
+                                            { output: `${contextSummary}: ${chainSQLGenerated || 'No SQL extracted'}` }
+                                        );
+                                        console.log('💾 Saved comprehensive chain SQL generation to conversation context');
+                                    } catch (saveError) {
+                                        console.error('❌ Error saving chain conversation:', saveError);
+                                    }
+                                }
+
+                            } else {
+                                console.log(`❌ Chain SQL generation failed: ${chainResult.error}`);
+
+                                // Fall back to regular SQL agent if chain fails
+                                console.log('🔄 Falling back to regular SQL agent...');
+                                useChains = false; // Reset flag so we use the regular path
+
+                                // Store error info for final response
+                                chainMetadata = {
+                                    chain_attempted: chainType,
+                                    chain_error: chainResult.error,
+                                    fallback_used: true
+                                };
                             }
 
-                        } else {
-                            console.log(`❌ Chain SQL generation failed: ${chainResult.error}`);
+                        } catch (chainError: any) {
+                            console.error('❌ Chain execution error:', chainError);
 
                             // Fall back to regular SQL agent if chain fails
-                            console.log('🔄 Falling back to regular SQL agent...');
+                            console.log('🔄 Falling back to regular SQL agent due to error...');
                             useChains = false; // Reset flag so we use the regular path
 
                             // Store error info for final response
                             chainMetadata = {
                                 chain_attempted: chainType,
-                                chain_error: chainResult.error,
+                                chain_error: chainError.message,
                                 fallback_used: true
                             };
                         }
-
-                    } catch (chainError: any) {
-                        console.error('❌ Chain execution error:', chainError);
-
-                        // Fall back to regular SQL agent if chain fails
-                        console.log('🔄 Falling back to regular SQL agent due to error...');
-                        useChains = false; // Reset flag so we use the regular path
-
-                        // Store error info for final response
-                        chainMetadata = {
-                            chain_attempted: chainType,
-                            chain_error: chainError.message,
-                            fallback_used: true
-                        };
                     }
-                }
 
-                // Step 1: Get the SQL query from the agent (or use chain-generated SQL)
-                console.log('📊 Step 1: Extracting SQL query from agent...');
-                let agentResult;
-                let intermediateSteps: any[] = [];
-                let capturedSQLQueries: string[] = [];
+                    // Step 1: Get the SQL query from the agent (or use chain-generated SQL)
+                    console.log('📊 Step 1: Extracting SQL query from agent...');
+                    let agentResult;
+                    let intermediateSteps: any[] = [];
+                    let capturedSQLQueries: string[] = [];
 
-                // If we have chain-generated SQL, use it directly
-                if (chainSQLGenerated) {
-                    console.log('🔗 Using SQL generated by chain instead of agent');
-                    console.log('🔍 Raw chain SQL before cleaning:', chainSQLGenerated);
+                    // If we have chain-generated SQL, use it directly
+                    if (chainSQLGenerated) {
+                        console.log('🔗 Using SQL generated by chain instead of agent');
+                        console.log('🔍 Raw chain SQL before cleaning:', chainSQLGenerated);
 
-                    // For chain-generated SQL, we may not need aggressive cleaning since chains should produce clean SQL
-                    // Try minimal cleaning first
-                    let cleanedChainSQL = chainSQLGenerated.trim();
+                        // For chain-generated SQL, we may not need aggressive cleaning since chains should produce clean SQL
+                        // Try minimal cleaning first
+                        let cleanedChainSQL = chainSQLGenerated.trim();
 
-                    // Only clean if it contains obvious markdown or formatting
-                    if (chainSQLGenerated.includes('```') || chainSQLGenerated.includes('**') || chainSQLGenerated.includes('*')) {
-                        console.log('🧹 Chain SQL contains formatting, applying cleaning...');
-                        cleanedChainSQL = cleanSQLQuery(chainSQLGenerated);
-                    } else {
-                        console.log('✅ Chain SQL appears clean, using directly');
-                        // Just ensure it ends with semicolon
-                        if (!cleanedChainSQL.endsWith(';')) {
-                            cleanedChainSQL += ';';
+                        // Only clean if it contains obvious markdown or formatting
+                        if (chainSQLGenerated.includes('```') || chainSQLGenerated.includes('**') || chainSQLGenerated.includes('*')) {
+                            console.log('🧹 Chain SQL contains formatting, applying cleaning...');
+                            cleanedChainSQL = cleanSQLQuery(chainSQLGenerated);
+                        } else {
+                            console.log('✅ Chain SQL appears clean, using directly');
+                            // Just ensure it ends with semicolon
+                            if (!cleanedChainSQL.endsWith(';')) {
+                                cleanedChainSQL += ';';
+                            }
+                        }
+
+                        console.log('🔧 Final cleaned chain SQL:', cleanedChainSQL);
+
+                        if (cleanedChainSQL) {
+                            capturedSQLQueries.push(cleanedChainSQL);
+                            debugInfo.originalQueries.push(chainSQLGenerated);
+                            debugInfo.extractionAttempts.push('Chain-generated SQL: ' + cleanedChainSQL);
+
+                            // Create a mock agent result for consistency with the rest of the flow
+                            agentResult = {
+                                output: `Chain-generated SQL query: ${cleanedChainSQL}`,
+                                type: 'chain_generated',
+                                metadata: chainMetadata
+                            };
+
+                            console.log('✅ Chain-generated SQL prepared for execution');
+                        } else {
+                            console.log('❌ Failed to clean chain-generated SQL, falling back to agent');
+                            chainSQLGenerated = ''; // Reset so we use the agent
                         }
                     }
 
-                    console.log('🔧 Final cleaned chain SQL:', cleanedChainSQL);
+                    // If no chain SQL or chain SQL cleaning failed, use the regular agent
+                    if (!chainSQLGenerated) {
+                        try {
+                            // Use already detected database version information
+                            console.log('🔍 Using detected database version for SQL generation...');
 
-                    if (cleanedChainSQL) {
-                        capturedSQLQueries.push(cleanedChainSQL);
-                        debugInfo.originalQueries.push(chainSQLGenerated);
-                        debugInfo.extractionAttempts.push('Chain-generated SQL: ' + cleanedChainSQL);
+                            const databaseType = dbConfig.type.toLocaleLowerCase();
+                            const databaseVersionString = mySQLVersionString;
+                            const databaseVersionInfo = mysqlVersionInfo;
 
-                        // Create a mock agent result for consistency with the rest of the flow
-                        agentResult = {
-                            output: `Chain-generated SQL query: ${cleanedChainSQL}`,
-                            type: 'chain_generated',
-                            metadata: chainMetadata
-                        };
-
-                        console.log('✅ Chain-generated SQL prepared for execution');
-                    } else {
-                        console.log('❌ Failed to clean chain-generated SQL, falling back to agent');
-                        chainSQLGenerated = ''; // Reset so we use the agent
-                    }
-                }
-
-                // If no chain SQL or chain SQL cleaning failed, use the regular agent
-                if (!chainSQLGenerated) {
-                    try {
-                        // Use already detected database version information
-                        console.log('🔍 Using detected database version for SQL generation...');
-
-                        const databaseType = dbConfig.type.toLocaleLowerCase();
-                        const databaseVersionString = mySQLVersionString;
-                        const databaseVersionInfo = mysqlVersionInfo;
-
-                        // Configure LangChain's sqlAgent with version-specific instructions
-                        const versionSpecificInstructions = databaseVersionInfo ? `
+                            // Configure LangChain's sqlAgent with version-specific instructions
+                            const versionSpecificInstructions = databaseVersionInfo ? `
 ${databaseType.toUpperCase()} VERSION INFO: Your query will run on ${databaseType.toUpperCase()} ${databaseVersionInfo.full} (${databaseVersionInfo.major}.${databaseVersionInfo.minor}.${databaseVersionInfo.patch})
 
 VERSION-SPECIFIC COMPATIBILITY:
@@ -3373,160 +3529,217 @@ ${databaseType.toLowerCase() === 'mysql' && databaseVersionInfo.hasOnlyFullGroup
 
 CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase()} version. Avoid any syntax not supported by ${databaseVersionInfo.full}.
 ` : '';
-                        console.log({ versionSpecificInstructions })
+                            console.log({ versionSpecificInstructions })
 
-                        // Add conversation context if in conversational mode
-                        let conversationalContext = '';
-                        if (conversational && Array.isArray(chatHistory) && chatHistory.length > 0) {
-                            conversationalContext = '\n\nPrevious conversation:\n' + chatHistory
-                                .map((msg: any) => `${msg.type === 'human' ? 'User' : 'Assistant'}: ${msg.content}`)
-                                .join('\n') + '\n\n';
-                        }
+                            // Add conversation context if in conversational mode
+                            let conversationalContext = '';
+                            if (conversational && Array.isArray(chatHistory) && chatHistory.length > 0) {
+                                conversationalContext = '\n\nPrevious conversation:\n' + chatHistory
+                                    .map((msg: any) => `${msg.type === 'human' ? 'User' : 'Assistant'}: ${msg.content}`)
+                                    .join('\n') + '\n\n';
+                            }
 
-                        // Get all database tables and columns with AI-generated purpose descriptions
-                        let tableDescriptions = '';
-                        try {
-                            console.log('🔍 Getting all database tables and columns for AI analysis...');
+                            // Get all database tables and columns with AI-generated purpose descriptions
+                            let tableDescriptions = '';
+                            try {
+                                console.log('🔍 Getting all database tables and columns for AI analysis...');
 
-                            // Get all tables for this organization
-                            const allTables = await databaseService.getOrganizationTables(organizationId);
-                            console.log(`📊 Found ${allTables.length} tables:`, allTables);
+                                // Get all tables for this organization
+                                const allTables = await databaseService.getOrganizationTables(organizationId);
+                                console.log(`📊 Found ${allTables.length} tables:`, allTables);
 
-                            if (allTables.length > 0) {
-                                const tableSchemaData: any = {};
+                                if (allTables.length > 0) {
+                                    const tableSchemaData: any = {};
+                                    // Use the global tableSampleData instead of local declaration
 
-                                // Get schema for each table
-                                for (const tableName of allTables) {
-                                    try {
-                                        let columnInfo: any[] = [];
+                                    // Get schema for each table
+                                    for (const tableName of allTables) {
+                                        try {
+                                            let columnInfo: any[] = [];
 
-                                        if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
-                                            const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                                            const [rows] = await connection.execute(
-                                                `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT 
+                                            if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
+                                                const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                                const [rows] = await connection.execute(
+                                                    `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT 
                                                  FROM INFORMATION_SCHEMA.COLUMNS 
                                                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? 
                                                  ORDER BY ORDINAL_POSITION`,
-                                                [tableName]
-                                            );
-                                            columnInfo = rows as any[];
-                                            await connection.end();
-                                        } else if (databaseType.toLowerCase() === 'postgresql') {
-                                            const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                                            const result = await client.query(
-                                                `SELECT column_name as "COLUMN_NAME", data_type as "DATA_TYPE", is_nullable as "IS_NULLABLE", column_default as "COLUMN_DEFAULT", '' as "COLUMN_COMMENT"
+                                                    [tableName]
+                                                );
+                                                columnInfo = rows as any[];
+                                                await connection.end();
+                                            } else if (databaseType.toLowerCase() === 'postgresql') {
+                                                const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                                const result = await client.query(
+                                                    `SELECT column_name as "COLUMN_NAME", data_type as "DATA_TYPE", is_nullable as "IS_NULLABLE", column_default as "COLUMN_DEFAULT", '' as "COLUMN_COMMENT"
                                                  FROM information_schema.columns 
                                                  WHERE table_schema = 'public' AND table_name = $1 
                                                  ORDER BY ordinal_position`,
-                                                [tableName]
-                                            );
-                                            columnInfo = result.rows;
-                                            await client.end();
+                                                    [tableName]
+                                                );
+                                                columnInfo = result.rows;
+                                                await client.end();
+                                            }
+
+                                            tableSchemaData[tableName] = Array.isArray(columnInfo) ? columnInfo : [];
+                                            console.log(`✅ Got schema for table ${tableName}: ${tableSchemaData[tableName].length} columns`);
+                                        } catch (schemaError) {
+                                            console.warn(`⚠️ Could not get schema for table ${tableName}:`, schemaError);
+                                            tableSchemaData[tableName] = [];
                                         }
-
-                                        tableSchemaData[tableName] = Array.isArray(columnInfo) ? columnInfo : [];
-                                        console.log(`✅ Got schema for table ${tableName}: ${tableSchemaData[tableName].length} columns`);
-                                    } catch (schemaError) {
-                                        console.warn(`⚠️ Could not get schema for table ${tableName}:`, schemaError);
-                                        tableSchemaData[tableName] = [];
                                     }
-                                }
 
-                                // Generate AI descriptions for all tables
-                                const azureClient = getAzureOpenAIClient();
-                                if (azureClient) {
-                                    console.log('🤖 Generating AI purpose descriptions for database tables...');
-                                    try {
-                                        const schemaDescription = Object.entries(tableSchemaData)
-                                            .map(([tableName, columns]: [string, any]) => {
-                                                return `Table: ${tableName}`;
-                                            })
-                                            .join('\n');
+                                    // Get sample data (first 3 records) for each table
+                                    for (const tableName of allTables) {
+                                        try {
+                                            let sampleRecords: any[] = [];
 
-                                        const aiPrompt = `You are a database schema analyst helping an SQL agent choose the correct tables for a specific query. 
+                                            if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
+                                                const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                                const [rows] = await connection.execute(
+                                                    `SELECT * FROM \`${tableName}\` LIMIT 3`
+                                                );
+                                                sampleRecords = rows as any[];
+                                                await connection.end();
+                                            } else if (databaseType.toLowerCase() === 'postgresql') {
+                                                const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                                const result = await client.query(
+                                                    `SELECT * FROM "${tableName}" LIMIT 3`
+                                                );
+                                                sampleRecords = result.rows;
+                                                await client.end();
+                                            }
+
+                                            globalTableSampleData[tableName] = Array.isArray(sampleRecords) ? sampleRecords : [];
+                                            console.log(`✅ Got sample data for table ${tableName}: ${globalTableSampleData[tableName].length} records`);
+                                        } catch (sampleError) {
+                                            console.warn(`⚠️ Could not get sample data for table ${tableName}:`, sampleError);
+                                            globalTableSampleData[tableName] = [];
+                                        }
+                                    }
+
+                                    // Generate AI descriptions for all tables
+                                    const azureClient = getAzureOpenAIClient();
+                                    if (azureClient) {
+                                        console.log('🤖 Generating AI purpose descriptions for database tables...');
+                                        try {
+                                            const schemaDescription = Object.entries(tableSchemaData)
+                                                .map(([tableName, columns]: [string, any]) => {
+                                                    const columnList = Array.isArray(columns) ?
+                                                        columns.map((col: any) => `${col.COLUMN_NAME} (${col.DATA_TYPE})`).join(', ') :
+                                                        'No columns available';
+
+                                                    const sampleData = globalTableSampleData[tableName] || [];
+                                                    const sampleDataStr = sampleData.length > 0 ?
+                                                        `\nSample Data (first ${sampleData.length} records):\n${JSON.stringify(sampleData, null, 2)}` :
+                                                        '\nNo sample data available';
+
+                                                    return `Table: ${tableName}\nColumns: ${columnList}${sampleDataStr}`;
+                                                })
+                                                .join('\n\n');
+
+                                            const aiPrompt = `You are a database schema analyst helping an SQL agent choose the correct tables for a specific query. 
 
 User Query: "${query}"
 
-Database Tables: ${schemaDescription}
+Database Tables with Schema and Sample Data:
+${schemaDescription}
 
-Based on the user's specific query "${query}", analyze each table name and provide targeted descriptions that help the SQL agent understand which tables are most relevant for this specific query. Focus on:
-1. Which tables likely contain the data needed for this specific query
-2. Which tables should be prioritized for this type of question
-3. Which tables might be confused with each other and clarify the differences
+Based on the user's specific query "${query}", analyze each table's schema AND sample data to provide targeted descriptions that help the SQL agent understand which tables are most relevant for this specific query. 
+
+Focus on:
+1. Which tables likely contain the data needed for this specific query (analyze both column names and sample data values)
+2. Which tables should be prioritized for this type of question based on the actual data content
+3. Which tables might be confused with each other and clarify the differences using sample data examples
+4. What patterns you see in the sample data that indicate the table's purpose
+5. How the sample data values relate to the user's query requirements
 
 Provide descriptions in this format:
-**Table: table_name** - Relevance to query "${query}": [High/Medium/Low] - Brief description focusing on why this table is/isn't suitable for this specific query
+**Table: table_name** - Relevance to query "${query}": [High/Medium/Low] - Brief description focusing on why this table is/isn't suitable for this specific query, mentioning key columns and sample data insights that support your assessment.
 
-Keep descriptions concise (1-2 sentences) and focus on helping the SQL agent choose the RIGHT tables for this specific user query.`;
+Keep descriptions concise but informative (2-3 sentences) and focus on helping the SQL agent choose the RIGHT tables for this specific user query using both schema structure and actual data content.`;
 
-                                        const aiResponse = await azureClient.chat.completions.create({
-                                            model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4.1",
-                                            messages: [{
-                                                role: "user",
-                                                content: aiPrompt
-                                            }],
-                                            max_tokens: 2000,
-                                            temperature: 0.3,
-                                        });
+                                            const aiResponse = await azureClient.chat.completions.create({
+                                                model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4.1",
+                                                messages: [{
+                                                    role: "user",
+                                                    content: aiPrompt
+                                                }],
+                                                max_tokens: 2000,
+                                                temperature: 0.3,
+                                            });
 
-                                        if (aiResponse.choices && aiResponse.choices[0]?.message?.content) {
-                                            tableDescriptions = `
+                                            if (aiResponse.choices && aiResponse.choices[0]?.message?.content) {
+                                                tableDescriptions = `
 
-=== DATABASE TABLE PURPOSE DESCRIPTIONS (AI-Generated) ===
+=== DATABASE TABLE PURPOSE DESCRIPTIONS (AI-Generated with Sample Data Analysis) ===
 ${aiResponse.choices[0].message.content}
 
-This database contains ${allTables.length} tables with the following medical data purposes:
+This database contains ${allTables.length} tables with comprehensive schema and sample data analysis:
+${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
+                                                    const columnCount = Array.isArray(columns) ? columns.length : 0;
+                                                    const sampleRecordCount = globalTableSampleData[tableName] ? globalTableSampleData[tableName].length : 0;
+                                                    return `• ${tableName} (${columnCount} columns, ${sampleRecordCount} sample records analyzed)`;
+                                                }).join('\n')}
+========================`;
+                                                console.log('✅ Successfully generated AI table descriptions', tableDescriptions);
+                                            } else {
+                                                console.warn('⚠️ Azure OpenAI returned empty response for table descriptions');
+                                            }
+                                        } catch (aiError) {
+                                            console.warn('⚠️ Could not generate AI descriptions for tables:', aiError);
+                                            // Fallback: create basic descriptions without AI
+                                            tableDescriptions = `
+
+=== DATABASE TABLES OVERVIEW WITH SAMPLE DATA ===
+This database contains ${allTables.length} tables:
 ${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
                                                 const columnCount = Array.isArray(columns) ? columns.length : 0;
-                                                return `• ${tableName} (${columnCount} columns)`;
+                                                const sampleColumns = Array.isArray(columns) && columns.length > 0
+                                                    ? columns.slice(0, 5).map((col: any) => col.COLUMN_NAME).join(', ')
+                                                    : 'No columns available';
+
+                                                const sampleData = globalTableSampleData[tableName] || [];
+                                                const sampleDataPreview = sampleData.length > 0
+                                                    ? `\n  Sample Data (${sampleData.length} records): ${JSON.stringify(sampleData.slice(0, 2), null, 2)}`
+                                                    : '\n  No sample data available';
+
+                                                return `• **${tableName}** (${columnCount} columns) - Contains: ${sampleColumns}${columns.length > 5 ? ', ...' : ''}${sampleDataPreview}`;
                                             }).join('\n')}
 ========================`;
-                                            console.log('✅ Successfully generated AI table descriptions', tableDescriptions);
-                                        } else {
-                                            console.warn('⚠️ Azure OpenAI returned empty response for table descriptions');
                                         }
-                                    } catch (aiError) {
-                                        console.warn('⚠️ Could not generate AI descriptions for tables:', aiError);
+                                    } else {
+                                        console.warn('⚠️ Azure OpenAI not available, creating basic table overview');
                                         // Fallback: create basic descriptions without AI
                                         tableDescriptions = `
 
-=== DATABASE TABLES OVERVIEW ===
+=== DATABASE TABLES OVERVIEW WITH SAMPLE DATA ===
 This database contains ${allTables.length} tables:
 ${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
                                             const columnCount = Array.isArray(columns) ? columns.length : 0;
                                             const sampleColumns = Array.isArray(columns) && columns.length > 0
                                                 ? columns.slice(0, 5).map((col: any) => col.COLUMN_NAME).join(', ')
                                                 : 'No columns available';
-                                            return `• **${tableName}** (${columnCount} columns) - Contains: ${sampleColumns}${columns.length > 5 ? ', ...' : ''}`;
+
+                                            const sampleData = globalTableSampleData[tableName] || [];
+                                            const sampleDataPreview = sampleData.length > 0
+                                                ? `\n  Sample Data (${sampleData.length} records): ${JSON.stringify(sampleData.slice(0, 2), null, 2)}`
+                                                : '\n  No sample data available';
+
+                                            return `• **${tableName}** (${columnCount} columns) - Contains: ${sampleColumns}${columns.length > 5 ? ', ...' : ''}${sampleDataPreview}`;
                                         }).join('\n')}
 ========================`;
                                     }
                                 } else {
-                                    console.warn('⚠️ Azure OpenAI not available, creating basic table overview');
-                                    // Fallback: create basic descriptions without AI
-                                    tableDescriptions = `
-
-=== DATABASE TABLES OVERVIEW ===
-This database contains ${allTables.length} tables:
-${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
-                                        const columnCount = Array.isArray(columns) ? columns.length : 0;
-                                        const sampleColumns = Array.isArray(columns) && columns.length > 0
-                                            ? columns.slice(0, 5).map((col: any) => col.COLUMN_NAME).join(', ')
-                                            : 'No columns available';
-                                        return `• **${tableName}** (${columnCount} columns) - Contains: ${sampleColumns}${columns.length > 5 ? ', ...' : ''}`;
-                                    }).join('\n')}
-========================`;
+                                    tableDescriptions = '\n=== DATABASE TABLES ===\nNo tables found in the database.\n========================';
                                 }
-                            } else {
-                                tableDescriptions = '\n=== DATABASE TABLES ===\nNo tables found in the database.\n========================';
+                            } catch (tableError) {
+                                console.error('❌ Error getting table descriptions:', tableError);
+                                tableDescriptions = '\n=== DATABASE TABLES ===\nError retrieving table information.\n========================';
                             }
-                        } catch (tableError) {
-                            console.error('❌ Error getting table descriptions:', tableError);
-                            tableDescriptions = '\n=== DATABASE TABLES ===\nError retrieving table information.\n========================';
-                        }
 
-                        // The enhanced prompt with structured step-by-step approach and database version enforcement
-                        const enhancedQuery = `
+                            // The enhanced prompt with structured step-by-step approach and database version enforcement
+                            const enhancedQuery = `
 🎯 You are an expert SQL database analyst. Your task is to generate a WORKING SQL query that answers the user's question.
 
 **CRITICAL VERSION REQUIREMENTS:**
@@ -3549,9 +3762,21 @@ ${versionSpecificInstructions}
 - Use sql_db_list_tables() to see all available tables
 - Document what tables exist
 
-**STEP 2: EXAMINE RELEVANT SCHEMAS** 
+**STEP 2: EXAMINE RELEVANT SCHEMAS WITH SAMPLE DATA UNDERSTANDING** 
 - Use sql_db_schema("table_name") for tables that might contain data for the user's query
 - Focus on tables that match the user's question topic (patients, medications, lab results, etc.)
+- **IMPORTANT**: You have access to comprehensive table information that includes:
+  - Complete column schemas with data types
+  - Sample data from the first 3 records of each table
+  - AI-generated purpose descriptions based on actual data content
+- Use this sample data to understand the actual content and data patterns in each table
+- Sample data helps you choose the RIGHT tables by showing actual values and data relationships
+
+**STEP 2.1: LEVERAGE SAMPLE DATA INSIGHTS**
+- Review the sample data provided in the database context below
+- Use sample data values to understand which tables contain the information needed for the user's query
+- Look for patterns in the sample data that match the user's query requirements
+- Choose tables based on actual data content, not just table names or column names
 
 **STEP 3: GENERATE VERSION-COMPATIBLE SQL**
 - Create a SQL query compatible with ${databaseType.toUpperCase()} ${databaseVersionString}
@@ -3596,9 +3821,17 @@ ${versionSpecificInstructions}
 Available Features:
 - Table Discovery: Use sql_db_list_tables() to explore all available tables
 - Schema Analysis: Use sql_db_schema("table_name") to understand table structure
-- Query Execution: Generate and execute SQL queries based on discovered schema
+- **Sample Data Analysis**: Access to first 3 records from each table for deep data understanding
+- **AI-Powered Table Descriptions**: Intelligent analysis of table purposes based on actual data content
+- Query Execution: Generate and execute SQL queries based on discovered schema and sample data insights
 
-CRITICAL: Your queries will be executed against this specific database instance. Ensure compatibility with the version and features listed above.
+**SAMPLE DATA ADVANTAGE**: 
+- Each table includes sample data (first 3 records) to help you understand actual data content
+- Use sample data to verify which tables contain the information needed for the user's query
+- Sample data helps distinguish between similarly named tables by showing actual content
+- Look at sample values to understand data patterns, formats, and relationships
+
+CRITICAL: Your queries will be executed against this specific database instance. Ensure compatibility with the version and features listed above. Use the sample data provided to make intelligent table selection decisions.
 ========================
 
 ${tableDescriptions}
@@ -3670,19 +3903,22 @@ STEP 1: LIST ALL TABLES
 - Document the complete list of tables you find
 - This step is MANDATORY and must be performed FIRST
 
-STEP 2: IDENTIFY RELEVANT TABLES WITH STRICT ENTITY FOCUS
+STEP 2: IDENTIFY RELEVANT TABLES WITH STRICT ENTITY FOCUS AND SAMPLE DATA ANALYSIS
 - Based on the user query, identify which tables are likely to contain the requested information
+- **LEVERAGE SAMPLE DATA**: Use the provided sample data from each table to verify actual content and data patterns
 - **CRITICAL: Identify the PRIMARY ENTITY** that the user is asking about (e.g., patients, medications, diagnoses)
 - **CRITICAL: The PRIMARY ENTITY table should return COMPLETE records (all non-ID columns)**
 - **CRITICAL: Related tables should provide columns used in filtering/conditions AND relevant context**
-- For each potentially relevant table, explicitly state why you believe it's needed
-- Document your table selection decisions with clear reasoning
+- **SAMPLE DATA VERIFICATION**: Check sample data values to confirm tables contain the type of information the user is requesting
+- For each potentially relevant table, explicitly state why you believe it's needed based on both schema AND sample data analysis
+- Document your table selection decisions with clear reasoning including sample data insights
 - **CRITICAL CONDITION-BASED TABLE SELECTION RULE:**
   * **If multiple tables have similar or overlapping meanings/purposes, ALWAYS choose the table that contains the CONDITION COLUMNS from the user query**
-  * **PRIORITIZE tables where the user's WHERE/HAVING/filtering conditions can be applied**
+  * **USE SAMPLE DATA to verify which table actually contains the filtering criteria values**
+  * **PRIORITIZE tables where the user's WHERE/HAVING/filtering conditions can be applied AND verified with sample data**
   * **Only go to those tables where the user query condition lies - avoid tables that don't have the filtering criteria**
-  * **Example: If user asks "patients with high glucose", choose the table that has glucose columns, not just patient demographics**
-  * **Example: If user asks "medications with dosage > 100mg", choose the table that has dosage columns, not just medication names**
+  * **Example: If user asks "patients with high glucose", choose the table that has glucose columns AND sample data showing actual glucose values**
+  * **Example: If user asks "medications with dosage > 100mg", choose the table that has dosage columns AND sample data showing actual dosage values**
 - EXPERT TABLE SELECTION RULES:
   * If multiple tables seem related to the same medical concept (e.g., multiple patient tables, test tables, etc.), analyze the query context carefully
   * Choose tables based on QUERY SPECIFICITY: More specific user requirements should guide you to more specialized tables
@@ -3960,27 +4196,6 @@ Example 4: "Show recent lab tests from last 30 days"
 
 **KEY PRINCIPLE: Always choose the table that contains the condition columns first, then JOIN to get additional context if needed.**
 
-**TRADITIONAL COLUMN SELECTION EXAMPLES:**
-
-Example 1: "Find patients with the highest number of total medications and check if any of them are marked as Safe"
-- PRIMARY ENTITY: patients table
-- FOCUSED SQL: SELECT p.patient_name, p.age, m.safety_status, m.medication_name, m.total_count FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE m.safety_status = 'Safe' ORDER BY m.total_count DESC
-- REASONING: Include only essential patient info (name, age), the condition column (safety_status), and relevant medication context (medication_name, total_count) to answer the specific question about safe medications and counts
-
-Example 2: "Show medications for diabetic patients"
-- PRIMARY ENTITY: medications table  
-- FOCUSED SQL: SELECT m.medication_name, m.dosage, m.frequency, p.diagnosis, p.patient_name FROM medications m JOIN patients p ON m.patient_id = p.patient_id WHERE p.diagnosis LIKE '%diabetes%'
-- REASONING: Include only essential medication info (name, dosage, frequency), the condition column (diagnosis), and minimal patient context (patient_name) to answer the specific question about diabetic patient medications
-
-Example 3: "Find lab results where glucose levels are above 200"
-- PRIMARY ENTITY: lab_results table
-- FOCUSED SQL: SELECT lr.test_date, lr.glucose_level, p.patient_name, p.age FROM lab_results lr JOIN patients p ON lr.patient_id = p.patient_id WHERE lr.glucose_level > 200
-- REASONING: Include only essential lab info (test_date, glucose_level - the condition column), and minimal patient context (patient_name, age) to answer the specific question about high glucose levels
-
-Example 4: "Show patients with moderate risk categories and their therapeutic classes"
-- PRIMARY ENTITY: patients table
-- FOCUSED SQL: SELECT p.patient_name, p.age, p.gender, rd.risk_category, GROUP_CONCAT(DISTINCT mr.therapeutic_class) AS therapeutic_classes FROM patients p JOIN risk_details rd ON p.patient_id = rd.record_id JOIN medication_report mr ON p.patient_id = mr.record_id WHERE rd.risk_category LIKE 'Moderate%' GROUP BY p.patient_id, p.patient_name, p.age, p.gender, rd.risk_category
-- REASONING: Include only essential patient info (name, age, gender), the condition column (risk_category), and the requested therapeutic classes aggregation to answer the specific question
 
 **CRITICAL: The goal is to return FOCUSED information that directly answers the user's question (selective columns explicitly listed) AND provide minimal necessary context about WHY these records were selected by including condition columns.**
 
@@ -4038,932 +4253,932 @@ Remember: You are an EXPERT SQL Agent with INTELLIGENT SCHEMA EXPLORATION capabi
 USER QUERY: ${query}
 `;
 
-                        console.log('📝 Enhanced query with schema information:', enhancedQuery.substring(0, 200) + '...');
+                            console.log('📝 Enhanced query with schema information:', enhancedQuery.substring(0, 200) + '...');
 
-                        // Configure the sqlAgent for intelligent query understanding and generation
-                        const agentConfig = {
-                            input: enhancedQuery,
-                            // Allow intelligent decision-making about schema exploration
-                            // The agent will decide when schema exploration is needed based on query complexity
-                        };
+                            // Configure the sqlAgent for intelligent query understanding and generation
+                            const agentConfig = {
+                                input: enhancedQuery,
+                                // Allow intelligent decision-making about schema exploration
+                                // The agent will decide when schema exploration is needed based on query complexity
+                            };
 
-                        // Enhanced callback system to track intelligent query understanding and generation
-                        agentResult = await sqlAgent.call(agentConfig, {
-                            callbacks: [{
-                                handleAgentAction: (action: any) => {
-                                    // 🎯 ENHANCED SQL CAPTURE SYSTEM
-                                    console.log('🧠 Agent action:', action.tool);
-                                    console.log('🔍 Action input type:', typeof action.toolInput);
-                                    console.log('🔍 Action input preview:', typeof action.toolInput === 'string' ?
-                                        action.toolInput.substring(0, 200) + '...' :
-                                        JSON.stringify(action.toolInput).substring(0, 200) + '...');
+                            // Enhanced callback system to track intelligent query understanding and generation
+                            agentResult = await sqlAgent.call(agentConfig, {
+                                callbacks: [{
+                                    handleAgentAction: (action: any) => {
+                                        // 🎯 ENHANCED SQL CAPTURE SYSTEM
+                                        console.log('🧠 Agent action:', action.tool);
+                                        console.log('🔍 Action input type:', typeof action.toolInput);
+                                        console.log('🔍 Action input preview:', typeof action.toolInput === 'string' ?
+                                            action.toolInput.substring(0, 200) + '...' :
+                                            JSON.stringify(action.toolInput).substring(0, 200) + '...');
 
-                                    // Enhanced SQL capture from multiple tool types
-                                    const sqlTools = [
-                                        'sql_db_query',
-                                        'query_sql_db',
-                                        'sql_db_query_checker',
-                                        'query-checker',
-                                        'query-sql',
-                                        'queryCheckerTool',
-                                        'sql_query'
-                                    ];
+                                        // Enhanced SQL capture from multiple tool types
+                                        const sqlTools = [
+                                            'sql_db_query',
+                                            'query_sql_db',
+                                            'sql_db_query_checker',
+                                            'query-checker',
+                                            'query-sql',
+                                            'queryCheckerTool',
+                                            'sql_query'
+                                        ];
 
-                                    if (sqlTools.includes(action.tool)) {
-                                        console.log(`🎯 SQL Tool detected: ${action.tool}`);
+                                        if (sqlTools.includes(action.tool)) {
+                                            console.log(`🎯 SQL Tool detected: ${action.tool}`);
 
-                                        let sqlContent = '';
-                                        if (typeof action.toolInput === 'string') {
-                                            sqlContent = action.toolInput;
-                                        } else if (action.toolInput && typeof action.toolInput === 'object') {
-                                            // Handle different input formats
-                                            sqlContent = action.toolInput.query || action.toolInput.sql || action.toolInput.input || '';
-                                        }
-
-                                        if (sqlContent && sqlContent.toLowerCase().includes('select')) {
-                                            console.log('💡 Capturing SQL from tool:', action.tool);
-                                            console.log('📝 Raw SQL:', sqlContent);
-
-                                            debugInfo.originalQueries.push(`[${action.tool}] ${sqlContent}`);
-
-                                            // Enhanced version-aware SQL cleaning
-                                            const cleanedSql = cleanSQLQuery(sqlContent);
-                                            console.log('📝 Raw SQL PROCESSED:', cleanedSql);
-                                            if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
-                                                capturedSQLQueries.push(cleanedSql);
+                                            let sqlContent = '';
+                                            if (typeof action.toolInput === 'string') {
+                                                sqlContent = action.toolInput;
+                                            } else if (action.toolInput && typeof action.toolInput === 'object') {
+                                                // Handle different input formats
+                                                sqlContent = action.toolInput.query || action.toolInput.sql || action.toolInput.input || '';
                                             }
-                                            // if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
-                                            //     // Verify the SQL is version-compatible before adding it
-                                            //     if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
 
-                                            //         console.log('✅ Successfully captured version-compatible SQL:', cleanedSql);
-                                            //     } else {
-                                            //         console.log('⚠️ Rejected non-version-compatible SQL:', cleanedSql);
-                                            //         debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL: ' + cleanedSql);
-                                            //     }
-                                            // } else {
-                                            //     console.log('⚠️ SQL cleaning failed or returned invalid result');
-                                            // }
+                                            if (sqlContent && sqlContent.toLowerCase().includes('select')) {
+                                                console.log('💡 Capturing SQL from tool:', action.tool);
+                                                console.log('📝 Raw SQL:', sqlContent);
+
+                                                debugInfo.originalQueries.push(`[${action.tool}] ${sqlContent}`);
+
+                                                // Enhanced version-aware SQL cleaning
+                                                const cleanedSql = cleanSQLQuery(sqlContent);
+                                                console.log('📝 Raw SQL PROCESSED:', cleanedSql);
+                                                if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
+                                                    capturedSQLQueries.push(cleanedSql);
+                                                }
+                                                // if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
+                                                //     // Verify the SQL is version-compatible before adding it
+                                                //     if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+
+                                                //         console.log('✅ Successfully captured version-compatible SQL:', cleanedSql);
+                                                //     } else {
+                                                //         console.log('⚠️ Rejected non-version-compatible SQL:', cleanedSql);
+                                                //         debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL: ' + cleanedSql);
+                                                //     }
+                                                // } else {
+                                                //     console.log('⚠️ SQL cleaning failed or returned invalid result');
+                                                // }
+                                            }
                                         }
-                                    }
 
-                                    // Track schema exploration for complex queries
-                                    if (action.tool === 'sql_db_schema') {
-                                        console.log('✅ Agent intelligently exploring schema for query understanding');
-                                        debugInfo.sqlCorrections.push('Schema exploration for query scope analysis');
-                                        intermediateSteps.push({
-                                            tool: 'sql_db_schema',
-                                            toolInput: action.toolInput,
-                                            note: 'Intelligent schema exploration for query understanding'
-                                        });
-                                    }
-
-                                    // Track table listing for query scope
-                                    if (action.tool === 'sql_db_list_tables') {
-                                        console.log('📋 Agent checking available tables for query scope');
-                                        debugInfo.sqlCorrections.push('Table availability check for query scope');
-                                        intermediateSteps.push({
-                                            tool: 'sql_db_list_tables',
-                                            toolInput: action.toolInput,
-                                            note: 'Understanding available tables for query scope'
-                                        });
-                                    }
-
-                                    // Capture SQL generation with understanding
-                                    if (action.tool === 'query-checker' || action.tool === 'query-sql') {
-                                        const sql = String(action.toolInput);
-                                        console.log('💡 Agent generating SQL based on query understanding');
-                                        debugInfo.originalQueries.push(sql);
-
-                                        // Enhanced version-aware SQL cleaning
-                                        const cleanedSql = cleanSQLQuery(sql);
-                                        if (cleanedSql) {
-                                            capturedSQLQueries.push(cleanedSql);
-                                            // Verify the SQL is version-compatible before adding it
-                                            // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
-                                            //     console.log('✅ Generated version-compatible SQL:', cleanedSql);
-                                            // } else {
-                                            //     console.log('⚠️ Rejected non-version-compatible SQL:', cleanedSql);
-                                            //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL: ' + cleanedSql);
-                                            // }
+                                        // Track schema exploration for complex queries
+                                        if (action.tool === 'sql_db_schema') {
+                                            console.log('✅ Agent intelligently exploring schema for query understanding');
+                                            debugInfo.sqlCorrections.push('Schema exploration for query scope analysis');
+                                            intermediateSteps.push({
+                                                tool: 'sql_db_schema',
+                                                toolInput: action.toolInput,
+                                                note: 'Intelligent schema exploration for query understanding'
+                                            });
                                         }
-                                    }
 
-                                    // Track all SQL-related actions for comprehensive understanding
-                                    if (action.tool === 'sql_db_query' ||
-                                        action.tool === 'query_sql_db' ||
-                                        action.tool === 'sql_db_schema' ||
-                                        action.tool === 'sql_db_list_tables') {
+                                        // Track table listing for query scope
+                                        if (action.tool === 'sql_db_list_tables') {
+                                            console.log('📋 Agent checking available tables for query scope');
+                                            debugInfo.sqlCorrections.push('Table availability check for query scope');
+                                            intermediateSteps.push({
+                                                tool: 'sql_db_list_tables',
+                                                toolInput: action.toolInput,
+                                                note: 'Understanding available tables for query scope'
+                                            });
+                                        }
 
-                                        console.log('🔧 Tool action for query understanding:', action.tool);
-                                        intermediateSteps.push({
-                                            tool: action.tool,
-                                            toolInput: action.toolInput,
-                                            note: 'Part of intelligent query understanding process'
-                                        });
-
-                                        // Capture SQL queries that demonstrate understanding
-                                        if (typeof action.toolInput === 'string' &&
-                                            (action.toolInput.toLowerCase().includes('select') ||
-                                                action.toolInput.toLowerCase().includes('from'))) {
+                                        // Capture SQL generation with understanding
+                                        if (action.tool === 'query-checker' || action.tool === 'query-sql') {
+                                            const sql = String(action.toolInput);
+                                            console.log('💡 Agent generating SQL based on query understanding');
+                                            debugInfo.originalQueries.push(sql);
 
                                             // Enhanced version-aware SQL cleaning
-                                            const cleanedSql = cleanSQLQuery(action.toolInput);
+                                            const cleanedSql = cleanSQLQuery(sql);
                                             if (cleanedSql) {
-                                                capturedSQLQueries.push(cleanedSql);
+                                                // capturedSQLQueries.push(cleanedSql);
                                                 // Verify the SQL is version-compatible before adding it
                                                 // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
-                                                //     console.log('✅ Captured version-compatible SQL:', cleanedSql);
+                                                //     console.log('✅ Generated version-compatible SQL:', cleanedSql);
                                                 // } else {
                                                 //     console.log('⚠️ Rejected non-version-compatible SQL:', cleanedSql);
                                                 //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL: ' + cleanedSql);
                                                 // }
                                             }
                                         }
-                                    }
-                                    return action;
-                                },
-                                handleChainStart: (chain: any) => {
-                                    console.log('🧠 Starting intelligent query analysis:', chain.type);
-                                },
-                                handleChainEnd: (output: any) => {
-                                    console.log('✅ Intelligent query analysis completed');
-                                    console.log('📊 Analysis output:', typeof output === 'string' ?
-                                        output.substring(0, 200) + '...' :
-                                        JSON.stringify(output).substring(0, 200) + '...');
-                                },
-                                handleToolStart: (tool: any) => {
-                                    console.log('🔧 Starting tool for query understanding:', tool.name);
-                                },
-                                handleToolEnd: (output: any) => {
-                                    console.log('✅ Tool completed for query understanding');
-                                    console.log('📊 Tool output type:', typeof output);
-                                    console.log('📊 Tool output preview:', typeof output === 'string' ?
-                                        output.substring(0, 200) + '...' :
-                                        JSON.stringify(output).substring(0, 200) + '...');
 
-                                    // Enhanced SQL extraction from tool outputs
-                                    let outputString = '';
-                                    if (typeof output === 'string') {
-                                        outputString = output;
-                                    } else if (output && typeof output === 'object') {
-                                        // Try to extract string content from object
-                                        outputString = output.result || output.output || output.text || JSON.stringify(output);
-                                    }
+                                        // Track all SQL-related actions for comprehensive understanding
+                                        if (action.tool === 'sql_db_query' ||
+                                            action.tool === 'query_sql_db' ||
+                                            action.tool === 'sql_db_schema' ||
+                                            action.tool === 'sql_db_list_tables') {
 
-                                    // Look for SQL patterns in the output
-                                    if (outputString && outputString.toLowerCase().includes('select')) {
-                                        console.log('💡 Found SQL in tool output');
+                                            console.log('🔧 Tool action for query understanding:', action.tool);
+                                            intermediateSteps.push({
+                                                tool: action.tool,
+                                                toolInput: action.toolInput,
+                                                note: 'Part of intelligent query understanding process'
+                                            });
 
-                                        // Try to extract SQL from the output with version compatibility check
-                                        const cleanedSql = cleanSQLQuery(outputString);
-                                        if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
-                                            // Verify the SQL is version-compatible before adding it
-                                            console.log('✅ Captured version-compatible SQL from tool output:', cleanedSql);
-                                            capturedSQLQueries.push(cleanedSql);
-                                            // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
-                                            //     debugInfo.originalQueries.push(`[Tool Output] ${cleanedSql}`);
-                                            // } else {
-                                            //     console.log('⚠️ Rejected non-version-compatible SQL from tool output:', cleanedSql);
-                                            //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL from tool output: ' + cleanedSql);
-                                            // }
+                                            // Capture SQL queries that demonstrate understanding
+                                            if (typeof action.toolInput === 'string' &&
+                                                (action.toolInput.toLowerCase().includes('select') ||
+                                                    action.toolInput.toLowerCase().includes('from'))) {
+
+                                                // Enhanced version-aware SQL cleaning
+                                                const cleanedSql = cleanSQLQuery(action.toolInput);
+                                                if (cleanedSql) {
+                                                    // capturedSQLQueries.push(cleanedSql);
+                                                    // Verify the SQL is version-compatible before adding it
+                                                    // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                                                    //     console.log('✅ Captured version-compatible SQL:', cleanedSql);
+                                                    // } else {
+                                                    //     console.log('⚠️ Rejected non-version-compatible SQL:', cleanedSql);
+                                                    //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL: ' + cleanedSql);
+                                                    // }
+                                                }
+                                            }
+                                        }
+                                        return action;
+                                    },
+                                    handleChainStart: (chain: any) => {
+                                        console.log('🧠 Starting intelligent query analysis:', chain.type);
+                                    },
+                                    handleChainEnd: (output: any) => {
+                                        console.log('✅ Intelligent query analysis completed');
+                                        console.log('📊 Analysis output:', typeof output === 'string' ?
+                                            output.substring(0, 200) + '...' :
+                                            JSON.stringify(output).substring(0, 200) + '...');
+                                    },
+                                    handleToolStart: (tool: any) => {
+                                        console.log('🔧 Starting tool for query understanding:', tool.name);
+                                    },
+                                    handleToolEnd: (output: any) => {
+                                        console.log('✅ Tool completed for query understanding');
+                                        console.log('📊 Tool output type:', typeof output);
+                                        console.log('📊 Tool output preview:', typeof output === 'string' ?
+                                            output.substring(0, 200) + '...' :
+                                            JSON.stringify(output).substring(0, 200) + '...');
+
+                                        // Enhanced SQL extraction from tool outputs
+                                        let outputString = '';
+                                        if (typeof output === 'string') {
+                                            outputString = output;
+                                        } else if (output && typeof output === 'object') {
+                                            // Try to extract string content from object
+                                            outputString = output.result || output.output || output.text || JSON.stringify(output);
+                                        }
+
+                                        // Look for SQL patterns in the output
+                                        if (outputString && outputString.toLowerCase().includes('select')) {
+                                            console.log('💡 Found SQL in tool output');
+
+                                            // Try to extract SQL from the output with version compatibility check
+                                            const cleanedSql = cleanSQLQuery(outputString);
+                                            if (cleanedSql && cleanedSql !== ';' && cleanedSql.length > 10) {
+                                                // Verify the SQL is version-compatible before adding it
+                                                console.log('✅ Captured version-compatible SQL from tool output:', cleanedSql);
+                                                // capturedSQLQueries.push(cleanedSql);
+                                                // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                                                //     debugInfo.originalQueries.push(`[Tool Output] ${cleanedSql}`);
+                                                // } else {
+                                                //     console.log('⚠️ Rejected non-version-compatible SQL from tool output:', cleanedSql);
+                                                //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL from tool output: ' + cleanedSql);
+                                                // }
+                                            }
+                                        }
+
+                                        // Validate schema understanding
+                                        if (outputString && outputString.includes('COLUMN_NAME')) {
+                                            console.log('📊 Schema information captured for intelligent query generation');
+                                            debugInfo.sqlCorrections.push('Schema understood for intelligent query generation');
                                         }
                                     }
+                                }]
+                            });
 
-                                    // Validate schema understanding
-                                    if (outputString && outputString.includes('COLUMN_NAME')) {
-                                        console.log('📊 Schema information captured for intelligent query generation');
-                                        debugInfo.sqlCorrections.push('Schema understood for intelligent query generation');
+                            // Store raw response for debugging
+                            rawAgentResponse = JSON.stringify(agentResult, null, 2);
+                            console.log('🔍 Agent raw response:', rawAgentResponse);
+
+                            // Also try to extract SQL from the final output with version compatibility check
+                            // if (agentResult.output && typeof agentResult.output === 'string') {
+                            //     const cleanedSql = cleanSQLQuery(agentResult.output);
+                            //     if (cleanedSql) {
+                            //         // Verify the SQL is version-compatible before adding it
+                            //         console.log('✅ Captured version-compatible SQL from final output:', cleanedSql);
+                            //         capturedSQLQueries.push(cleanedSql);
+                            //         // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
+                            //         // } else {
+                            //         //     console.log('⚠️ Rejected non-version-compatible SQL from final output:', cleanedSql);
+                            //         //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL from final output: ' + cleanedSql);
+                            //         // }
+                            //     }
+                            // }
+
+                        } catch (agentError: any) {
+                            console.error('❌ SQL Agent error:', agentError.message);
+                            return res.status(500).json({
+                                error: 'SQL Agent execution failed',
+                                message: agentError.message,
+                                chain_metadata: chainMetadata,
+                                timestamp: new Date().toISOString()
+                            });
+                        }
+                    }
+
+                    // Helper function to check if SQL is compatible with the database version
+                    function isCompatibleWithDatabaseVersion(sql: string, dbType: string, versionInfo: any): boolean {
+                        if (!versionInfo) return true; // If version info not available, assume compatible
+
+                        const sqlLower = sql.toLowerCase();
+
+                        // Check for MySQL version compatibility
+                        if (dbType.toLowerCase() === 'mysql') {
+                            // Check JSON function compatibility
+                            if (!versionInfo.supportsJSON && (
+                                sqlLower.includes('json_extract') ||
+                                sqlLower.includes('json_') ||
+                                sqlLower.includes('->')
+                            )) {
+                                return false;
+                            }
+
+                            // Check window function compatibility
+                            if (!versionInfo.supportsWindowFunctions && (
+                                sqlLower.includes('over (') ||
+                                sqlLower.includes('row_number()') ||
+                                sqlLower.includes('rank()') ||
+                                sqlLower.includes('dense_rank()')
+                            )) {
+                                return false;
+                            }
+
+                            // Check CTE compatibility
+                            if (!versionInfo.supportsCTE && (
+                                sqlLower.includes('with ') &&
+                                (sqlLower.includes(' as (select') || sqlLower.includes(' as(select'))
+                            )) {
+                                return false;
+                            }
+
+                            // Check GROUP BY compatibility with only_full_group_by mode
+                            if (versionInfo.hasOnlyFullGroupBy && sqlLower.includes('group by')) {
+                                // This is a simplified check that should be expanded for production
+                                // A full implementation would parse the SQL and verify all non-aggregated columns
+                                // in the SELECT clause are included in the GROUP BY clause
+
+                                // Extract SELECT and GROUP BY clauses for basic validation
+                                const selectMatch = /select\s+(.*?)\s+from/i.exec(sqlLower);
+                                const groupByMatch = /group\s+by\s+(.*?)(?:having|order|limit|$)/i.exec(sqlLower);
+
+                                if (selectMatch && groupByMatch) {
+                                    const selectColumns = selectMatch[1].split(',').map(c => c.trim());
+                                    const groupByColumns = groupByMatch[1].split(',').map(c => c.trim());
+
+                                    // Very basic check - in a real implementation this would be more sophisticated
+                                    // to handle aliases, expressions, etc.
+                                    for (const col of selectColumns) {
+                                        // Skip aggregated columns
+                                        if (col.includes('count(') || col.includes('sum(') ||
+                                            col.includes('avg(') || col.includes('min(') ||
+                                            col.includes('max(') || col.includes(' as ')) {
+                                            continue;
+                                        }
+
+                                        // Check if non-aggregated column is in GROUP BY
+                                        if (!groupByColumns.some(g => g === col || col.endsWith('.' + g))) {
+                                            return false;
+                                        }
                                     }
                                 }
-                            }]
-                        });
+                            }
+                        }
 
-                        // Store raw response for debugging
-                        rawAgentResponse = JSON.stringify(agentResult, null, 2);
-                        console.log('🔍 Agent raw response:', rawAgentResponse);
+                        return true; // If no incompatibilities found
+                    }
 
-                        // Also try to extract SQL from the final output with version compatibility check
-                        // if (agentResult.output && typeof agentResult.output === 'string') {
-                        //     const cleanedSql = cleanSQLQuery(agentResult.output);
-                        //     if (cleanedSql) {
-                        //         // Verify the SQL is version-compatible before adding it
-                        //         console.log('✅ Captured version-compatible SQL from final output:', cleanedSql);
-                        //         capturedSQLQueries.push(cleanedSql);
-                        //         // if (isCompatibleWithDatabaseVersion(cleanedSql, databaseType, databaseVersionInfo)) {
-                        //         // } else {
-                        //         //     console.log('⚠️ Rejected non-version-compatible SQL from final output:', cleanedSql);
-                        //         //     debugInfo.sqlCorrections.push('Rejected non-version-compatible SQL from final output: ' + cleanedSql);
-                        //         // }
-                        //     }
-                        // }
+                    // Initialize agentResult if it wasn't set (safety check)
+                    if (!agentResult) {
+                        agentResult = {
+                            output: 'No agent result available',
+                            type: 'fallback'
+                        };
+                    }
 
-                    } catch (agentError: any) {
-                        console.error('❌ SQL Agent error:', agentError.message);
-                        return res.status(500).json({
-                            error: 'SQL Agent execution failed',
-                            message: agentError.message,
+                    // Step 2: Extract SQL query with enhanced methods
+                    console.log('📊 Step 2: Extracting SQL from agent response...');
+                    let extractedSQL = '';
+
+                    // If we have chain-generated SQL, use it
+                    if (chainSQLGenerated) {
+                        console.log({ chainSQLGenerated });
+                        extractedSQL = cleanSQLQuery(chainSQLGenerated);
+                        console.log('✅ Using chain-generated SQL');
+                    } else {
+                        // Method 1: Use already captured SQL queries from callbacks
+                        if (capturedSQLQueries.length > 0) {
+                            console.log(`🔍 Captured ${capturedSQLQueries.length} queries:`, capturedSQLQueries);
+
+                            // Filter out empty or invalid queries first
+                            const validQueries = capturedSQLQueries.filter(sql => {
+                                const cleaned = sql.trim();
+                                return cleaned &&
+                                    cleaned !== ';' &&
+                                    cleaned.length > 5 &&
+                                    cleaned.toLowerCase().includes('select') &&
+                                    cleaned.toLowerCase().includes('from');
+                            });
+
+                            console.log(`🔍 Found ${validQueries.length} valid queries:`, validQueries);
+
+                            if (validQueries.length > 0) {
+                                // Sort by completeness and length - prefer complete queries
+                                // const sortedQueries = validQueries.sort((a, b) => {
+                                //     const aComplete = isCompleteSQLQuery(a);
+                                //     const bComplete = isCompleteSQLQuery(b);
+
+                                //     // Prioritize complete queries
+                                //     if (aComplete && !bComplete) return -1;
+                                //     if (!aComplete && bComplete) return 1;
+
+                                //     // If both complete or both incomplete, sort by length
+                                //     return b.length - a.length;
+                                // });
+
+                                // Get the best SQL query
+                                console.log('ajajajaj', validQueries)
+                                extractedSQL = validQueries[validQueries.length - 1];
+                                debugInfo.extractionAttempts.push(`Selected best query: ${extractedSQL}`);
+                                console.log('✅ Found valid SQL from captured queries:', extractedSQL);
+                            } else {
+                                console.log('⚠️ No valid SQL found in captured queries');
+                            }
+                        }
+
+                        // Method 2: Try to extract from agent output if still not found
+                        if (!extractedSQL && agentResult && agentResult.output) {
+                            console.log('🔍 Attempting to extract SQL from agent output...');
+                            extractedSQL = cleanSQLQuery(agentResult.output);
+                            if (extractedSQL && extractedSQL !== ';' && extractedSQL.length > 5) {
+                                debugInfo.extractionAttempts.push('Extracted from agent output: ' + extractedSQL);
+                                console.log('✅ Found SQL in agent output:', extractedSQL);
+                            } else {
+                                console.log('❌ No valid SQL found in agent output');
+                                extractedSQL = '';
+                            }
+                        }
+                    }
+
+                    // Special handling for incomplete SQL queries
+                    if (extractedSQL && !isCompleteSQLQuery(extractedSQL)) {
+                        console.log('⚠️ Detected incomplete SQL query');
+
+                        const fixedSQL = fixIncompleteSQLQuery(extractedSQL);
+                        if (fixedSQL !== extractedSQL) {
+                            debugInfo.extractionAttempts.push('Fixed incomplete SQL: ' + fixedSQL);
+                            console.log('✅ Fixed incomplete SQL query');
+                            extractedSQL = fixedSQL;
+                        }
+                    }
+
+                    if (!extractedSQL) {
+                        console.log('❌ No SQL extracted from agent - attempting intelligent fallback...');
+
+                        // INTELLIGENT FALLBACK: Generate a reasonable query based on user intent
+                        const userQueryLower = query.toLowerCase();
+                        let fallbackSQL = '';
+
+                        // Analyze user intent and create appropriate fallback
+                        if (userQueryLower.includes('patient')) {
+                            if (userQueryLower.includes('medication') || userQueryLower.includes('drug')) {
+                                // Patient + medication query
+                                fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
+                                console.log('🎯 Using patient+medication fallback');
+                            } else if (userQueryLower.includes('lab') || userQueryLower.includes('test') || userQueryLower.includes('result')) {
+                                // Patient + lab results query
+                                fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
+                                console.log('🎯 Using patient+lab fallback');
+                            } else if (userQueryLower.includes('risk') || userQueryLower.includes('high') || userQueryLower.includes('low')) {
+                                // Patient + risk query
+                                fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
+                                console.log('🎯 Using patient+risk fallback');
+                            } else {
+                                // General patient query
+                                fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
+                                console.log('🎯 Using general patient fallback');
+                            }
+                        } else if (userQueryLower.includes('medication') || userQueryLower.includes('drug')) {
+                            // Medication-focused query
+                            fallbackSQL = "SELECT p.patient_id, p.medications FROM patients p WHERE p.medications IS NOT NULL LIMIT 10;";
+                            console.log('🎯 Using medication fallback');
+                        } else if (userQueryLower.includes('risk')) {
+                            // Risk-focused query  
+                            fallbackSQL = "SELECT rd.record_id, rd.risk_category FROM risk_details rd LIMIT 10;";
+                            console.log('🎯 Using risk fallback');
+                        } else {
+                            // Default fallback - basic patient data
+                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state FROM patients p LIMIT 10;";
+                            console.log('🎯 Using default patient fallback');
+                        }
+
+                        if (fallbackSQL) {
+                            extractedSQL = fallbackSQL;
+                            debugInfo.extractionAttempts.push(`Intelligent fallback used: ${fallbackSQL}`);
+                            console.log('✅ Applied intelligent fallback SQL:', fallbackSQL);
+                        }
+                    }
+
+                    if (!extractedSQL) {
+                        return res.status(400).json({
+                            error: 'No valid SQL query found in agent response',
+                            agent_response: agentResult ? agentResult.output : rawAgentResponse,
+                            intermediate_steps: intermediateSteps,
+                            captured_queries: capturedSQLQueries,
+                            debug_info: debugInfo,
                             chain_metadata: chainMetadata,
                             timestamp: new Date().toISOString()
                         });
                     }
-                }
 
-                // Helper function to check if SQL is compatible with the database version
-                function isCompatibleWithDatabaseVersion(sql: string, dbType: string, versionInfo: any): boolean {
-                    if (!versionInfo) return true; // If version info not available, assume compatible
+                    console.log('🔧 Extracted SQL:', extractedSQL);
 
-                    const sqlLower = sql.toLowerCase();
+                    // Step 3: Final SQL validation and cleaning
+                    console.log('📊 Step 3: Final SQL validation and cleaning...');
 
-                    // Check for MySQL version compatibility
-                    if (dbType.toLowerCase() === 'mysql') {
-                        // Check JSON function compatibility
-                        if (!versionInfo.supportsJSON && (
-                            sqlLower.includes('json_extract') ||
-                            sqlLower.includes('json_') ||
-                            sqlLower.includes('->')
-                        )) {
-                            return false;
-                        }
+                    // Apply final cleaning to ensure we have a valid SQL query
+                    let finalSQL = extractedSQL;
 
-                        // Check window function compatibility
-                        if (!versionInfo.supportsWindowFunctions && (
-                            sqlLower.includes('over (') ||
-                            sqlLower.includes('row_number()') ||
-                            sqlLower.includes('rank()') ||
-                            sqlLower.includes('dense_rank()')
-                        )) {
-                            return false;
-                        }
-
-                        // Check CTE compatibility
-                        if (!versionInfo.supportsCTE && (
-                            sqlLower.includes('with ') &&
-                            (sqlLower.includes(' as (select') || sqlLower.includes(' as(select'))
-                        )) {
-                            return false;
-                        }
-
-                        // Check GROUP BY compatibility with only_full_group_by mode
-                        if (versionInfo.hasOnlyFullGroupBy && sqlLower.includes('group by')) {
-                            // This is a simplified check that should be expanded for production
-                            // A full implementation would parse the SQL and verify all non-aggregated columns
-                            // in the SELECT clause are included in the GROUP BY clause
-
-                            // Extract SELECT and GROUP BY clauses for basic validation
-                            const selectMatch = /select\s+(.*?)\s+from/i.exec(sqlLower);
-                            const groupByMatch = /group\s+by\s+(.*?)(?:having|order|limit|$)/i.exec(sqlLower);
-
-                            if (selectMatch && groupByMatch) {
-                                const selectColumns = selectMatch[1].split(',').map(c => c.trim());
-                                const groupByColumns = groupByMatch[1].split(',').map(c => c.trim());
-
-                                // Very basic check - in a real implementation this would be more sophisticated
-                                // to handle aliases, expressions, etc.
-                                for (const col of selectColumns) {
-                                    // Skip aggregated columns
-                                    if (col.includes('count(') || col.includes('sum(') ||
-                                        col.includes('avg(') || col.includes('min(') ||
-                                        col.includes('max(') || col.includes(' as ')) {
-                                        continue;
-                                    }
-
-                                    // Check if non-aggregated column is in GROUP BY
-                                    if (!groupByColumns.some(g => g === col || col.endsWith('.' + g))) {
-                                        return false;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    return true; // If no incompatibilities found
-                }
-
-                // Initialize agentResult if it wasn't set (safety check)
-                if (!agentResult) {
-                    agentResult = {
-                        output: 'No agent result available',
-                        type: 'fallback'
-                    };
-                }
-
-                // Step 2: Extract SQL query with enhanced methods
-                console.log('📊 Step 2: Extracting SQL from agent response...');
-                let extractedSQL = '';
-
-                // If we have chain-generated SQL, use it
-                if (chainSQLGenerated) {
-                    console.log({ chainSQLGenerated });
-                    extractedSQL = cleanSQLQuery(chainSQLGenerated);
-                    console.log('✅ Using chain-generated SQL');
-                } else {
-                    // Method 1: Use already captured SQL queries from callbacks
-                    if (capturedSQLQueries.length > 0) {
-                        console.log(`🔍 Captured ${capturedSQLQueries.length} queries:`, capturedSQLQueries);
-
-                        // Filter out empty or invalid queries first
-                        const validQueries = capturedSQLQueries.filter(sql => {
-                            const cleaned = sql.trim();
-                            return cleaned &&
-                                cleaned !== ';' &&
-                                cleaned.length > 5 &&
-                                cleaned.toLowerCase().includes('select') &&
-                                cleaned.toLowerCase().includes('from');
+                    if (!finalSQL) {
+                        return res.status(400).json({
+                            error: 'Failed to produce a valid SQL query',
+                            extracted_sql: extractedSQL,
+                            debug_info: debugInfo,
+                            timestamp: new Date().toISOString()
                         });
+                    }
 
-                        console.log(`🔍 Found ${validQueries.length} valid queries:`, validQueries);
+                    // NEW: Enhanced SQL syntax validation before execution
+                    console.log('📊 Step 3.1: Enhanced SQL syntax validation...');
+                    // const syntaxValidation = finalSQL;
 
-                        if (validQueries.length > 0) {
-                            // Sort by completeness and length - prefer complete queries
-                            // const sortedQueries = validQueries.sort((a, b) => {
-                            //     const aComplete = isCompleteSQLQuery(a);
-                            //     const bComplete = isCompleteSQLQuery(b);
+                    // if (false) {
+                    //     console.log('⚠️ SQL syntax issues detected:', syntaxValidation.errors);
+                    //     debugInfo.sqlCorrections.push(`Syntax issues found: ${syntaxValidation.errors.join(', ')}`);
 
-                            //     // Prioritize complete queries
-                            //     if (aComplete && !bComplete) return -1;
-                            //     if (!aComplete && bComplete) return 1;
+                    //     // Use the fixed SQL if available and different from original
+                    //     if (syntaxValidation.fixedSQL && syntaxValidation.fixedSQL !== finalSQL) {
+                    //         console.log('🔧 Applied automatic syntax fixes');
+                    //         console.log('🔧 Original SQL:', finalSQL);
+                    //         console.log('🔧 Fixed SQL:', syntaxValidation.fixedSQL);
 
-                            //     // If both complete or both incomplete, sort by length
-                            //     return b.length - a.length;
-                            // });
+                    //         finalSQL = syntaxValidation.fixedSQL;
+                    //         debugInfo.sqlCorrections.push('Applied automatic syntax corrections');
 
-                            // Get the best SQL query
-                            console.log('ajajajaj', validQueries)
-                            extractedSQL = validQueries[validQueries.length - 1];
-                            debugInfo.extractionAttempts.push(`Selected best query: ${extractedSQL}`);
-                            console.log('✅ Found valid SQL from captured queries:', extractedSQL);
-                        } else {
-                            console.log('⚠️ No valid SQL found in captured queries');
+                    //         // Re-validate the fixed SQL to ensure it's now valid
+                    //         const revalidation = validateSQLSyntax(finalSQL);
+                    //         if (!revalidation.isValid) {
+                    //             console.log('❌ Fixed SQL still has issues:', revalidation.errors);
+                    //             debugInfo.sqlCorrections.push(`Fixed SQL still has issues: ${revalidation.errors.join(', ')}`);
+
+                    //             // Try one more round of fixes
+                    //             if (revalidation.fixedSQL && revalidation.fixedSQL !== finalSQL) {
+                    //                 finalSQL = revalidation.fixedSQL;
+                    //                 console.log('🔧 Applied second round of fixes:', finalSQL);
+                    //                 debugInfo.sqlCorrections.push('Applied second round of automatic corrections');
+                    //             }
+                    //         } else {
+                    //             console.log('✅ Fixed SQL now passes validation');
+                    //             debugInfo.sqlCorrections.push('Fixed SQL passes validation');
+                    //         }
+                    //     } else {
+                    //         console.log('❌ Could not automatically fix SQL syntax issues');
+                    //         return res.status(400).json({
+                    //             error: 'SQL syntax validation failed',
+                    //             message: 'The generated SQL query has syntax errors that could not be automatically fixed',
+                    //             extracted_sql: extractedSQL,
+                    //             final_sql: finalSQL,
+                    //             syntax_errors: syntaxValidation.errors,
+                    //             debug_info: debugInfo,
+                    //             suggestions: [
+                    //                 'Try rephrasing your query with simpler language',
+                    //                 'Check if you are referencing existing table and column names',
+                    //                 'Ensure your query structure is clear and unambiguous'
+                    //             ],
+                    //             timestamp: new Date().toISOString()
+                    //         });
+                    //     }
+                    // } else {
+                    //     console.log('✅ SQL syntax validation passed');
+                    //     debugInfo.sqlCorrections.push('SQL syntax validation passed');
+                    // }
+
+                    // Skip column name correction and trust the sqlAgent to generate correct queries
+                    console.log('📊 Step 3.5: Using original SQL from agent without column name modifications');
+
+
+                    // Add a note to debug info
+                    debugInfo.sqlCorrections.push('Using SQL directly from agent without column name corrections');
+
+                    console.log('✅ Final SQL:', finalSQL);
+
+                    // Step 3.5: Double-check SQL Query Against Original Query Criteria
+                    // console.log('📊 Step 3.5: Double-checking SQL query against original query criteria...');
+
+                    // let sqlValidationResult = await validateSQLAgainstCriteria(finalSQL, query, langchainApp, organizationId, dbConfig);
+
+                    // if (!sqlValidationResult.isValid) {
+                    //     console.log('❌ SQL validation failed. Attempting to correct the query...');
+                    //     debugInfo.sqlCorrections.push(`SQL validation failed: ${sqlValidationResult.issues.join(', ')}`);
+
+                    //     // Try to get a corrected SQL query
+                    //     const correctedSQL = await correctSQLQuery(finalSQL, query, sqlValidationResult.issues, langchainApp, organizationId);
+
+                    //     if (correctedSQL && correctedSQL !== finalSQL) {
+                    //         console.log('✅ SQL query corrected based on validation');
+                    //         finalSQL = correctedSQL;
+                    //         debugInfo.sqlCorrections.push(`Applied correction: ${correctedSQL}`);
+                    //     } else {
+                    //         console.log('⚠️ Could not automatically correct SQL. Proceeding with original query.');
+                    //         debugInfo.sqlCorrections.push('Auto-correction failed, using original query');
+                    //     }
+                    // } else {
+                    //     console.log('✅ SQL query validation passed');
+                    //     debugInfo.sqlCorrections.push('SQL validation passed - query matches criteria');
+                    // }
+
+                    // Step 3.7: Check the query for common issues, but trust sqlAgent's schema understanding
+                    console.log('📊 Step 3.7: Validating SQL query before execution...');
+
+                    // Quick syntax validation without repeating schema analysis that sqlAgent already did
+                    try {
+                        let connection: any;
+                        if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                            connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                        } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                            connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
                         }
-                    }
 
-                    // Method 2: Try to extract from agent output if still not found
-                    if (!extractedSQL && agentResult && agentResult.output) {
-                        console.log('🔍 Attempting to extract SQL from agent output...');
-                        extractedSQL = cleanSQLQuery(agentResult.output);
-                        if (extractedSQL && extractedSQL !== ';' && extractedSQL.length > 5) {
-                            debugInfo.extractionAttempts.push('Extracted from agent output: ' + extractedSQL);
-                            console.log('✅ Found SQL in agent output:', extractedSQL);
-                        } else {
-                            console.log('❌ No valid SQL found in agent output');
-                            extractedSQL = '';
-                        }
-                    }
-                }
+                        // Extract table names from the query
+                        const tableNamePattern = /FROM\s+(\w+)|JOIN\s+(\w+)/gi;
+                        const tableMatches = [...finalSQL.matchAll(tableNamePattern)];
+                        const tableNames = tableMatches
+                            .map(match => match[1] || match[2])
+                            .filter(name => name && !['SELECT', 'WHERE', 'AND', 'OR', 'ORDER', 'GROUP', 'HAVING', 'LIMIT'].includes(name.toUpperCase()));
 
-                // Special handling for incomplete SQL queries
-                if (extractedSQL && !isCompleteSQLQuery(extractedSQL)) {
-                    console.log('⚠️ Detected incomplete SQL query');
+                        console.log('🔍 Query references these tables:', tableNames);
 
-                    const fixedSQL = fixIncompleteSQLQuery(extractedSQL);
-                    if (fixedSQL !== extractedSQL) {
-                        debugInfo.extractionAttempts.push('Fixed incomplete SQL: ' + fixedSQL);
-                        console.log('✅ Fixed incomplete SQL query');
-                        extractedSQL = fixedSQL;
-                    }
-                }
+                        // Map to store potential table name corrections
+                        const tableCorrections: { [key: string]: string } = {};
+                        const columnCorrections: { [key: string]: string } = {};
+                        let sqlNeedsCorrection = false;
 
-                if (!extractedSQL) {
-                    console.log('❌ No SQL extracted from agent - attempting intelligent fallback...');
-
-                    // INTELLIGENT FALLBACK: Generate a reasonable query based on user intent
-                    const userQueryLower = query.toLowerCase();
-                    let fallbackSQL = '';
-
-                    // Analyze user intent and create appropriate fallback
-                    if (userQueryLower.includes('patient')) {
-                        if (userQueryLower.includes('medication') || userQueryLower.includes('drug')) {
-                            // Patient + medication query
-                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
-                            console.log('🎯 Using patient+medication fallback');
-                        } else if (userQueryLower.includes('lab') || userQueryLower.includes('test') || userQueryLower.includes('result')) {
-                            // Patient + lab results query
-                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
-                            console.log('🎯 Using patient+lab fallback');
-                        } else if (userQueryLower.includes('risk') || userQueryLower.includes('high') || userQueryLower.includes('low')) {
-                            // Patient + risk query
-                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
-                            console.log('🎯 Using patient+risk fallback');
-                        } else {
-                            // General patient query
-                            fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state, p.city FROM patients p LIMIT 10;";
-                            console.log('🎯 Using general patient fallback');
-                        }
-                    } else if (userQueryLower.includes('medication') || userQueryLower.includes('drug')) {
-                        // Medication-focused query
-                        fallbackSQL = "SELECT p.patient_id, p.medications FROM patients p WHERE p.medications IS NOT NULL LIMIT 10;";
-                        console.log('🎯 Using medication fallback');
-                    } else if (userQueryLower.includes('risk')) {
-                        // Risk-focused query  
-                        fallbackSQL = "SELECT rd.record_id, rd.risk_category FROM risk_details rd LIMIT 10;";
-                        console.log('🎯 Using risk fallback');
-                    } else {
-                        // Default fallback - basic patient data
-                        fallbackSQL = "SELECT p.patient_id, p.gender, p.dob, p.state FROM patients p LIMIT 10;";
-                        console.log('🎯 Using default patient fallback');
-                    }
-
-                    if (fallbackSQL) {
-                        extractedSQL = fallbackSQL;
-                        debugInfo.extractionAttempts.push(`Intelligent fallback used: ${fallbackSQL}`);
-                        console.log('✅ Applied intelligent fallback SQL:', fallbackSQL);
-                    }
-                }
-
-                if (!extractedSQL) {
-                    return res.status(400).json({
-                        error: 'No valid SQL query found in agent response',
-                        agent_response: agentResult ? agentResult.output : rawAgentResponse,
-                        intermediate_steps: intermediateSteps,
-                        captured_queries: capturedSQLQueries,
-                        debug_info: debugInfo,
-                        chain_metadata: chainMetadata,
-                        timestamp: new Date().toISOString()
-                    });
-                }
-
-                console.log('🔧 Extracted SQL:', extractedSQL);
-
-                // Step 3: Final SQL validation and cleaning
-                console.log('📊 Step 3: Final SQL validation and cleaning...');
-
-                // Apply final cleaning to ensure we have a valid SQL query
-                let finalSQL = extractedSQL;
-
-                if (!finalSQL) {
-                    return res.status(400).json({
-                        error: 'Failed to produce a valid SQL query',
-                        extracted_sql: extractedSQL,
-                        debug_info: debugInfo,
-                        timestamp: new Date().toISOString()
-                    });
-                }
-
-                // NEW: Enhanced SQL syntax validation before execution
-                console.log('📊 Step 3.1: Enhanced SQL syntax validation...');
-                // const syntaxValidation = finalSQL;
-
-                // if (false) {
-                //     console.log('⚠️ SQL syntax issues detected:', syntaxValidation.errors);
-                //     debugInfo.sqlCorrections.push(`Syntax issues found: ${syntaxValidation.errors.join(', ')}`);
-
-                //     // Use the fixed SQL if available and different from original
-                //     if (syntaxValidation.fixedSQL && syntaxValidation.fixedSQL !== finalSQL) {
-                //         console.log('🔧 Applied automatic syntax fixes');
-                //         console.log('🔧 Original SQL:', finalSQL);
-                //         console.log('🔧 Fixed SQL:', syntaxValidation.fixedSQL);
-
-                //         finalSQL = syntaxValidation.fixedSQL;
-                //         debugInfo.sqlCorrections.push('Applied automatic syntax corrections');
-
-                //         // Re-validate the fixed SQL to ensure it's now valid
-                //         const revalidation = validateSQLSyntax(finalSQL);
-                //         if (!revalidation.isValid) {
-                //             console.log('❌ Fixed SQL still has issues:', revalidation.errors);
-                //             debugInfo.sqlCorrections.push(`Fixed SQL still has issues: ${revalidation.errors.join(', ')}`);
-
-                //             // Try one more round of fixes
-                //             if (revalidation.fixedSQL && revalidation.fixedSQL !== finalSQL) {
-                //                 finalSQL = revalidation.fixedSQL;
-                //                 console.log('🔧 Applied second round of fixes:', finalSQL);
-                //                 debugInfo.sqlCorrections.push('Applied second round of automatic corrections');
-                //             }
-                //         } else {
-                //             console.log('✅ Fixed SQL now passes validation');
-                //             debugInfo.sqlCorrections.push('Fixed SQL passes validation');
-                //         }
-                //     } else {
-                //         console.log('❌ Could not automatically fix SQL syntax issues');
-                //         return res.status(400).json({
-                //             error: 'SQL syntax validation failed',
-                //             message: 'The generated SQL query has syntax errors that could not be automatically fixed',
-                //             extracted_sql: extractedSQL,
-                //             final_sql: finalSQL,
-                //             syntax_errors: syntaxValidation.errors,
-                //             debug_info: debugInfo,
-                //             suggestions: [
-                //                 'Try rephrasing your query with simpler language',
-                //                 'Check if you are referencing existing table and column names',
-                //                 'Ensure your query structure is clear and unambiguous'
-                //             ],
-                //             timestamp: new Date().toISOString()
-                //         });
-                //     }
-                // } else {
-                //     console.log('✅ SQL syntax validation passed');
-                //     debugInfo.sqlCorrections.push('SQL syntax validation passed');
-                // }
-
-                // Skip column name correction and trust the sqlAgent to generate correct queries
-                console.log('📊 Step 3.5: Using original SQL from agent without column name modifications');
-
-
-                // Add a note to debug info
-                debugInfo.sqlCorrections.push('Using SQL directly from agent without column name corrections');
-
-                console.log('✅ Final SQL:', finalSQL);
-
-                // Step 3.5: Double-check SQL Query Against Original Query Criteria
-                // console.log('📊 Step 3.5: Double-checking SQL query against original query criteria...');
-
-                // let sqlValidationResult = await validateSQLAgainstCriteria(finalSQL, query, langchainApp, organizationId, dbConfig);
-
-                // if (!sqlValidationResult.isValid) {
-                //     console.log('❌ SQL validation failed. Attempting to correct the query...');
-                //     debugInfo.sqlCorrections.push(`SQL validation failed: ${sqlValidationResult.issues.join(', ')}`);
-
-                //     // Try to get a corrected SQL query
-                //     const correctedSQL = await correctSQLQuery(finalSQL, query, sqlValidationResult.issues, langchainApp, organizationId);
-
-                //     if (correctedSQL && correctedSQL !== finalSQL) {
-                //         console.log('✅ SQL query corrected based on validation');
-                //         finalSQL = correctedSQL;
-                //         debugInfo.sqlCorrections.push(`Applied correction: ${correctedSQL}`);
-                //     } else {
-                //         console.log('⚠️ Could not automatically correct SQL. Proceeding with original query.');
-                //         debugInfo.sqlCorrections.push('Auto-correction failed, using original query');
-                //     }
-                // } else {
-                //     console.log('✅ SQL query validation passed');
-                //     debugInfo.sqlCorrections.push('SQL validation passed - query matches criteria');
-                // }
-
-                // Step 3.7: Check the query for common issues, but trust sqlAgent's schema understanding
-                console.log('📊 Step 3.7: Validating SQL query before execution...');
-
-                // Quick syntax validation without repeating schema analysis that sqlAgent already did
-                try {
-                    let connection: any;
-                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                        connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                        connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                    }
-
-                    // Extract table names from the query
-                    const tableNamePattern = /FROM\s+(\w+)|JOIN\s+(\w+)/gi;
-                    const tableMatches = [...finalSQL.matchAll(tableNamePattern)];
-                    const tableNames = tableMatches
-                        .map(match => match[1] || match[2])
-                        .filter(name => name && !['SELECT', 'WHERE', 'AND', 'OR', 'ORDER', 'GROUP', 'HAVING', 'LIMIT'].includes(name.toUpperCase()));
-
-                    console.log('🔍 Query references these tables:', tableNames);
-
-                    // Map to store potential table name corrections
-                    const tableCorrections: { [key: string]: string } = {};
-                    const columnCorrections: { [key: string]: string } = {};
-                    let sqlNeedsCorrection = false;
-
-                    // Do a simple check if these tables exist and find similar table names if not
-                    for (const tableName of tableNames) {
-                        try {
-                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                                // MySQL table validation
-                                const [result] = await connection.execute(
-                                    "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-                                    [dbConfig.database, tableName]
-                                );
-
-                                if (Array.isArray(result) && result.length > 0) {
-                                    console.log(`✅ Table '${tableName}' exists`);
-
-                                    // If table exists, get a sample of column names to verify query correctness
-                                    const [columns] = await connection.execute(
-                                        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
+                        // Do a simple check if these tables exist and find similar table names if not
+                        for (const tableName of tableNames) {
+                            try {
+                                if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                    // MySQL table validation
+                                    const [result] = await connection.execute(
+                                        "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
                                         [dbConfig.database, tableName]
                                     );
 
-                                    if (Array.isArray(columns) && columns.length > 0) {
-                                        const sampleColumns = columns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
-                                        console.log(`📋 Table ${tableName} sample columns: ${sampleColumns}...`);
-                                        debugInfo.sqlCorrections.push(`Table ${tableName} exists with columns like: ${sampleColumns}...`);
+                                    if (Array.isArray(result) && result.length > 0) {
+                                        console.log(`✅ Table '${tableName}' exists`);
 
-                                        // Check if the query uses column names that don't match the snake_case pattern in the database
-                                        // Extract column names from the query that are associated with this table
-                                        const columnPattern = new RegExp(`${tableName}\\.([\\w_]+)`, 'g');
-                                        let columnMatch;
-                                        const queriedColumns = [];
+                                        // If table exists, get a sample of column names to verify query correctness
+                                        const [columns] = await connection.execute(
+                                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 10",
+                                            [dbConfig.database, tableName]
+                                        );
 
-                                        while ((columnMatch = columnPattern.exec(finalSQL)) !== null) {
-                                            queriedColumns.push(columnMatch[1]);
-                                        }
+                                        if (Array.isArray(columns) && columns.length > 0) {
+                                            const sampleColumns = columns.map((col: any) => col.COLUMN_NAME).slice(0, 5).join(', ');
+                                            console.log(`📋 Table ${tableName} sample columns: ${sampleColumns}...`);
+                                            debugInfo.sqlCorrections.push(`Table ${tableName} exists with columns like: ${sampleColumns}...`);
 
-                                        // Check each queried column against actual columns
-                                        const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
-                                        for (const queriedCol of queriedColumns) {
-                                            if (!actualColumns.includes(queriedCol)) {
-                                                // Try to find a similar column name (e.g., 'fullname' vs 'full_name')
-                                                const similarCol = actualColumns.find(col =>
-                                                    col.replace(/_/g, '').toLowerCase() === queriedCol.toLowerCase() ||
-                                                    col.toLowerCase() === queriedCol.replace(/_/g, '').toLowerCase()
-                                                );
+                                            // Check if the query uses column names that don't match the snake_case pattern in the database
+                                            // Extract column names from the query that are associated with this table
+                                            const columnPattern = new RegExp(`${tableName}\\.([\\w_]+)`, 'g');
+                                            let columnMatch;
+                                            const queriedColumns = [];
 
-                                                if (similarCol) {
-                                                    console.log(`⚠️ Column correction needed: '${queriedCol}' should be '${similarCol}'`);
-                                                    columnCorrections[queriedCol] = similarCol;
-                                                    sqlNeedsCorrection = true;
+                                            while ((columnMatch = columnPattern.exec(finalSQL)) !== null) {
+                                                queriedColumns.push(columnMatch[1]);
+                                            }
+
+                                            // Check each queried column against actual columns
+                                            const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
+                                            for (const queriedCol of queriedColumns) {
+                                                if (!actualColumns.includes(queriedCol)) {
+                                                    // Try to find a similar column name (e.g., 'fullname' vs 'full_name')
+                                                    const similarCol = actualColumns.find(col =>
+                                                        col.replace(/_/g, '').toLowerCase() === queriedCol.toLowerCase() ||
+                                                        col.toLowerCase() === queriedCol.replace(/_/g, '').toLowerCase()
+                                                    );
+
+                                                    if (similarCol) {
+                                                        console.log(`⚠️ Column correction needed: '${queriedCol}' should be '${similarCol}'`);
+                                                        columnCorrections[queriedCol] = similarCol;
+                                                        sqlNeedsCorrection = true;
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                } else {
-                                    console.log(`⚠️ WARNING: Table '${tableName}' does not exist in the database`);
-                                    debugInfo.sqlCorrections.push(`WARNING: Table '${tableName}' does not exist`);
+                                    } else {
+                                        console.log(`⚠️ WARNING: Table '${tableName}' does not exist in the database`);
+                                        debugInfo.sqlCorrections.push(`WARNING: Table '${tableName}' does not exist`);
 
-                                    // Find similar table names (e.g., 'pgxtestresults' vs 'pgxtest_results')
-                                    // First get all tables in the database
-                                    const [allTables] = await connection.execute(
-                                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                        [dbConfig.database]
-                                    );
-
-                                    if (Array.isArray(allTables) && allTables.length > 0) {
-                                        // Look for similar table names
-                                        const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
-
-                                        // Try different matching strategies
-                                        // 1. Remove underscores and compare
-                                        const similarTableNoUnderscores = allTableNames.find((t: string) =>
-                                            t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase()
+                                        // Find similar table names (e.g., 'pgxtestresults' vs 'pgxtest_results')
+                                        // First get all tables in the database
+                                        const [allTables] = await connection.execute(
+                                            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                            [dbConfig.database]
                                         );
 
-                                        // 2. Check for plural/singular variations
-                                        const singularName = tableName.endsWith('s') ? tableName.slice(0, -1) : tableName;
-                                        const pluralName = tableName.endsWith('s') ? tableName : tableName + 's';
+                                        if (Array.isArray(allTables) && allTables.length > 0) {
+                                            // Look for similar table names
+                                            const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
 
-                                        const similarTableByPlurality = allTableNames.find((t: string) =>
-                                            t.toLowerCase() === singularName.toLowerCase() ||
-                                            t.toLowerCase() === pluralName.toLowerCase()
-                                        );
+                                            // Try different matching strategies
+                                            // 1. Remove underscores and compare
+                                            const similarTableNoUnderscores = allTableNames.find((t: string) =>
+                                                t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase()
+                                            );
 
-                                        // 3. Check for table with similar prefix
-                                        const similarTableByPrefix = allTableNames.find((t: string) =>
-                                            (t.toLowerCase().startsWith(tableName.toLowerCase()) ||
-                                                tableName.toLowerCase().startsWith(t.toLowerCase())) &&
-                                            t.length > 3
-                                        );
+                                            // 2. Check for plural/singular variations
+                                            const singularName = tableName.endsWith('s') ? tableName.slice(0, -1) : tableName;
+                                            const pluralName = tableName.endsWith('s') ? tableName : tableName + 's';
 
-                                        const correctedTableName = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
+                                            const similarTableByPlurality = allTableNames.find((t: string) =>
+                                                t.toLowerCase() === singularName.toLowerCase() ||
+                                                t.toLowerCase() === pluralName.toLowerCase()
+                                            );
 
-                                        if (correctedTableName) {
-                                            console.log(`🔄 Found similar table: '${correctedTableName}' instead of '${tableName}'`);
-                                            tableCorrections[tableName] = correctedTableName;
-                                            sqlNeedsCorrection = true;
+                                            // 3. Check for table with similar prefix
+                                            const similarTableByPrefix = allTableNames.find((t: string) =>
+                                                (t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                                    tableName.toLowerCase().startsWith(t.toLowerCase())) &&
+                                                t.length > 3
+                                            );
+
+                                            const correctedTableName = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
+
+                                            if (correctedTableName) {
+                                                console.log(`🔄 Found similar table: '${correctedTableName}' instead of '${tableName}'`);
+                                                tableCorrections[tableName] = correctedTableName;
+                                                sqlNeedsCorrection = true;
+                                            }
                                         }
                                     }
-                                }
-                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                                // PostgreSQL table validation
-                                const result = await connection.query(
-                                    "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
-                                    [tableName]
-                                );
-
-                                if (result.rows && result.rows.length > 0) {
-                                    console.log(`✅ Table '${tableName}' exists`);
-
-                                    // If table exists, get a sample of column names to verify query correctness
-                                    const columnsResult = await connection.query(
-                                        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 LIMIT 10",
+                                } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                    // PostgreSQL table validation
+                                    const result = await connection.query(
+                                        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
                                         [tableName]
                                     );
 
-                                    if (columnsResult.rows && columnsResult.rows.length > 0) {
-                                        const sampleColumns = columnsResult.rows.map((col: any) => col.column_name).slice(0, 5).join(', ');
-                                        console.log(`📋 Table ${tableName} sample columns: ${sampleColumns}...`);
-                                        debugInfo.sqlCorrections.push(`Table ${tableName} exists with columns like: ${sampleColumns}...`);
+                                    if (result.rows && result.rows.length > 0) {
+                                        console.log(`✅ Table '${tableName}' exists`);
 
-                                        // Check if the query uses column names that don't match the snake_case pattern in the database
-                                        // Extract column names from the query that are associated with this table
-                                        const columnPattern = new RegExp(`${tableName}\\.([\\w_]+)`, 'g');
-                                        let columnMatch;
-                                        const queriedColumns = [];
+                                        // If table exists, get a sample of column names to verify query correctness
+                                        const columnsResult = await connection.query(
+                                            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 LIMIT 10",
+                                            [tableName]
+                                        );
 
-                                        while ((columnMatch = columnPattern.exec(finalSQL)) !== null) {
-                                            queriedColumns.push(columnMatch[1]);
-                                        }
+                                        if (columnsResult.rows && columnsResult.rows.length > 0) {
+                                            const sampleColumns = columnsResult.rows.map((col: any) => col.column_name).slice(0, 5).join(', ');
+                                            console.log(`📋 Table ${tableName} sample columns: ${sampleColumns}...`);
+                                            debugInfo.sqlCorrections.push(`Table ${tableName} exists with columns like: ${sampleColumns}...`);
 
-                                        // Check each queried column against actual columns
-                                        const actualColumns = columnsResult.rows.map((col: any) => col.column_name);
-                                        for (const queriedCol of queriedColumns) {
-                                            if (!actualColumns.includes(queriedCol)) {
-                                                // Try to find a similar column name (e.g., 'fullname' vs 'full_name')
-                                                const similarCol = actualColumns.find((col: string) =>
-                                                    col.replace(/_/g, '').toLowerCase() === queriedCol.toLowerCase() ||
-                                                    col.toLowerCase() === queriedCol.replace(/_/g, '').toLowerCase()
-                                                );
+                                            // Check if the query uses column names that don't match the snake_case pattern in the database
+                                            // Extract column names from the query that are associated with this table
+                                            const columnPattern = new RegExp(`${tableName}\\.([\\w_]+)`, 'g');
+                                            let columnMatch;
+                                            const queriedColumns = [];
 
-                                                if (similarCol) {
-                                                    console.log(`⚠️ Column correction needed: '${queriedCol}' should be '${similarCol}'`);
-                                                    columnCorrections[queriedCol] = similarCol;
-                                                    sqlNeedsCorrection = true;
+                                            while ((columnMatch = columnPattern.exec(finalSQL)) !== null) {
+                                                queriedColumns.push(columnMatch[1]);
+                                            }
+
+                                            // Check each queried column against actual columns
+                                            const actualColumns = columnsResult.rows.map((col: any) => col.column_name);
+                                            for (const queriedCol of queriedColumns) {
+                                                if (!actualColumns.includes(queriedCol)) {
+                                                    // Try to find a similar column name (e.g., 'fullname' vs 'full_name')
+                                                    const similarCol = actualColumns.find((col: string) =>
+                                                        col.replace(/_/g, '').toLowerCase() === queriedCol.toLowerCase() ||
+                                                        col.toLowerCase() === queriedCol.replace(/_/g, '').toLowerCase()
+                                                    );
+
+                                                    if (similarCol) {
+                                                        console.log(`⚠️ Column correction needed: '${queriedCol}' should be '${similarCol}'`);
+                                                        columnCorrections[queriedCol] = similarCol;
+                                                        sqlNeedsCorrection = true;
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                } else {
-                                    console.log(`⚠️ WARNING: Table '${tableName}' does not exist in the database`);
-                                    debugInfo.sqlCorrections.push(`WARNING: Table '${tableName}' does not exist`);
+                                    } else {
+                                        console.log(`⚠️ WARNING: Table '${tableName}' does not exist in the database`);
+                                        debugInfo.sqlCorrections.push(`WARNING: Table '${tableName}' does not exist`);
 
-                                    // Find similar table names (e.g., 'pgxtestresults' vs 'pgxtest_results')
-                                    // First get all tables in the database
-                                    const allTablesResult = await connection.query(
-                                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-                                    );
-
-                                    if (allTablesResult.rows && allTablesResult.rows.length > 0) {
-                                        // Look for similar table names
-                                        const allTableNames = allTablesResult.rows.map((t: any) => t.tablename);
-
-                                        // Try different matching strategies
-                                        // 1. Remove underscores and compare
-                                        const similarTableNoUnderscores = allTableNames.find((t: string) =>
-                                            t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase()
+                                        // Find similar table names (e.g., 'pgxtestresults' vs 'pgxtest_results')
+                                        // First get all tables in the database
+                                        const allTablesResult = await connection.query(
+                                            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
                                         );
 
-                                        // 2. Check for plural/singular variations
-                                        const singularName = tableName.endsWith('s') ? tableName.slice(0, -1) : tableName;
-                                        const pluralName = tableName.endsWith('s') ? tableName : tableName + 's';
+                                        if (allTablesResult.rows && allTablesResult.rows.length > 0) {
+                                            // Look for similar table names
+                                            const allTableNames = allTablesResult.rows.map((t: any) => t.tablename);
 
-                                        const similarTableByPlurality = allTableNames.find((t: string) =>
-                                            t.toLowerCase() === singularName.toLowerCase() ||
-                                            t.toLowerCase() === pluralName.toLowerCase()
-                                        );
+                                            // Try different matching strategies
+                                            // 1. Remove underscores and compare
+                                            const similarTableNoUnderscores = allTableNames.find((t: string) =>
+                                                t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase()
+                                            );
 
-                                        // 3. Check for table with similar prefix
-                                        const similarTableByPrefix = allTableNames.find((t: string) =>
-                                            (t.toLowerCase().startsWith(tableName.toLowerCase()) ||
-                                                tableName.toLowerCase().startsWith(t.toLowerCase())) &&
-                                            t.length > 3
-                                        );
+                                            // 2. Check for plural/singular variations
+                                            const singularName = tableName.endsWith('s') ? tableName.slice(0, -1) : tableName;
+                                            const pluralName = tableName.endsWith('s') ? tableName : tableName + 's';
 
-                                        const correctedTableName = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
+                                            const similarTableByPlurality = allTableNames.find((t: string) =>
+                                                t.toLowerCase() === singularName.toLowerCase() ||
+                                                t.toLowerCase() === pluralName.toLowerCase()
+                                            );
 
-                                        if (correctedTableName) {
-                                            console.log(`🔄 Found similar table: '${correctedTableName}' instead of '${tableName}'`);
-                                            tableCorrections[tableName] = correctedTableName;
-                                            sqlNeedsCorrection = true;
+                                            // 3. Check for table with similar prefix
+                                            const similarTableByPrefix = allTableNames.find((t: string) =>
+                                                (t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                                    tableName.toLowerCase().startsWith(t.toLowerCase())) &&
+                                                t.length > 3
+                                            );
+
+                                            const correctedTableName = similarTableNoUnderscores || similarTableByPlurality || similarTableByPrefix;
+
+                                            if (correctedTableName) {
+                                                console.log(`🔄 Found similar table: '${correctedTableName}' instead of '${tableName}'`);
+                                                tableCorrections[tableName] = correctedTableName;
+                                                sqlNeedsCorrection = true;
+                                            }
                                         }
                                     }
                                 }
+                            } catch (tableError: any) {
+                                console.error(`❌ Error validating table '${tableName}':`, tableError.message);
                             }
-                        } catch (tableError: any) {
-                            console.error(`❌ Error validating table '${tableName}':`, tableError.message);
-                        }
-                    }
-
-                    // Apply corrections if needed
-                    if (sqlNeedsCorrection) {
-                        let correctedSQL = finalSQL;
-
-                        // Apply table name corrections
-                        for (const [oldName, newName] of Object.entries(tableCorrections)) {
-                            const tableRegex = new RegExp(`\\b${oldName}\\b`, 'gi');
-                            correctedSQL = correctedSQL.replace(tableRegex, newName);
-                            console.log(`🔄 Corrected table name: '${oldName}' → '${newName}'`);
                         }
 
-                        // Apply column name corrections
-                        for (const [oldName, newName] of Object.entries(columnCorrections)) {
-                            const columnRegex = new RegExp(`\\b${oldName}\\b`, 'gi');
-                            correctedSQL = correctedSQL.replace(columnRegex, newName);
-                            console.log(`🔄 Corrected column name: '${oldName}' → '${newName}'`);
+                        // Apply corrections if needed
+                        if (sqlNeedsCorrection) {
+                            let correctedSQL = finalSQL;
+
+                            // Apply table name corrections
+                            for (const [oldName, newName] of Object.entries(tableCorrections)) {
+                                const tableRegex = new RegExp(`\\b${oldName}\\b`, 'gi');
+                                correctedSQL = correctedSQL.replace(tableRegex, newName);
+                                console.log(`🔄 Corrected table name: '${oldName}' → '${newName}'`);
+                            }
+
+                            // Apply column name corrections
+                            for (const [oldName, newName] of Object.entries(columnCorrections)) {
+                                const columnRegex = new RegExp(`\\b${oldName}\\b`, 'gi');
+                                correctedSQL = correctedSQL.replace(columnRegex, newName);
+                                console.log(`🔄 Corrected column name: '${oldName}' → '${newName}'`);
+                            }
+
+                            if (correctedSQL !== finalSQL) {
+                                console.log('🔄 Applied SQL corrections');
+                                finalSQL = correctedSQL;
+                                debugInfo.sqlCorrections.push('Applied table/column name corrections');
+                            }
                         }
 
-                        if (correctedSQL !== finalSQL) {
-                            console.log('🔄 Applied SQL corrections');
-                            finalSQL = correctedSQL;
-                            debugInfo.sqlCorrections.push('Applied table/column name corrections');
+                        // Close connection
+                        if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                            await connection.end();
+                        } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                            await connection.end();
                         }
+
+                        console.log('✅ Database connection established');
+
+                    } catch (validationError) {
+                        console.error('❌ Error during query validation:', validationError);
+                        // Connection is already closed in the try block
                     }
 
-                    // Close connection
-                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                        await connection.end();
-                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                        await connection.end();
-                    }
-
-                    console.log('✅ Database connection established');
-
-                } catch (validationError) {
-                    console.error('❌ Error during query validation:', validationError);
-                    // Connection is already closed in the try block
-                }
-
-                // Step 4: Execute the SQL query manually
-                console.log('📊 Step 4: Executing SQL query manually...');
-
-                try {
-                    let connection: any;
-                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                        connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                        connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                    }
-
-                    console.log('✅ Database connection established');
-                    console.log('🔧 Executing SQL:', finalSQL);
-
-                    // Final syntax check before execution
-                    // const preExecutionValidation = validateSQLSyntax(finalSQL);
-                    // if (!preExecutionValidation.isValid) {
-                    //     console.log('⚠️ Pre-execution validation failed, attempting fix...');
-                    //     if (preExecutionValidation.fixedSQL && preExecutionValidation.fixedSQL !== finalSQL) {
-                    //         finalSQL = preExecutionValidation.fixedSQL;
-                    //         console.log('🔧 Applied pre-execution fixes:', preExecutionValidation.errors);
-                    //         debugInfo.sqlCorrections.push(`Pre-execution fixes: ${preExecutionValidation.errors.join(', ')}`);
-                    //     }
-                    // }
-
-                    // Execute the final SQL based on database type
-                    let rows: any[] = [];
-                    let fields: any = null;
+                    // Step 4: Execute the SQL query manually
+                    console.log('📊 Step 4: Executing SQL query manually...');
 
                     try {
+                        let connection: any;
                         if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                            const [mysqlRows, mysqlFields] = await connection.execute(finalSQL);
-                            rows = mysqlRows;
-                            fields = mysqlFields;
+                            connection = await databaseService.createOrganizationMySQLConnection(organizationId);
                         } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                            const result = await connection.query(finalSQL);
-                            rows = result.rows;
-                            fields = result.fields;
+                            connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
                         }
-                        console.log(`✅ Query executed successfully, returned ${Array.isArray(rows) ? rows.length : 0} rows`);
-                    } catch (executionError: any) {
-                        // Try to fix common syntax errors and retry once
-                        const errorMessage = executionError.message.toLowerCase();
-                        if (errorMessage.includes('syntax error') || errorMessage.includes('near') || errorMessage.includes('unexpected')) {
-                            console.log('🔧 SQL execution failed with syntax error, attempting auto-fix...');
 
-                            // Apply common fixes
-                            let fixedSQL = finalSQL;
+                        console.log('✅ Database connection established');
+                        console.log('🔧 Executing SQL:', finalSQL);
 
-                            if (errorMessage.includes('near \')\'')) {
-                                fixedSQL = fixedSQL.replace(/^\s*\)\s*/, '');
-                                console.log('🔧 Removed orphaned closing parenthesis');
-                            }
+                        // Final syntax check before execution
+                        // const preExecutionValidation = validateSQLSyntax(finalSQL);
+                        // if (!preExecutionValidation.isValid) {
+                        //     console.log('⚠️ Pre-execution validation failed, attempting fix...');
+                        //     if (preExecutionValidation.fixedSQL && preExecutionValidation.fixedSQL !== finalSQL) {
+                        //         finalSQL = preExecutionValidation.fixedSQL;
+                        //         console.log('🔧 Applied pre-execution fixes:', preExecutionValidation.errors);
+                        //         debugInfo.sqlCorrections.push(`Pre-execution fixes: ${preExecutionValidation.errors.join(', ')}`);
+                        //     }
+                        // }
 
-                            if (errorMessage.includes('with') && errorMessage.includes(')')) {
-                                fixedSQL = fixedSQL.replace(/WITH\s*\)\s*/gi, '');
-                                console.log('🔧 Removed malformed WITH clause');
-                            }
+                        // Execute the final SQL based on database type
+                        let rows: any[] = [];
+                        let fields: any = null;
 
-                            // Ensure balanced parentheses
-                            const openCount = (fixedSQL.match(/\(/g) || []).length;
-                            const closeCount = (fixedSQL.match(/\)/g) || []).length;
-                            if (openCount > closeCount) {
-                                fixedSQL = fixedSQL.replace(/;$/, '') + ')'.repeat(openCount - closeCount) + ';';
-                                console.log(`🔧 Added ${openCount - closeCount} missing closing parentheses`);
-                            } else if (closeCount > openCount) {
-                                for (let i = 0; i < closeCount - openCount; i++) {
-                                    fixedSQL = fixedSQL.replace(/^\s*\)/, '');
-                                }
-                                console.log(`🔧 Removed ${closeCount - openCount} extra closing parentheses`);
-                            }
-
-                            // Retry with fixed SQL
-                            try {
-                                console.log('🔄 Retrying with fixed SQL:', fixedSQL);
-                                if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                                    const [mysqlRows, mysqlFields] = await connection.execute(fixedSQL);
-                                    rows = mysqlRows;
-                                    fields = mysqlFields;
-                                } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                                    const result = await connection.query(fixedSQL);
-                                    rows = result.rows;
-                                    fields = result.fields;
-                                }
-                                console.log(`✅ Retry successful, returned ${Array.isArray(rows) ? rows.length : 0} rows`);
-                                finalSQL = fixedSQL; // Use the fixed SQL for logging
-                                debugInfo.sqlCorrections.push('Applied auto-fix for syntax error during execution');
-                            } catch (retryError: any) {
-                                console.error('❌ Retry also failed:', retryError.message);
-                                throw executionError; // Throw original error
-                            }
-                        } else {
-                            throw executionError; // Re-throw non-syntax errors
-                        }
-                    }
-
-                    const processingTime = performance.now() - startTime;
-
-                    // Generate description/explanation of the query and results
-                    console.log('📝 Step 5: Generating query description and result explanation...');
-                    let queryDescription = '';
-                    let resultExplanation = '';
-
-                    if (generateDescription) {
                         try {
-                            // Get the LangChain app to access the LLM
-                            const langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
-                            const llm = (langchainApp as any).llm; // Access the Azure OpenAI LLM instance
+                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                const [mysqlRows, mysqlFields] = await connection.execute(finalSQL);
+                                rows = mysqlRows;
+                                fields = mysqlFields;
+                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                const result = await connection.query(finalSQL);
+                                rows = result.rows;
+                                fields = result.fields;
+                            }
+                            console.log(`✅ Query executed successfully, returned ${Array.isArray(rows) ? rows.length : 0} rows`);
+                        } catch (executionError: any) {
+                            // Try to fix common syntax errors and retry once
+                            const errorMessage = executionError.message.toLowerCase();
+                            if (errorMessage.includes('syntax error') || errorMessage.includes('near') || errorMessage.includes('unexpected')) {
+                                console.log('🔧 SQL execution failed with syntax error, attempting auto-fix...');
 
-                            if (llm) {
-                                // Generate query description
-                                const queryDescriptionPrompt = `You are a medical database expert. Analyze this SQL query and provide a clear, professional explanation of what it does.
+                                // Apply common fixes
+                                let fixedSQL = finalSQL;
+
+                                if (errorMessage.includes('near \')\'')) {
+                                    fixedSQL = fixedSQL.replace(/^\s*\)\s*/, '');
+                                    console.log('🔧 Removed orphaned closing parenthesis');
+                                }
+
+                                if (errorMessage.includes('with') && errorMessage.includes(')')) {
+                                    fixedSQL = fixedSQL.replace(/WITH\s*\)\s*/gi, '');
+                                    console.log('🔧 Removed malformed WITH clause');
+                                }
+
+                                // Ensure balanced parentheses
+                                const openCount = (fixedSQL.match(/\(/g) || []).length;
+                                const closeCount = (fixedSQL.match(/\)/g) || []).length;
+                                if (openCount > closeCount) {
+                                    fixedSQL = fixedSQL.replace(/;$/, '') + ')'.repeat(openCount - closeCount) + ';';
+                                    console.log(`🔧 Added ${openCount - closeCount} missing closing parentheses`);
+                                } else if (closeCount > openCount) {
+                                    for (let i = 0; i < closeCount - openCount; i++) {
+                                        fixedSQL = fixedSQL.replace(/^\s*\)/, '');
+                                    }
+                                    console.log(`🔧 Removed ${closeCount - openCount} extra closing parentheses`);
+                                }
+
+                                // Retry with fixed SQL
+                                try {
+                                    console.log('🔄 Retrying with fixed SQL:', fixedSQL);
+                                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                        const [mysqlRows, mysqlFields] = await connection.execute(fixedSQL);
+                                        rows = mysqlRows;
+                                        fields = mysqlFields;
+                                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                        const result = await connection.query(fixedSQL);
+                                        rows = result.rows;
+                                        fields = result.fields;
+                                    }
+                                    console.log(`✅ Retry successful, returned ${Array.isArray(rows) ? rows.length : 0} rows`);
+                                    finalSQL = fixedSQL; // Use the fixed SQL for logging
+                                    debugInfo.sqlCorrections.push('Applied auto-fix for syntax error during execution');
+                                } catch (retryError: any) {
+                                    console.error('❌ Retry also failed:', retryError.message);
+                                    throw executionError; // Throw original error
+                                }
+                            } else {
+                                throw executionError; // Re-throw non-syntax errors
+                            }
+                        }
+
+                        const processingTime = performance.now() - startTime;
+
+                        // Generate description/explanation of the query and results
+                        console.log('📝 Step 5: Generating query description and result explanation...');
+                        let queryDescription = '';
+                        let resultExplanation = '';
+
+                        if (generateDescription) {
+                            try {
+                                // Get the LangChain app to access the LLM
+                                const langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
+                                const llm = (langchainApp as any).llm; // Access the Azure OpenAI LLM instance
+
+                                if (llm) {
+                                    // Generate query description
+                                    const queryDescriptionPrompt = `You are a medical database expert. Analyze this SQL query and provide a clear, professional explanation of what it does.
 
 SQL Query: ${finalSQL}
 
@@ -4976,14 +5191,14 @@ Provide a concise explanation (2-3 sentences) of:
 
 Keep it professional and easy to understand for both technical and non-technical users.`;
 
-                                const queryDescResponse = await llm.invoke(queryDescriptionPrompt);
-                                queryDescription = typeof queryDescResponse === 'string' ? queryDescResponse : queryDescResponse.content || '';
-                                console.log('✅ Generated query description');
+                                    const queryDescResponse = await llm.invoke(queryDescriptionPrompt);
+                                    queryDescription = typeof queryDescResponse === 'string' ? queryDescResponse : queryDescResponse.content || '';
+                                    console.log('✅ Generated query description');
 
-                                // Generate result explanation if we have results
-                                if (Array.isArray(rows) && rows.length > 0) {
-                                    const resultSample = rows.slice(0, 3); // Show first 3 rows as sample
-                                    const resultExplanationPrompt = `You are a medical data analyst. Analyze these SQL query results and return a professional HTML summary.
+                                    // Generate result explanation if we have results
+                                    if (Array.isArray(rows) && rows.length > 0) {
+                                        const resultSample = rows.slice(0, 3); // Show first 3 rows as sample
+                                        const resultExplanationPrompt = `You are a medical data analyst. Analyze these SQL query results and return a professional HTML summary.
 
 Original Question: ${query}
 SQL Query: ${finalSQL}
@@ -5002,525 +5217,830 @@ Avoid technical SQL details.
 Keep the focus on medical/business relevance only.
 Return only valid, semantic HTML.`;
 
-                                    const resultExpResponse = await llm.invoke(resultExplanationPrompt);
-                                    resultExplanation = typeof resultExpResponse === 'string' ? resultExpResponse : resultExpResponse.content || '';
-                                    console.log('✅ Generated result explanation');
+                                        const resultExpResponse = await llm.invoke(resultExplanationPrompt);
+                                        resultExplanation = typeof resultExpResponse === 'string' ? resultExpResponse : resultExpResponse.content || '';
+                                        console.log('✅ Generated result explanation');
+                                    } else {
+                                        resultExplanation = 'No results were found matching your query criteria.';
+                                    }
                                 } else {
-                                    resultExplanation = 'No results were found matching your query criteria.';
+                                    console.log('⚠️ LLM not available for description generation');
+                                    queryDescription = 'Query description not available';
+                                    resultExplanation = 'Result explanation not available';
                                 }
-                            } else {
-                                console.log('⚠️ LLM not available for description generation');
-                                queryDescription = 'Query description not available';
-                                resultExplanation = 'Result explanation not available';
+                            } catch (descError: any) {
+                                console.error('❌ Error generating descriptions:', descError.message);
+                                queryDescription = 'Error generating query description';
+                                resultExplanation = 'Error generating result explanation';
                             }
-                        } catch (descError: any) {
-                            console.error('❌ Error generating descriptions:', descError.message);
-                            queryDescription = 'Error generating query description';
-                            resultExplanation = 'Error generating result explanation';
                         }
-                    }
 
-                    // Note: Connection will be closed after all operations including restructured SQL
+                        // Note: Connection will be closed after all operations including restructured SQL
 
-                    // Process graph data if requested
-                    let graphData = null;
-                    const hasExplicitGraphConfig = graphType && graphConfig && Object.keys(graphConfig).length > 0;
-                    const shouldGenerateGraph = generateGraph || hasExplicitGraphConfig;
-                    let detectedGraphType: GraphType = GraphType.BAR_CHART;
-                    let detectedCategory: MedicalDataCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                        // Process graph data if requested
+                        let graphData = null;
+                        const hasExplicitGraphConfig = graphType && graphConfig && Object.keys(graphConfig).length > 0;
+                        const shouldGenerateGraph = generateGraph || hasExplicitGraphConfig;
+                        let detectedGraphType: GraphType = GraphType.BAR_CHART;
+                        let detectedCategory: MedicalDataCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
 
-                    console.log(`🔍 Graph processing check: generateGraph=${generateGraph}, hasExplicitConfig=${hasExplicitGraphConfig}, shouldGenerate=${shouldGenerateGraph}`);
-                    console.log(`🔍 Rows data: ${Array.isArray(rows) ? rows.length : 'not array'} rows`);
+                        console.log(`🔍 Graph processing check: generateGraph=${generateGraph}, hasExplicitConfig=${hasExplicitGraphConfig}, shouldGenerate=${shouldGenerateGraph}`);
+                        console.log(`🔍 Rows data: ${Array.isArray(rows) ? rows.length : 'not array'} rows`);
 
-                    if (shouldGenerateGraph && Array.isArray(rows) && rows.length > 0) {
-                        try {
-                            let fullGraphConfig: GraphConfig;
-                            let detectedGraphType: GraphType;
-                            let detectedCategory: MedicalDataCategory;
+                        if (shouldGenerateGraph && Array.isArray(rows) && rows.length > 0) {
+                            try {
+                                let fullGraphConfig: GraphConfig;
+                                let detectedGraphType: GraphType;
+                                let detectedCategory: MedicalDataCategory;
+
+                                if (hasExplicitGraphConfig) {
+                                    // Use explicit configuration
+                                    console.log(`📊 Using explicit graph configuration`);
+                                    fullGraphConfig = {
+                                        type: graphType,
+                                        category: graphCategory,
+                                        xAxis: graphConfig.xAxis,
+                                        yAxis: graphConfig.yAxis,
+                                        colorBy: graphConfig.colorBy,
+                                        sizeBy: graphConfig.sizeBy,
+                                        groupBy: graphConfig.groupBy,
+                                        sortBy: graphConfig.sortBy,
+                                        limit: graphConfig.limit,
+                                        aggregation: graphConfig.aggregation,
+                                        timeFormat: graphConfig.timeFormat,
+                                        showTrends: graphConfig.showTrends,
+                                        showOutliers: graphConfig.showOutliers,
+                                        includeNulls: graphConfig.includeNulls,
+                                        customColors: graphConfig.customColors,
+                                        title: graphConfig.title,
+                                        subtitle: graphConfig.subtitle,
+                                        description: graphConfig.description
+                                    };
+                                    detectedGraphType = graphType;
+                                    detectedCategory = graphCategory || MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                                } else {
+                                    // Use AI to analyze data structure
+                                    console.log(`🤖 Using AI to analyze data structure for graph generation`);
+                                    const analysis = await AIGraphAnalyzer.analyzeDataWithAI(rows, langchainApp.getLLM());
+                                    fullGraphConfig = analysis.config;
+                                    detectedGraphType = analysis.type;
+                                    detectedCategory = analysis.category;
+                                }
+
+                                // Process the graph data
+                                console.log(`📊 Processing ${rows.length} rows with config:`, JSON.stringify(fullGraphConfig, null, 2));
+                                graphData = GraphProcessor.processGraphData(rows, fullGraphConfig);
+                                console.log(`✅ Graph data processed successfully: ${graphData.data.length} data points`);
+                                console.log(`📊 Sample graph data:`, JSON.stringify(graphData.data.slice(0, 3), null, 2));
+                            } catch (graphError: any) {
+                                console.error('❌ Graph processing failed:', graphError.message);
+                                graphData = {
+                                    type: graphType || GraphType.BAR_CHART,
+                                    data: [],
+                                    config: { type: graphType || GraphType.BAR_CHART },
+                                    metadata: {
+                                        totalRecords: 0,
+                                        processedAt: new Date().toISOString(),
+                                        dataQuality: { completeness: 0, accuracy: 0, consistency: 0 },
+                                        insights: ['Graph processing failed'],
+                                        recommendations: ['Check data format and graph configuration']
+                                    }
+                                };
+                            }
+                        }
+
+                        // Always include graph data structure if graph parameters are present, even if processing failed
+                        if (shouldGenerateGraph && !graphData) {
+                            console.log(`⚠️ Graph processing was requested but failed or no data available`);
+
+                            let fallbackType = GraphType.BAR_CHART;
+                            let fallbackCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                            let fallbackConfig: GraphConfig;
 
                             if (hasExplicitGraphConfig) {
-                                // Use explicit configuration
-                                console.log(`📊 Using explicit graph configuration`);
-                                fullGraphConfig = {
+                                fallbackType = graphType;
+                                fallbackCategory = graphCategory || MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                                fallbackConfig = {
                                     type: graphType,
                                     category: graphCategory,
-                                    xAxis: graphConfig.xAxis,
-                                    yAxis: graphConfig.yAxis,
-                                    colorBy: graphConfig.colorBy,
-                                    sizeBy: graphConfig.sizeBy,
-                                    groupBy: graphConfig.groupBy,
-                                    sortBy: graphConfig.sortBy,
-                                    limit: graphConfig.limit,
-                                    aggregation: graphConfig.aggregation,
-                                    timeFormat: graphConfig.timeFormat,
-                                    showTrends: graphConfig.showTrends,
-                                    showOutliers: graphConfig.showOutliers,
-                                    includeNulls: graphConfig.includeNulls,
-                                    customColors: graphConfig.customColors,
-                                    title: graphConfig.title,
-                                    subtitle: graphConfig.subtitle,
-                                    description: graphConfig.description
+                                    xAxis: graphConfig?.xAxis,
+                                    yAxis: graphConfig?.yAxis,
+                                    colorBy: graphConfig?.colorBy,
+                                    title: graphConfig?.title || 'Graph Analysis'
                                 };
-                                detectedGraphType = graphType;
-                                detectedCategory = graphCategory || MedicalDataCategory.PATIENT_DEMOGRAPHICS;
                             } else {
-                                // Use AI to analyze data structure
-                                console.log(`🤖 Using AI to analyze data structure for graph generation`);
-                                const analysis = await AIGraphAnalyzer.analyzeDataWithAI(rows, langchainApp.getLLM());
-                                fullGraphConfig = analysis.config;
-                                detectedGraphType = analysis.type;
-                                detectedCategory = analysis.category;
+                                // Use AI for fallback analysis
+                                try {
+                                    const analysis = await AIGraphAnalyzer.analyzeDataWithAI(rows, langchainApp.getLLM());
+                                    fallbackType = analysis.type;
+                                    fallbackCategory = analysis.category;
+                                    fallbackConfig = analysis.config;
+                                } catch (error) {
+                                    console.error('❌ AI fallback analysis failed:', error);
+                                    fallbackType = GraphType.BAR_CHART;
+                                    fallbackCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
+                                    fallbackConfig = {
+                                        type: GraphType.BAR_CHART,
+                                        category: MedicalDataCategory.PATIENT_DEMOGRAPHICS,
+                                        title: 'Data Analysis'
+                                    };
+                                }
                             }
 
-                            // Process the graph data
-                            console.log(`📊 Processing ${rows.length} rows with config:`, JSON.stringify(fullGraphConfig, null, 2));
-                            graphData = GraphProcessor.processGraphData(rows, fullGraphConfig);
-                            console.log(`✅ Graph data processed successfully: ${graphData.data.length} data points`);
-                            console.log(`📊 Sample graph data:`, JSON.stringify(graphData.data.slice(0, 3), null, 2));
-                        } catch (graphError: any) {
-                            console.error('❌ Graph processing failed:', graphError.message);
                             graphData = {
-                                type: graphType || GraphType.BAR_CHART,
+                                type: fallbackType,
                                 data: [],
-                                config: { type: graphType || GraphType.BAR_CHART },
+                                config: fallbackConfig,
                                 metadata: {
                                     totalRecords: 0,
                                     processedAt: new Date().toISOString(),
                                     dataQuality: { completeness: 0, accuracy: 0, consistency: 0 },
-                                    insights: ['Graph processing failed'],
-                                    recommendations: ['Check data format and graph configuration']
+                                    insights: ['No data available for graph processing'],
+                                    recommendations: ['Check if the query returned data and graph configuration is correct']
                                 }
                             };
                         }
-                    }
 
-                    // Always include graph data structure if graph parameters are present, even if processing failed
-                    if (shouldGenerateGraph && !graphData) {
-                        console.log(`⚠️ Graph processing was requested but failed or no data available`);
-
-                        let fallbackType = GraphType.BAR_CHART;
-                        let fallbackCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
-                        let fallbackConfig: GraphConfig;
-
-                        if (hasExplicitGraphConfig) {
-                            fallbackType = graphType;
-                            fallbackCategory = graphCategory || MedicalDataCategory.PATIENT_DEMOGRAPHICS;
-                            fallbackConfig = {
-                                type: graphType,
-                                category: graphCategory,
-                                xAxis: graphConfig?.xAxis,
-                                yAxis: graphConfig?.yAxis,
-                                colorBy: graphConfig?.colorBy,
-                                title: graphConfig?.title || 'Graph Analysis'
-                            };
-                        } else {
-                            // Use AI for fallback analysis
-                            try {
-                                const analysis = await AIGraphAnalyzer.analyzeDataWithAI(rows, langchainApp.getLLM());
-                                fallbackType = analysis.type;
-                                fallbackCategory = analysis.category;
-                                fallbackConfig = analysis.config;
-                            } catch (error) {
-                                console.error('❌ AI fallback analysis failed:', error);
-                                fallbackType = GraphType.BAR_CHART;
-                                fallbackCategory = MedicalDataCategory.PATIENT_DEMOGRAPHICS;
-                                fallbackConfig = {
-                                    type: GraphType.BAR_CHART,
-                                    category: MedicalDataCategory.PATIENT_DEMOGRAPHICS,
-                                    title: 'Data Analysis'
-                                };
-                            }
-                        }
-
-                        graphData = {
-                            type: fallbackType,
-                            data: [],
-                            config: fallbackConfig,
-                            metadata: {
-                                totalRecords: 0,
-                                processedAt: new Date().toISOString(),
-                                dataQuality: { completeness: 0, accuracy: 0, consistency: 0 },
-                                insights: ['No data available for graph processing'],
-                                recommendations: ['Check if the query returned data and graph configuration is correct']
-                            }
-                        };
-                    }
-
-                    // Return the raw SQL results with descriptions
-                    const response = {
-                        success: true,
-                        query_processed: query,
-                        sql_extracted: extractedSQL,
-                        sql_final: finalSQL,
-                        sql_results: {
-                            resultExplanation,
-                            sql_final: parseRows(rows),
+                        // Return the raw SQL results with descriptions
+                        const response = {
+                            success: true,
+                            query_processed: query,
+                            sql_extracted: extractedSQL,
+                            sql_final: finalSQL,
+                            sql_results: {
+                                resultExplanation,
+                                sql_final: parseRows(rows),
+                                processing_time: `${processingTime.toFixed(2)}ms`,
+                                // Add graph data to sql_results if available
+                                ...(graphData ? { graph_data: graphData } : {})
+                            }, // Raw SQL results with optional graph data
+                            result_count: Array.isArray(rows) ? rows.length : 0,
+                            field_info: fields ? fields.map((field: any) => ({
+                                name: field.name,
+                                type: field.type,
+                                table: field.table
+                            })) : [],
                             processing_time: `${processingTime.toFixed(2)}ms`,
-                            // Add graph data to sql_results if available
-                            ...(graphData ? { graph_data: graphData } : {})
-                        }, // Raw SQL results with optional graph data
-                        result_count: Array.isArray(rows) ? rows.length : 0,
-                        field_info: fields ? fields.map((field: any) => ({
-                            name: field.name,
-                            type: field.type,
-                            table: field.table
-                        })) : [],
-                        processing_time: `${processingTime.toFixed(2)}ms`,
-                        // agent_response: agentResult ? agentResult.output : '',
+                            // agent_response: agentResult ? agentResult.output : '',
 
-                        // New description fields
-                        query_description: queryDescription,
-                        // result_explanation: resultExplanation,
+                            // New description fields
+                            query_description: queryDescription,
+                            // result_explanation: resultExplanation,
 
-                        // Add chain information if chains were used
-                        ...(useChains && Object.keys(chainMetadata).length > 0 ? {
-                            chain_info: {
-                                ...chainMetadata,
-                                sql_source: chainSQLGenerated ? 'chain_generated' : 'agent_generated'
-                            }
-                        } : {}),
-
-                        // Add conversation information if in conversational mode
-                        ...(conversational ? {
-                            conversation: {
-                                sessionId: sessionId,
-                                historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
-                                mode: useChains ? 'conversational_with_chains' : 'conversational'
-                            }
-                        } : {}),
-                        captured_queries: capturedSQLQueries,
-                        intermediate_steps: intermediateSteps,
-                        debug_info: debugInfo,
-                        database_info: {
-                            organization_id: organizationId,
-                            host: (await databaseService.getOrganizationDatabaseConnection(organizationId)).host,
-                            database: (await databaseService.getOrganizationDatabaseConnection(organizationId)).database,
-                            port: (await databaseService.getOrganizationDatabaseConnection(organizationId)).port,
-                            mysql_version: mySQLVersionString,
-                            version_details: mysqlVersionInfo,
-                            query_adapted_to_version: !!mysqlVersionInfo
-                        },
-                        // Add graph processing info if graphs were requested
-                        ...(shouldGenerateGraph ? {
-                            graph_processing: {
-                                requested: shouldGenerateGraph,
-                                type: detectedGraphType || graphType,
-                                category: detectedCategory || graphCategory,
-                                success: !!graphData && graphData.data.length > 0,
-                                data_points: graphData ? graphData.data.length : 0,
-                                explicit_generate_graph: generateGraph,
-                                auto_detected: !hasExplicitGraphConfig,
-                                auto_analyzed: !hasExplicitGraphConfig,
-                                debug_info: {
-                                    should_generate: shouldGenerateGraph,
-                                    has_explicit_config: hasExplicitGraphConfig,
-                                    rows_count: Array.isArray(rows) ? rows.length : 0,
-                                    analysis_method: hasExplicitGraphConfig ? 'explicit_config' : 'auto_analysis'
+                            // Add chain information if chains were used
+                            ...(useChains && Object.keys(chainMetadata).length > 0 ? {
+                                chain_info: {
+                                    ...chainMetadata,
+                                    sql_source: chainSQLGenerated ? 'chain_generated' : 'agent_generated'
                                 }
-                            }
-                        } : {}),
-                        timestamp: new Date().toISOString()
-                    };
+                            } : {}),
 
-                    // ========== STEP: GENERATE RESTRUCTURED SQL WITH AZURE OPENAI ==========
-                    console.log('🤖 Step: Generating restructured SQL with Azure OpenAI for better data organization...');
-
-                    let restructuredResults = null;
-                    try {
-                        // Check if Azure OpenAI is available
-                        if (!isAzureOpenAIAvailable) {
-                            console.log('⚠️ Azure OpenAI API key not available, skipping restructuring');
-                            (response.sql_results as any).restructure_info = {
-                                success: false,
-                                message: 'Azure OpenAI API key not configured',
-                                skipped: true
-                            };
-                        }
-                        // Only restructure if we have actual data and it's an array with records
-                        else if (Array.isArray(rows) && rows.length > 0) {
-                            console.log(`🔄 Generating restructured SQL query for ${rows.length} records using Azure OpenAI...`);
-
-                            // Prepare comprehensive version information for Azure OpenAI
-                            let detailedVersionInfo = mySQLVersionString || 'unknown';
-                            if (mysqlVersionInfo) {
-                                detailedVersionInfo = `${mysqlVersionInfo.full} (${mysqlVersionInfo.major}.${mysqlVersionInfo.minor}.${mysqlVersionInfo.patch}) - JSON:${mysqlVersionInfo.supportsJSON}, CTE:${mysqlVersionInfo.supportsCTE}, Windows:${mysqlVersionInfo.supportsWindowFunctions}`;
-                            }
-
-                            restructuredResults = await generateRestructuredSQL(
-                                finalSQL, // originalSQL
-                                rows, // sqlResults  
-                                query, // userPrompt
-                                dbConfig.type.toLocaleLowerCase(), // dbType
-                                detailedVersionInfo, // dbVersion - Enhanced version information with feature support
-                                3, // sampleSize - Sample size for OpenAI analysis
-                                sqlAgent, // sqlAgent
-                                organizationId // organizationId
-                            );
-
-                            console.log('✅ SQL restructuring completed');
-
-                            // If we successfully generated a restructured SQL, execute it
-                            if (restructuredResults && restructuredResults.restructure_success && restructuredResults.restructured_sql) {
-                                try {
-                                    console.log('🔄 Executing restructured SQL query...');
-                                    console.log('🔧 Restructured SQL:', restructuredResults.restructured_sql);
-
-                                    // Check if connection is still valid, create new one if needed
-                                    if (!connection ||
-                                        (connection.state && connection.state === 'disconnected') ||
-                                        (connection.destroyed !== undefined && connection.destroyed) ||
-                                        (connection._fatalError !== undefined)) {
-                                        console.log('🔄 Recreating database connection for restructured SQL...');
-                                        if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                                            connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                                        } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                                            connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                                        }
-                                        console.log('✅ Database connection recreated successfully');
-                                    } else {
-                                        console.log('✅ Using existing database connection for restructured SQL');
+                            // Add conversation information if in conversational mode
+                            ...(conversational ? {
+                                conversation: {
+                                    sessionId: sessionId,
+                                    historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
+                                    mode: useChains ? 'conversational_with_chains' : 'conversational'
+                                }
+                            } : {}),
+                            captured_queries: capturedSQLQueries,
+                            intermediate_steps: intermediateSteps,
+                            debug_info: debugInfo,
+                            database_info: {
+                                organization_id: organizationId,
+                                host: (await databaseService.getOrganizationDatabaseConnection(organizationId)).host,
+                                database: (await databaseService.getOrganizationDatabaseConnection(organizationId)).database,
+                                port: (await databaseService.getOrganizationDatabaseConnection(organizationId)).port,
+                                mysql_version: mySQLVersionString,
+                                version_details: mysqlVersionInfo,
+                                query_adapted_to_version: !!mysqlVersionInfo
+                            },
+                            // Add graph processing info if graphs were requested
+                            ...(shouldGenerateGraph ? {
+                                graph_processing: {
+                                    requested: shouldGenerateGraph,
+                                    type: detectedGraphType || graphType,
+                                    category: detectedCategory || graphCategory,
+                                    success: !!graphData && graphData.data.length > 0,
+                                    data_points: graphData ? graphData.data.length : 0,
+                                    explicit_generate_graph: generateGraph,
+                                    auto_detected: !hasExplicitGraphConfig,
+                                    auto_analyzed: !hasExplicitGraphConfig,
+                                    debug_info: {
+                                        should_generate: shouldGenerateGraph,
+                                        has_explicit_config: hasExplicitGraphConfig,
+                                        rows_count: Array.isArray(rows) ? rows.length : 0,
+                                        analysis_method: hasExplicitGraphConfig ? 'explicit_config' : 'auto_analysis'
                                     }
+                                }
+                            } : {}),
+                            timestamp: new Date().toISOString()
+                        };
 
-                                    let restructuredRows: any[] = [];
-                                    let restructuredFields: any = null;
+                        // ========== STEP: GENERATE RESTRUCTURED SQL WITH AZURE OPENAI ==========
+                        console.log('🤖 Step: Generating restructured SQL with Azure OpenAI for better data organization...');
 
-                                    // Execute the restructured SQL query
-                                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                                        const [mysqlRows, mysqlFields] = await connection.execute(restructuredResults.restructured_sql);
-                                        restructuredRows = mysqlRows;
-                                        restructuredFields = mysqlFields;
-                                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                                        const result = await connection.query(restructuredResults.restructured_sql);
-                                        restructuredRows = result.rows;
-                                        restructuredFields = result.fields;
-                                    }
+                        let restructuredResults = null;
+                        let restructuredRetryCount = 0;
+                        const maxRestructuredRetries = 7; // Increased to 7 attempts for better success rate
 
-                                    console.log(`✅ Restructured query executed successfully, returned ${Array.isArray(restructuredRows) ? restructuredRows.length : 0} structured rows`);
+                        while (restructuredRetryCount < maxRestructuredRetries) {
+                            try {
+                                restructuredRetryCount++;
+                                if (restructuredRetryCount > 1) {
+                                    console.log(`🔄 Restructured SQL retry attempt ${restructuredRetryCount} of ${maxRestructuredRetries} (will keep trying until successful)...`);
+                                } else {
+                                    console.log(`🔄 Restructured SQL first attempt (1 of ${maxRestructuredRetries})...`);
+                                }
 
-                                    // Add restructured data to sql_results
-                                    (response.sql_results as any).sql_final = parseRows(restructuredRows);
-                                    (response.sql_results as any).restructure_info = {
-                                        success: true,
-                                        message: "Successfully executed restructured SQL query",
-                                        restructured_sql: restructuredResults.restructured_sql,
-                                        explanation: restructuredResults.explanation,
-                                        grouping_logic: restructuredResults.grouping_logic,
-                                        expected_structure: restructuredResults.expected_structure,
-                                        main_entity: restructuredResults.main_entity,
-                                        original_record_count: rows.length,
-                                        restructured_record_count: Array.isArray(restructuredRows) ? restructuredRows.length : 0,
-                                        sample_size_used: 3,
-                                        database_type: dbConfig.type.toLocaleLowerCase()
-                                    };
-                                    console.log('✅ Enhanced response with restructured SQL results');
-
-                                } catch (restructuredSQLError: any) {
-                                    console.error('❌ Error executing restructured SQL:', restructuredSQLError.message);
-
-                                    // Fallback to original data with error info
+                                // Check if Azure OpenAI is available
+                                if (!isAzureOpenAIAvailable) {
+                                    console.log('⚠️ Azure OpenAI API key not available, skipping restructuring');
                                     (response.sql_results as any).restructure_info = {
                                         success: false,
-                                        message: `Restructured SQL execution failed: ${restructuredSQLError.message}`,
-                                        restructured_sql: restructuredResults.restructured_sql,
-                                        explanation: restructuredResults.explanation,
-                                        sql_error: restructuredSQLError.message,
+                                        message: 'Azure OpenAI API key not configured',
+                                        skipped: true
+                                    };
+                                    break; // Exit retry loop for this condition
+                                }
+                                // Only restructure if we have actual data and it's an array with records
+                                else if (Array.isArray(rows) && rows.length > 0) {
+                                    console.log(`🔄 Generating restructured SQL query for ${rows.length} records using Azure OpenAI...`);
+
+                                    // Prepare comprehensive version information for Azure OpenAI
+                                    let detailedVersionInfo = mySQLVersionString || 'unknown';
+                                    if (mysqlVersionInfo) {
+                                        detailedVersionInfo = `${mysqlVersionInfo.full} (${mysqlVersionInfo.major}.${mysqlVersionInfo.minor}.${mysqlVersionInfo.patch}) - JSON:${mysqlVersionInfo.supportsJSON}, CTE:${mysqlVersionInfo.supportsCTE}, Windows:${mysqlVersionInfo.supportsWindowFunctions}`;
+                                    }
+
+                                    restructuredResults = await generateRestructuredSQL(
+                                        finalSQL, // originalSQL
+                                        rows, // sqlResults  
+                                        query, // userPrompt
+                                        dbConfig.type.toLocaleLowerCase(), // dbType
+                                        detailedVersionInfo, // dbVersion - Enhanced version information with feature support
+                                        3, // sampleSize - Sample size for OpenAI analysis
+                                        sqlAgent, // sqlAgent
+                                        organizationId, // organizationId
+                                        globalTableSampleData // tableSampleData - Pre-fetched sample data
+                                    );
+
+                                    console.log('✅ SQL restructuring completed');
+
+                                    // If we successfully generated a restructured SQL, execute it
+                                    if (restructuredResults && restructuredResults.restructure_success && restructuredResults.restructured_sql) {
+                                        try {
+                                            console.log('🔄 Executing restructured SQL query...');
+                                            console.log('🔧 Restructured SQL:', restructuredResults.restructured_sql);
+
+                                            // Check if connection is still valid, create new one if needed
+                                            if (!connection ||
+                                                (connection.state && connection.state === 'disconnected') ||
+                                                (connection.destroyed !== undefined && connection.destroyed) ||
+                                                (connection._fatalError !== undefined)) {
+                                                console.log('🔄 Recreating database connection for restructured SQL...');
+                                                if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                                    connection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                                } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                                    connection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                                }
+                                                console.log('✅ Database connection recreated successfully');
+                                            } else {
+                                                console.log('✅ Using existing database connection for restructured SQL');
+                                            }
+
+                                            let restructuredRows: any[] = [];
+                                            let restructuredFields: any = null;
+
+                                            // Execute the restructured SQL query
+                                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                                const [mysqlRows, mysqlFields] = await connection.execute(restructuredResults.restructured_sql);
+                                                restructuredRows = mysqlRows;
+                                                restructuredFields = mysqlFields;
+                                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                                const result = await connection.query(restructuredResults.restructured_sql);
+                                                restructuredRows = result.rows;
+                                                restructuredFields = result.fields;
+                                            }
+
+                                            console.log(`✅ Restructured query executed successfully, returned ${Array.isArray(restructuredRows) ? restructuredRows.length : 0} structured rows`);
+
+                                            // Add restructured data to sql_results
+                                            (response.sql_results as any).sql_final = parseRows(restructuredRows);
+                                            (response.sql_results as any).restructure_info = {
+                                                success: true,
+                                                message: "Successfully executed restructured SQL query",
+                                                restructured_sql: restructuredResults.restructured_sql,
+                                                explanation: restructuredResults.explanation,
+                                                grouping_logic: restructuredResults.grouping_logic,
+                                                expected_structure: restructuredResults.expected_structure,
+                                                main_entity: restructuredResults.main_entity,
+                                                original_record_count: rows.length,
+                                                restructured_record_count: Array.isArray(restructuredRows) ? restructuredRows.length : 0,
+                                                sample_size_used: 3,
+                                                database_type: dbConfig.type.toLocaleLowerCase(),
+                                                retry_count: restructuredRetryCount - 1 // Show how many retries were attempted
+                                            };
+                                            console.log('✅ Enhanced response with restructured SQL results');
+
+                                        } catch (restructuredSQLError: any) {
+                                            console.error('❌ Error executing restructured SQL:', restructuredSQLError.message);
+
+                                            // Check if this is a column-related error
+                                            const isColumnError = restructuredSQLError.message.toLowerCase().includes('unknown column') ||
+                                                (restructuredSQLError.message.toLowerCase().includes('column') && restructuredSQLError.message.toLowerCase().includes('doesn\'t exist')) ||
+                                                restructuredSQLError.message.toLowerCase().includes('no such column') ||
+                                                restructuredSQLError.message.toLowerCase().includes('invalid column name') ||
+                                                restructuredSQLError.message.toLowerCase().includes('field list');
+
+                                            // For all errors, use the same retry limit - keep trying until successful
+                                            const maxAttemptsForThisError = maxRestructuredRetries;
+
+                                            if (restructuredRetryCount >= maxAttemptsForThisError) {
+                                                console.log(`❌ Final attempt failed after ${maxAttemptsForThisError} attempts for restructured SQL execution (${isColumnError ? 'COLUMN ERROR' : 'GENERAL ERROR'})`);
+
+                                                // Fallback to original data with error info
+                                                (response.sql_results as any).restructure_info = {
+                                                    success: false,
+                                                    message: `Restructured SQL execution failed after ${maxAttemptsForThisError} attempts: ${restructuredSQLError.message}`,
+                                                    restructured_sql: restructuredResults.restructured_sql,
+                                                    explanation: restructuredResults.explanation,
+                                                    sql_error: restructuredSQLError.message,
+                                                    database_type: dbConfig.type.toLocaleLowerCase(),
+                                                    retry_count: restructuredRetryCount - 1,
+                                                    retry_exhausted: true,
+                                                    error_type: isColumnError ? 'column_error' : 'general_error',
+                                                    column_error_details: isColumnError ? extractColumnErrorDetails(restructuredSQLError.message) : undefined
+                                                };
+                                                console.log('⚠️ Restructured SQL execution failed after retries, keeping original data');
+                                                break; // Exit retry loop
+                                            } else {
+                                                console.log(`⚠️ Restructured SQL execution failed on attempt ${restructuredRetryCount} (${isColumnError ? 'COLUMN ERROR - will regenerate entire query' : 'SQL ERROR - will regenerate entire query'}), retrying whole flow...`);
+
+                                                if (isColumnError) {
+                                                    const columnErrorDetails = extractColumnErrorDetails(restructuredSQLError.message);
+                                                    console.log(`🔍 Column Error Details:`, columnErrorDetails);
+                                                    console.log('📋 Will regenerate entire restructured query with stricter column validation...');
+
+                                                    // Log available sample data for debugging
+                                                    const availableTables = Object.keys(globalTableSampleData);
+                                                    console.log(`📊 Available sample data tables: ${availableTables.join(', ')}`);
+
+                                                    // If we can extract the problematic column, log it for analysis
+                                                    if (columnErrorDetails.column_name) {
+                                                        console.log(`❌ Problematic column: ${columnErrorDetails.column_name}`);
+                                                        if (columnErrorDetails.table_alias) {
+                                                            console.log(`❌ Used table alias: ${columnErrorDetails.table_alias}`);
+                                                        }
+                                                    }
+                                                }
+
+                                                // Wait 5 seconds before retry
+                                                console.log('⏳ Waiting 5 seconds before retry...');
+                                                await new Promise(resolve => setTimeout(resolve, 5000));
+
+                                                // Continue to next iteration of retry loop
+                                                continue;
+                                            }
+                                        }
+
+                                        // Success case - exit retry loop
+                                        break;
+                                    } else {
+                                        // Generation failed
+                                        console.log(`⚠️ Restructured SQL generation failed on attempt ${restructuredRetryCount}`);
+
+                                        if (restructuredRetryCount >= maxRestructuredRetries) {
+                                            console.log('❌ Final attempt failed, no more retries for restructured SQL generation');
+
+                                            (response.sql_results as any).restructure_info = {
+                                                success: false,
+                                                message: `Restructured SQL generation failed after ${maxRestructuredRetries} attempts: ${restructuredResults?.restructure_message || 'Unknown error'}`,
+                                                error_details: restructuredResults?.error_details,
+                                                explanation: restructuredResults?.explanation,
+                                                database_type: dbConfig.type.toLocaleLowerCase(),
+                                                retry_count: restructuredRetryCount - 1,
+                                                retry_exhausted: true
+                                            };
+                                            console.log('⚠️ Restructured SQL generation failed after retries, keeping original data');
+                                            break; // Exit retry loop
+                                        } else {
+                                            console.log(`⚠️ Restructured SQL generation failed on attempt ${restructuredRetryCount}, retrying whole generation flow...`);
+
+                                            // Wait 5 seconds before retry
+                                            console.log('⏳ Waiting 5 seconds before retry...');
+                                            await new Promise(resolve => setTimeout(resolve, 5000));
+
+                                            // Continue to next iteration of retry loop
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    (response.sql_results as any).restructure_info = {
+                                        success: false,
+                                        message: 'No data available for restructuring',
+                                        skipped: true,
                                         database_type: dbConfig.type.toLocaleLowerCase()
                                     };
-                                    console.log('⚠️ Restructured SQL execution failed, keeping original data');
+                                    console.log('⚠️ Skipping restructuring - no data available');
+                                    break; // Exit retry loop for this condition
                                 }
-                            } else {
-                                (response.sql_results as any).restructure_info = {
-                                    success: false,
-                                    message: restructuredResults?.restructure_message || 'Restructured SQL generation failed',
-                                    error_details: restructuredResults?.error_details,
-                                    explanation: restructuredResults?.explanation,
-                                    database_type: dbConfig.type.toLocaleLowerCase()
-                                };
-                                console.log('⚠️ Restructured SQL generation failed, keeping original data');
+
+                                // If we reach here, operation completed successfully
+                                break;
+
+                            } catch (restructureError: any) {
+                                console.error(`❌ Error during SQL results restructuring (attempt ${restructuredRetryCount}):`, restructureError.message);
+
+                                if (restructuredRetryCount >= maxRestructuredRetries) {
+                                    console.log(`❌ Final attempt failed after ${maxRestructuredRetries} attempts for restructuring process`);
+
+                                    (response.sql_results as any).restructure_info = {
+                                        success: false,
+                                        message: `Restructuring process failed after ${maxRestructuredRetries} attempts: ${restructureError.message}`,
+                                        error_details: restructureError.message,
+                                        database_type: dbConfig.type.toLocaleLowerCase(),
+                                        retry_count: restructuredRetryCount - 1,
+                                        retry_exhausted: true
+                                    };
+                                    break; // Exit retry loop
+                                } else {
+                                    console.log(`⚠️ Restructuring process failed on attempt ${restructuredRetryCount}, retrying entire restructure flow...`);
+
+                                    // Wait 5 seconds before retry
+                                    console.log('⏳ Waiting 5 seconds before retry...');
+                                    await new Promise(resolve => setTimeout(resolve, 5000));
+
+                                    // Continue to next iteration of retry loop
+                                    continue;
+                                }
                             }
-                        } else {
-                            (response.sql_results as any).restructure_info = {
-                                success: false,
-                                message: 'No data available for restructuring',
-                                skipped: true,
-                                database_type: dbConfig.type.toLocaleLowerCase()
-                            };
-                            console.log('⚠️ Skipping restructuring - no data available');
                         }
-                    } catch (restructureError: any) {
-                        console.error('❌ Error during SQL results restructuring:', restructureError.message);
-                        (response.sql_results as any).restructure_info = {
-                            success: false,
-                            message: 'Restructuring process failed',
-                            error_details: restructureError.message,
-                            database_type: dbConfig.type.toLocaleLowerCase()
-                        };
-                    }
 
-                    // ========== BAR CHART ANALYSIS LAYER ==========
-                    // Add Azure OpenAI bar chart analysis before sending response
-                    console.log('📊 Step 5: Adding bar chart analysis layer...');
+                        // ========== BAR CHART ANALYSIS LAYER ==========
+                        // Add Azure OpenAI bar chart analysis before sending response
+                        console.log('📊 Step 5: Adding bar chart analysis layer...');
 
-                    try {
-                        // Get the data for analysis (use restructured data if available, otherwise original data)
-                        const dataForAnalysis = (response.sql_results as any).sql_final || rows;
+                        try {
+                            // Get the data for analysis (use restructured data if available, otherwise original data)
+                            const dataForAnalysis = (response.sql_results as any).sql_final || rows;
 
-                        if (dataForAnalysis && Array.isArray(dataForAnalysis) && dataForAnalysis.length > 0) {
-                            console.log('🤖 Calling Azure OpenAI for bar chart analysis...');
+                            if (dataForAnalysis && Array.isArray(dataForAnalysis) && dataForAnalysis.length > 0) {
+                                console.log('🤖 Calling Azure OpenAI for bar chart analysis...');
 
-                            const barChartAnalysis = await generateBarChartAnalysis(
-                                finalSQL,
-                                query,
-                                dataForAnalysis,
-                                organizationId
-                            );
+                                const barChartAnalysis = await generateBarChartAnalysis(
+                                    finalSQL,
+                                    query,
+                                    dataForAnalysis,
+                                    organizationId
+                                );
 
-                            // Add bar chart analysis to the response
-                            (response as any).bar_chart_analysis = barChartAnalysis;
-                            console.log('✅ Bar chart analysis completed and added to response');
-                        } else {
-                            console.log('⚠️ No data available for bar chart analysis');
+                                // Add bar chart analysis to the response
+                                (response as any).bar_chart_analysis = barChartAnalysis;
+                                console.log('✅ Bar chart analysis completed and added to response');
+                            } else {
+                                console.log('⚠️ No data available for bar chart analysis');
+                                (response as any).bar_chart_analysis = {
+                                    bar_chart_success: false,
+                                    message: "No data available for bar chart analysis",
+                                    timestamp: new Date().toISOString()
+                                };
+                            }
+                        } catch (barChartError: any) {
+                            console.error('❌ Error during bar chart analysis:', barChartError.message);
                             (response as any).bar_chart_analysis = {
                                 bar_chart_success: false,
-                                message: "No data available for bar chart analysis",
+                                message: `Bar chart analysis failed: ${barChartError.message}`,
+                                error_details: barChartError.message,
                                 timestamp: new Date().toISOString()
                             };
                         }
-                    } catch (barChartError: any) {
-                        console.error('❌ Error during bar chart analysis:', barChartError.message);
-                        (response as any).bar_chart_analysis = {
-                            bar_chart_success: false,
-                            message: `Bar chart analysis failed: ${barChartError.message}`,
-                            error_details: barChartError.message,
-                            timestamp: new Date().toISOString()
-                        };
-                    }
-                    // ================================================
+                        // ================================================
 
-                    res.json(response);
+                        // ========== RETRY LOGIC FOR ZERO RECORDS ==========
+                        // Check if we got zero records and should retry entire API execution
+                        const hasZeroRecords = Array.isArray((response.sql_results as any).sql_final) &&
+                            (response.sql_results as any).sql_final.length === 0;
 
-                    // Cleanup: Close database connections to prevent "Too many connections" errors
-                    try {
-                        if (connection) {
-                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                                if (!connection.destroyed) {
-                                    await connection.end();
+                        if (hasZeroRecords && currentAttempt < maxRetryAttempts) {
+                            console.log(`🔄 Zero records returned on attempt ${currentAttempt}. Triggering full API retry...`);
+
+                            // Cleanup current attempt connections before retry
+                            try {
+                                if (connection) {
+                                    if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                        if (!connection.destroyed) {
+                                            await connection.end();
+                                        }
+                                    } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                        if (!connection._ended) {
+                                            await connection.end();
+                                        }
+                                    }
+                                    console.log('🔌 Cleaned up database connection for retry');
                                 }
-                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                                if (!connection._ended) {
-                                    await connection.end();
+                                await databaseService.closeOrganizationConnections(organizationId);
+                            } catch (cleanupError) {
+                                console.error(`❌ Error during retry cleanup:`, cleanupError);
+                            }
+
+                            // Mark this attempt as incomplete to trigger retry
+                            debugInfo.sqlCorrections.push(`Attempt ${currentAttempt}: Zero records returned, triggering full API retry`);
+                            currentAttempt++;
+                            continue; // Go to next iteration of retry loop
+                        } else {
+                            // Either we have records OR we've exhausted retry attempts
+                            if (hasZeroRecords) {
+                                console.log(`⚠️ Zero records returned on final attempt ${currentAttempt}. Proceeding with empty result.`);
+                                debugInfo.sqlCorrections.push(`Final attempt ${currentAttempt}: Zero records returned, no more retries`);
+                            } else {
+                                console.log(`✅ Attempt ${currentAttempt} successful with ${response.result_count} records`);
+                                if (currentAttempt > 1) {
+                                    debugInfo.sqlCorrections.push(`Attempt ${currentAttempt}: Success after ${currentAttempt - 1} retries`);
                                 }
                             }
-                            console.log('✅ Primary database connection closed');
+
+                            // Set final result to break out of retry loop
+                            finalResult = response;
+                            break;
                         }
+                        // ========== END RETRY LOGIC ==========
 
-                        await databaseService.closeOrganizationConnections(organizationId);
-                        console.log(`🔌 Closed all database connections for organization: ${organizationId}`);
-                    } catch (cleanupError) {
-                        console.error(`❌ Error closing database connections for organization ${organizationId}:`, cleanupError);
-                    }
-
-                } catch (sqlError: any) {
-                    console.error('❌ SQL execution failed:', sqlError.message);
-
-                    // Cleanup: Close database connections to prevent "Too many connections" errors
-                    try {
-                        await databaseService.closeOrganizationConnections(organizationId);
-                        console.log(`🔌 Closed database connections for organization: ${organizationId}`);
-                    } catch (cleanupError) {
-                        console.error(`❌ Error closing database connections for organization ${organizationId}:`, cleanupError);
-                    }
-
-                    // Enhanced error analysis and suggestions
-                    const suggestedFixes: string[] = [];
-                    let errorDetails: any = {};
-
-                    // Handle column not found errors
-                    if (sqlError.message.includes('Unknown column') || sqlError.message.includes('column') && sqlError.message.includes('doesn\'t exist')) {
-                        // Extract the problematic column name
-                        const columnMatch = sqlError.message.match(/Unknown column '([^']+)'/);
-                        const badColumn = columnMatch ? columnMatch[1] : 'unknown';
-
-                        console.log(`🚨 Column error detected: "${badColumn}"`);
-
-                        // Determine if it's a table.column pattern
-                        let tableName, columnName;
-                        if (badColumn.includes('.')) {
-                            [tableName, columnName] = badColumn.split('.');
-                        }
-
+                        // Cleanup: Close database connections to prevent "Too many connections" errors
                         try {
-                            // Create a new connection for error analysis
-                            let errorConnection: any;
-                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                                errorConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                                errorConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                            if (connection) {
+                                if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                    if (!connection.destroyed) {
+                                        await connection.end();
+                                    }
+                                } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                    if (!connection._ended) {
+                                        await connection.end();
+                                    }
+                                }
+                                console.log('✅ Primary database connection closed');
                             }
 
-                            if (errorConnection && tableName && columnName) {
-                                // Get database configuration for error handling
-                                const dbConfigForError = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                            await databaseService.closeOrganizationConnections(organizationId);
+                            console.log(`🔌 Closed all database connections for organization: ${organizationId}`);
+                        } catch (cleanupError) {
+                            console.error(`❌ Error closing database connections for organization ${organizationId}:`, cleanupError);
+                        }
 
-                                if (dbConfigForError.type === 'mysql') {
-                                    // First verify the table exists
-                                    const [tableResult] = await errorConnection.execute(
-                                        "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
-                                        [dbConfigForError.database, tableName]
-                                    );
+                    } catch (sqlError: any) {
+                        console.error('❌ SQL execution failed:', sqlError.message);
 
-                                    if (Array.isArray(tableResult) && tableResult.length > 0) {
-                                        // Table exists, get all its columns
-                                        const [columns] = await errorConnection.execute(
-                                            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                        // Cleanup: Close database connections to prevent "Too many connections" errors
+                        try {
+                            await databaseService.closeOrganizationConnections(organizationId);
+                            console.log(`🔌 Closed database connections for organization: ${organizationId}`);
+                        } catch (cleanupError) {
+                            console.error(`❌ Error closing database connections for organization ${organizationId}:`, cleanupError);
+                        }
+
+                        // Enhanced error analysis and suggestions
+                        const suggestedFixes: string[] = [];
+                        let errorDetails: any = {};
+
+                        // Handle column not found errors
+                        if (sqlError.message.includes('Unknown column') || sqlError.message.includes('column') && sqlError.message.includes('doesn\'t exist')) {
+                            // Extract the problematic column name
+                            const columnMatch = sqlError.message.match(/Unknown column '([^']+)'/);
+                            const badColumn = columnMatch ? columnMatch[1] : 'unknown';
+
+                            console.log(`🚨 Column error detected: "${badColumn}"`);
+
+                            // Determine if it's a table.column pattern
+                            let tableName, columnName;
+                            if (badColumn.includes('.')) {
+                                [tableName, columnName] = badColumn.split('.');
+                            }
+
+                            try {
+                                // Create a new connection for error analysis
+                                let errorConnection: any;
+                                if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                    errorConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                    errorConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                }
+
+                                if (errorConnection && tableName && columnName) {
+                                    // Get database configuration for error handling
+                                    const dbConfigForError = await databaseService.getOrganizationDatabaseConnection(organizationId);
+
+                                    if (dbConfigForError.type === 'mysql') {
+                                        // First verify the table exists
+                                        const [tableResult] = await errorConnection.execute(
+                                            "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
                                             [dbConfigForError.database, tableName]
                                         );
 
-                                        if (Array.isArray(columns) && columns.length > 0) {
-                                            const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
-
-                                            // Look for similar column names
-                                            // 1. Check for snake_case vs camelCase
-                                            const similarByCase = actualColumns.find((col: string) =>
-                                                col.replace(/_/g, '').toLowerCase() === columnName.toLowerCase()
+                                        if (Array.isArray(tableResult) && tableResult.length > 0) {
+                                            // Table exists, get all its columns
+                                            const [columns] = await errorConnection.execute(
+                                                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                                                [dbConfigForError.database, tableName]
                                             );
 
-                                            // 2. Check for simple typos or close matches
-                                            const similarByPrefix = actualColumns.find((col: string) =>
-                                                (col.toLowerCase().startsWith(columnName.toLowerCase()) ||
-                                                    columnName.toLowerCase().startsWith(col.toLowerCase())) &&
-                                                col.length > 2
+                                            if (Array.isArray(columns) && columns.length > 0) {
+                                                const actualColumns = columns.map((col: any) => col.COLUMN_NAME);
+
+                                                // Look for similar column names
+                                                // 1. Check for snake_case vs camelCase
+                                                const similarByCase = actualColumns.find((col: string) =>
+                                                    col.replace(/_/g, '').toLowerCase() === columnName.toLowerCase()
+                                                );
+
+                                                // 2. Check for simple typos or close matches
+                                                const similarByPrefix = actualColumns.find((col: string) =>
+                                                    (col.toLowerCase().startsWith(columnName.toLowerCase()) ||
+                                                        columnName.toLowerCase().startsWith(col.toLowerCase())) &&
+                                                    col.length > 2
+                                                );
+
+                                                const suggestedColumn = similarByCase || similarByPrefix;
+
+                                                if (suggestedColumn) {
+                                                    console.log(`🔄 Suggested column correction: '${columnName}' → '${suggestedColumn}'`);
+                                                    suggestedFixes.push(`Use '${tableName}.${suggestedColumn}' instead of '${badColumn}'`);
+
+                                                    errorDetails = {
+                                                        error_type: 'column_not_found',
+                                                        problematic_column: badColumn,
+                                                        suggested_column: `${tableName}.${suggestedColumn}`,
+                                                        suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Did you mean '${suggestedColumn}'?`
+                                                    };
+                                                } else {
+                                                    // No similar column found, show available columns
+                                                    const availableColumns = actualColumns.slice(0, 10).join(', ');
+                                                    errorDetails = {
+                                                        error_type: 'column_not_found',
+                                                        problematic_column: badColumn,
+                                                        available_columns: availableColumns,
+                                                        suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Available columns: ${availableColumns}...`
+                                                    };
+                                                    suggestedFixes.push(`Choose a column from: ${availableColumns}...`);
+                                                }
+                                            }
+                                        } else {
+                                            // Table doesn't exist, look for similar table names
+                                            const [allTables] = await errorConnection.execute(
+                                                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
+                                                [dbConfigForError.database]
                                             );
 
-                                            const suggestedColumn = similarByCase || similarByPrefix;
+                                            if (Array.isArray(allTables) && allTables.length > 0) {
+                                                const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
 
-                                            if (suggestedColumn) {
-                                                console.log(`🔄 Suggested column correction: '${columnName}' → '${suggestedColumn}'`);
-                                                suggestedFixes.push(`Use '${tableName}.${suggestedColumn}' instead of '${badColumn}'`);
+                                                // Similar matching as before
+                                                const similarTable = allTableNames.find((t: string) =>
+                                                    t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase() ||
+                                                    t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                                    tableName.toLowerCase().startsWith(t.toLowerCase())
+                                                );
 
-                                                errorDetails = {
-                                                    error_type: 'column_not_found',
-                                                    problematic_column: badColumn,
-                                                    suggested_column: `${tableName}.${suggestedColumn}`,
-                                                    suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Did you mean '${suggestedColumn}'?`
-                                                };
-                                            } else {
-                                                // No similar column found, show available columns
-                                                const availableColumns = actualColumns.slice(0, 10).join(', ');
-                                                errorDetails = {
-                                                    error_type: 'column_not_found',
-                                                    problematic_column: badColumn,
-                                                    available_columns: availableColumns,
-                                                    suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Available columns: ${availableColumns}...`
-                                                };
-                                                suggestedFixes.push(`Choose a column from: ${availableColumns}...`);
+                                                if (similarTable) {
+                                                    console.log(`🔄 Table '${tableName}' doesn't exist, but found similar table '${similarTable}'`);
+                                                    suggestedFixes.push(`Use table '${similarTable}' instead of '${tableName}'`);
+                                                    errorDetails = {
+                                                        error_type: 'table_and_column_not_found',
+                                                        problematic_table: tableName,
+                                                        problematic_column: columnName,
+                                                        suggested_table: similarTable,
+                                                        suggestion: `Both table '${tableName}' and column '${columnName}' have issues. Try using table '${similarTable}' instead.`
+                                                    };
+                                                }
                                             }
                                         }
-                                    } else {
-                                        // Table doesn't exist, look for similar table names
+                                    } else if (dbConfigForError.type === 'postgresql') {
+                                        // PostgreSQL error analysis
+                                        const tableResult = await errorConnection.query(
+                                            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
+                                            [tableName]
+                                        );
+
+                                        if (tableResult.rows && tableResult.rows.length > 0) {
+                                            // Table exists, get all its columns
+                                            const columnsResult = await errorConnection.query(
+                                                "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1",
+                                                [tableName]
+                                            );
+
+                                            if (columnsResult.rows && columnsResult.rows.length > 0) {
+                                                const actualColumns = columnsResult.rows.map((col: any) => col.column_name);
+
+                                                // Look for similar column names
+                                                const similarByCase = actualColumns.find((col: string) =>
+                                                    col.replace(/_/g, '').toLowerCase() === columnName.toLowerCase()
+                                                );
+
+                                                const similarByPrefix = actualColumns.find((col: string) =>
+                                                    (col.toLowerCase().startsWith(columnName.toLowerCase()) ||
+                                                        columnName.toLowerCase().startsWith(col.toLowerCase())) &&
+                                                    col.length > 2
+                                                );
+
+                                                const suggestedColumn = similarByCase || similarByPrefix;
+
+                                                if (suggestedColumn) {
+                                                    console.log(`🔄 Suggested column correction: '${columnName}' → '${suggestedColumn}'`);
+                                                    suggestedFixes.push(`Use '${tableName}.${suggestedColumn}' instead of '${badColumn}'`);
+
+                                                    errorDetails = {
+                                                        error_type: 'column_not_found',
+                                                        problematic_column: badColumn,
+                                                        suggested_column: `${tableName}.${suggestedColumn}`,
+                                                        suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Did you mean '${suggestedColumn}'?`
+                                                    };
+                                                } else {
+                                                    const availableColumns = actualColumns.slice(0, 10).join(', ');
+                                                    errorDetails = {
+                                                        error_type: 'column_not_found',
+                                                        problematic_column: badColumn,
+                                                        available_columns: availableColumns,
+                                                        suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Available columns: ${availableColumns}...`
+                                                    };
+                                                    suggestedFixes.push(`Choose a column from: ${availableColumns}...`);
+                                                }
+                                            }
+                                        } else {
+                                            // Table doesn't exist, look for similar table names
+                                            const allTablesResult = await errorConnection.query(
+                                                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                                            );
+
+                                            if (allTablesResult.rows && allTablesResult.rows.length > 0) {
+                                                const allTableNames = allTablesResult.rows.map((t: any) => t.tablename);
+
+                                                const similarTable = allTableNames.find((t: string) =>
+                                                    t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase() ||
+                                                    t.toLowerCase().startsWith(tableName.toLowerCase()) ||
+                                                    tableName.toLowerCase().startsWith(t.toLowerCase())
+                                                );
+
+                                                if (similarTable) {
+                                                    console.log(`🔄 Table '${tableName}' doesn't exist, but found similar table '${similarTable}'`);
+                                                    suggestedFixes.push(`Use table '${similarTable}' instead of '${tableName}'`);
+                                                    errorDetails = {
+                                                        error_type: 'table_and_column_not_found',
+                                                        problematic_table: tableName,
+                                                        problematic_column: columnName,
+                                                        suggested_table: similarTable,
+                                                        suggestion: `Both table '${tableName}' and column '${columnName}' have issues. Try using table '${similarTable}' instead.`
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Close error analysis connection
+                                    if (dbConfigForError.type === 'mysql') {
+                                        await errorConnection.end();
+                                    } else if (dbConfigForError.type === 'postgresql') {
+                                        await errorConnection.end();
+                                    }
+                                }
+                            } catch (analyzeError) {
+                                console.error('Error during error analysis:', analyzeError);
+                            }
+
+                            // Fallback if we couldn't provide better guidance
+                            if (Object.keys(errorDetails).length === 0) {
+                                errorDetails = {
+                                    error_type: 'column_not_found',
+                                    problematic_column: badColumn,
+                                    suggestion: `The column '${badColumn}' does not exist in the database. Try using snake_case format (e.g., 'full_name' instead of 'fullname').`
+                                };
+                            }
+
+                            debugInfo.sqlCorrections.push(`Error with column: ${badColumn}`);
+                        }
+                        // Handle table not found errors
+                        else if (sqlError.message.includes('doesn\'t exist')) {
+                            // Extract the problematic table name
+                            const tableMatch = sqlError.message.match(/Table '.*\.(\w+)' doesn't exist/);
+                            const badTable = tableMatch ? tableMatch[1] : 'unknown';
+
+                            console.log(`🚨 Table error detected: "${badTable}"`);
+
+                            try {
+                                // Create a new connection for error analysis
+                                let errorConnection: any;
+                                if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
+                                    errorConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
+                                    errorConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                }
+
+                                if (errorConnection) {
+                                    // Get database configuration for error handling
+                                    const dbConfigForTableError = await databaseService.getOrganizationDatabaseConnection(organizationId);
+
+                                    if (dbConfigForTableError.type === 'mysql') {
                                         const [allTables] = await errorConnection.execute(
                                             "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                            [dbConfigForError.database]
+                                            [dbConfigForTableError.database]
                                         );
 
                                         if (Array.isArray(allTables) && allTables.length > 0) {
@@ -5528,77 +6048,23 @@ Return only valid, semantic HTML.`;
 
                                             // Similar matching as before
                                             const similarTable = allTableNames.find((t: string) =>
-                                                t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase() ||
-                                                t.toLowerCase().startsWith(tableName.toLowerCase()) ||
-                                                tableName.toLowerCase().startsWith(t.toLowerCase())
+                                                t.replace(/_/g, '').toLowerCase() === badTable.toLowerCase() ||
+                                                t.toLowerCase().startsWith(badTable.toLowerCase()) ||
+                                                badTable.toLowerCase().startsWith(t.toLowerCase())
                                             );
 
                                             if (similarTable) {
-                                                console.log(`🔄 Table '${tableName}' doesn't exist, but found similar table '${similarTable}'`);
-                                                suggestedFixes.push(`Use table '${similarTable}' instead of '${tableName}'`);
+                                                console.log(`🔄 Found similar table: '${similarTable}' instead of '${badTable}'`);
+                                                suggestedFixes.push(`Use table '${similarTable}' instead of '${badTable}'`);
                                                 errorDetails = {
-                                                    error_type: 'table_and_column_not_found',
-                                                    problematic_table: tableName,
-                                                    problematic_column: columnName,
+                                                    error_type: 'table_not_found',
+                                                    problematic_table: badTable,
                                                     suggested_table: similarTable,
-                                                    suggestion: `Both table '${tableName}' and column '${columnName}' have issues. Try using table '${similarTable}' instead.`
+                                                    suggestion: `The table '${badTable}' does not exist. Did you mean '${similarTable}'?`
                                                 };
                                             }
                                         }
-                                    }
-                                } else if (dbConfigForError.type === 'postgresql') {
-                                    // PostgreSQL error analysis
-                                    const tableResult = await errorConnection.query(
-                                        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
-                                        [tableName]
-                                    );
-
-                                    if (tableResult.rows && tableResult.rows.length > 0) {
-                                        // Table exists, get all its columns
-                                        const columnsResult = await errorConnection.query(
-                                            "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1",
-                                            [tableName]
-                                        );
-
-                                        if (columnsResult.rows && columnsResult.rows.length > 0) {
-                                            const actualColumns = columnsResult.rows.map((col: any) => col.column_name);
-
-                                            // Look for similar column names
-                                            const similarByCase = actualColumns.find((col: string) =>
-                                                col.replace(/_/g, '').toLowerCase() === columnName.toLowerCase()
-                                            );
-
-                                            const similarByPrefix = actualColumns.find((col: string) =>
-                                                (col.toLowerCase().startsWith(columnName.toLowerCase()) ||
-                                                    columnName.toLowerCase().startsWith(col.toLowerCase())) &&
-                                                col.length > 2
-                                            );
-
-                                            const suggestedColumn = similarByCase || similarByPrefix;
-
-                                            if (suggestedColumn) {
-                                                console.log(`🔄 Suggested column correction: '${columnName}' → '${suggestedColumn}'`);
-                                                suggestedFixes.push(`Use '${tableName}.${suggestedColumn}' instead of '${badColumn}'`);
-
-                                                errorDetails = {
-                                                    error_type: 'column_not_found',
-                                                    problematic_column: badColumn,
-                                                    suggested_column: `${tableName}.${suggestedColumn}`,
-                                                    suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Did you mean '${suggestedColumn}'?`
-                                                };
-                                            } else {
-                                                const availableColumns = actualColumns.slice(0, 10).join(', ');
-                                                errorDetails = {
-                                                    error_type: 'column_not_found',
-                                                    problematic_column: badColumn,
-                                                    available_columns: availableColumns,
-                                                    suggestion: `The column '${columnName}' does not exist in table '${tableName}'. Available columns: ${availableColumns}...`
-                                                };
-                                                suggestedFixes.push(`Choose a column from: ${availableColumns}...`);
-                                            }
-                                        }
-                                    } else {
-                                        // Table doesn't exist, look for similar table names
+                                    } else if (dbConfigForTableError.type === 'postgresql') {
                                         const allTablesResult = await errorConnection.query(
                                             "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
                                         );
@@ -5607,169 +6073,70 @@ Return only valid, semantic HTML.`;
                                             const allTableNames = allTablesResult.rows.map((t: any) => t.tablename);
 
                                             const similarTable = allTableNames.find((t: string) =>
-                                                t.replace(/_/g, '').toLowerCase() === tableName.toLowerCase() ||
-                                                t.toLowerCase().startsWith(tableName.toLowerCase()) ||
-                                                tableName.toLowerCase().startsWith(t.toLowerCase())
+                                                t.replace(/_/g, '').toLowerCase() === badTable.toLowerCase() ||
+                                                t.toLowerCase().startsWith(badTable.toLowerCase()) ||
+                                                badTable.toLowerCase().startsWith(t.toLowerCase())
                                             );
 
                                             if (similarTable) {
-                                                console.log(`🔄 Table '${tableName}' doesn't exist, but found similar table '${similarTable}'`);
-                                                suggestedFixes.push(`Use table '${similarTable}' instead of '${tableName}'`);
+                                                console.log(`🔄 Found similar table: '${similarTable}' instead of '${badTable}'`);
+                                                suggestedFixes.push(`Use table '${similarTable}' instead of '${badTable}'`);
                                                 errorDetails = {
-                                                    error_type: 'table_and_column_not_found',
-                                                    problematic_table: tableName,
-                                                    problematic_column: columnName,
+                                                    error_type: 'table_not_found',
+                                                    problematic_table: badTable,
                                                     suggested_table: similarTable,
-                                                    suggestion: `Both table '${tableName}' and column '${columnName}' have issues. Try using table '${similarTable}' instead.`
+                                                    suggestion: `The table '${badTable}' does not exist. Did you mean '${similarTable}'?`
                                                 };
                                             }
                                         }
                                     }
-                                }
 
-                                // Close error analysis connection
-                                if (dbConfigForError.type === 'mysql') {
-                                    await errorConnection.end();
-                                } else if (dbConfigForError.type === 'postgresql') {
-                                    await errorConnection.end();
+                                    // Close error analysis connection
+                                    if (dbConfigForTableError.type === 'mysql') {
+                                        await errorConnection.end();
+                                    } else if (dbConfigForTableError.type === 'postgresql') {
+                                        await errorConnection.end();
+                                    }
                                 }
+                            } catch (analyzeError) {
+                                console.error('Error during table error analysis:', analyzeError);
                             }
-                        } catch (analyzeError) {
-                            console.error('Error during error analysis:', analyzeError);
-                        }
 
-                        // Fallback if we couldn't provide better guidance
-                        if (Object.keys(errorDetails).length === 0) {
+                            // Fallback if we couldn't provide better guidance
+                            if (Object.keys(errorDetails).length === 0) {
+                                errorDetails = {
+                                    error_type: 'table_not_found',
+                                    problematic_table: badTable,
+                                    suggestion: `The table '${badTable}' does not exist in the database. Try using snake_case format (e.g., 'pgx_test_results' instead of 'pgxtestresults').`
+                                };
+                            }
+
+                            debugInfo.sqlCorrections.push(`Error with table: ${badTable}`);
+                        }
+                        // Handle other types of SQL errors
+                        else {
                             errorDetails = {
-                                error_type: 'column_not_found',
-                                problematic_column: badColumn,
-                                suggestion: `The column '${badColumn}' does not exist in the database. Try using snake_case format (e.g., 'full_name' instead of 'fullname').`
+                                error_type: 'general_sql_error',
+                                message: sqlError.message,
+                                suggestion: 'Check SQL syntax, table relationships, or data types.'
                             };
                         }
 
-                        debugInfo.sqlCorrections.push(`Error with column: ${badColumn}`);
-                    }
-                    // Handle table not found errors
-                    else if (sqlError.message.includes('doesn\'t exist')) {
-                        // Extract the problematic table name
-                        const tableMatch = sqlError.message.match(/Table '.*\.(\w+)' doesn't exist/);
-                        const badTable = tableMatch ? tableMatch[1] : 'unknown';
-
-                        console.log(`🚨 Table error detected: "${badTable}"`);
-
-                        try {
-                            // Create a new connection for error analysis
-                            let errorConnection: any;
-                            if (dbConfig.type.toLocaleLowerCase() === 'mysql') {
-                                errorConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                            } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
-                                errorConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                            }
-
-                            if (errorConnection) {
-                                // Get database configuration for error handling
-                                const dbConfigForTableError = await databaseService.getOrganizationDatabaseConnection(organizationId);
-
-                                if (dbConfigForTableError.type === 'mysql') {
-                                    const [allTables] = await errorConnection.execute(
-                                        "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?",
-                                        [dbConfigForTableError.database]
-                                    );
-
-                                    if (Array.isArray(allTables) && allTables.length > 0) {
-                                        const allTableNames = allTables.map((t: any) => t.TABLE_NAME);
-
-                                        // Similar matching as before
-                                        const similarTable = allTableNames.find((t: string) =>
-                                            t.replace(/_/g, '').toLowerCase() === badTable.toLowerCase() ||
-                                            t.toLowerCase().startsWith(badTable.toLowerCase()) ||
-                                            badTable.toLowerCase().startsWith(t.toLowerCase())
-                                        );
-
-                                        if (similarTable) {
-                                            console.log(`🔄 Found similar table: '${similarTable}' instead of '${badTable}'`);
-                                            suggestedFixes.push(`Use table '${similarTable}' instead of '${badTable}'`);
-                                            errorDetails = {
-                                                error_type: 'table_not_found',
-                                                problematic_table: badTable,
-                                                suggested_table: similarTable,
-                                                suggestion: `The table '${badTable}' does not exist. Did you mean '${similarTable}'?`
-                                            };
-                                        }
-                                    }
-                                } else if (dbConfigForTableError.type === 'postgresql') {
-                                    const allTablesResult = await errorConnection.query(
-                                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-                                    );
-
-                                    if (allTablesResult.rows && allTablesResult.rows.length > 0) {
-                                        const allTableNames = allTablesResult.rows.map((t: any) => t.tablename);
-
-                                        const similarTable = allTableNames.find((t: string) =>
-                                            t.replace(/_/g, '').toLowerCase() === badTable.toLowerCase() ||
-                                            t.toLowerCase().startsWith(badTable.toLowerCase()) ||
-                                            badTable.toLowerCase().startsWith(t.toLowerCase())
-                                        );
-
-                                        if (similarTable) {
-                                            console.log(`🔄 Found similar table: '${similarTable}' instead of '${badTable}'`);
-                                            suggestedFixes.push(`Use table '${similarTable}' instead of '${badTable}'`);
-                                            errorDetails = {
-                                                error_type: 'table_not_found',
-                                                problematic_table: badTable,
-                                                suggested_table: similarTable,
-                                                suggestion: `The table '${badTable}' does not exist. Did you mean '${similarTable}'?`
-                                            };
-                                        }
-                                    }
-                                }
-
-                                // Close error analysis connection
-                                if (dbConfigForTableError.type === 'mysql') {
-                                    await errorConnection.end();
-                                } else if (dbConfigForTableError.type === 'postgresql') {
-                                    await errorConnection.end();
-                                }
-                            }
-                        } catch (analyzeError) {
-                            console.error('Error during table error analysis:', analyzeError);
+                        if (suggestedFixes.length > 0) {
+                            debugInfo.sqlCorrections.push(`Suggested fixes: ${suggestedFixes.join('; ')}`);
                         }
 
-                        // Fallback if we couldn't provide better guidance
-                        if (Object.keys(errorDetails).length === 0) {
-                            errorDetails = {
-                                error_type: 'table_not_found',
-                                problematic_table: badTable,
-                                suggestion: `The table '${badTable}' does not exist in the database. Try using snake_case format (e.g., 'pgx_test_results' instead of 'pgxtestresults').`
-                            };
-                        }
+                        const processingTime = performance.now() - startTime;
 
-                        debugInfo.sqlCorrections.push(`Error with table: ${badTable}`);
-                    }
-                    // Handle other types of SQL errors
-                    else {
-                        errorDetails = {
-                            error_type: 'general_sql_error',
-                            message: sqlError.message,
-                            suggestion: 'Check SQL syntax, table relationships, or data types.'
-                        };
-                    }
+                        // Generate error description to help users understand what went wrong
+                        let errorDescription = '';
+                        if (generateDescription) {
+                            try {
+                                const langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
+                                const llm = (langchainApp as any).llm;
 
-                    if (suggestedFixes.length > 0) {
-                        debugInfo.sqlCorrections.push(`Suggested fixes: ${suggestedFixes.join('; ')}`);
-                    }
-
-                    const processingTime = performance.now() - startTime;
-
-                    // Generate error description to help users understand what went wrong
-                    let errorDescription = '';
-                    if (generateDescription) {
-                        try {
-                            const langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
-                            const llm = (langchainApp as any).llm;
-
-                            if (llm) {
-                                const errorDescriptionPrompt = `You are a helpful database assistant. A user's SQL query failed with an error. Explain what went wrong in simple, non-technical terms and suggest how to fix it.
+                                if (llm) {
+                                    const errorDescriptionPrompt = `You are a helpful database assistant. A user's SQL query failed with an error. Explain what went wrong in simple, non-technical terms and suggest how to fix it.
 
 User's Original Question: ${query}
 Generated SQL: ${finalSQL}
@@ -5783,48 +6150,97 @@ Provide a brief, user-friendly explanation (2-3 sentences) that:
 
 Avoid technical jargon and focus on helping the user get the information they need.`;
 
-                                const errorDescResponse = await llm.invoke(errorDescriptionPrompt);
-                                errorDescription = typeof errorDescResponse === 'string' ? errorDescResponse : errorDescResponse.content || '';
-                                console.log('✅ Generated error description');
-                            } else {
-                                errorDescription = 'An error occurred while processing your query. Please try rephrasing your question or contact support.';
+                                    const errorDescResponse = await llm.invoke(errorDescriptionPrompt);
+                                    errorDescription = typeof errorDescResponse === 'string' ? errorDescResponse : errorDescResponse.content || '';
+                                    console.log('✅ Generated error description');
+                                } else {
+                                    errorDescription = 'An error occurred while processing your query. Please try rephrasing your question or contact support.';
+                                }
+                            } catch (descError) {
+                                console.error('❌ Error generating error description:', descError);
+                                errorDescription = 'An error occurred while processing your query. Please try rephrasing your question.';
                             }
-                        } catch (descError) {
-                            console.error('❌ Error generating error description:', descError);
-                            errorDescription = 'An error occurred while processing your query. Please try rephrasing your question.';
+                        } else {
+                            errorDescription = 'Error description generation disabled';
                         }
-                    } else {
-                        errorDescription = 'Error description generation disabled';
+
+                        // If in conversational mode, still save the error to conversation history
+                        if (conversational && sessionData) {
+                            try {
+                                const errorSummary = `Error executing SQL: ${errorDescription}`;
+                                await sessionData.memory.saveContext(
+                                    { input: query },
+                                    { output: errorSummary }
+                                );
+                                console.log('💾 Saved error to conversation context');
+                            } catch (saveError) {
+                                console.error('❌ Error saving conversation:', saveError);
+                            }
+                        }
+
+                        res.status(500).json({
+                            error: 'SQL execution failed',
+                            message: sqlError.message,
+                            sql_code: sqlError.code,
+                            sql_errno: sqlError.errno,
+                            query_processed: query,
+                            sql_extracted: extractedSQL,
+                            sql_final: finalSQL,
+                            processing_time: `${processingTime.toFixed(2)}ms`,
+                            agent_response: agentResult.output,
+
+                            // User-friendly error description
+                            error_description: errorDescription,
+
+                            // Add conversation information if in conversational mode
+                            ...(conversational ? {
+                                conversation: {
+                                    sessionId: sessionId,
+                                    historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
+                                    mode: 'conversational'
+                                }
+                            } : {}),
+                            captured_queries: capturedSQLQueries,
+                            intermediate_steps: intermediateSteps,
+                            debug_info: debugInfo,
+                            error_details: errorDetails,
+                            database_info: {
+                                mysql_version: mySQLVersionString,
+                                version_details: mysqlVersionInfo ? JSON.stringify(mysqlVersionInfo) : null,
+                                query_adapted_to_version: !!mysqlVersionInfo
+                            },
+                            timestamp: new Date().toISOString()
+                        });
                     }
 
-                    // If in conversational mode, still save the error to conversation history
-                    if (conversational && sessionData) {
-                        try {
-                            const errorSummary = `Error executing SQL: ${errorDescription}`;
-                            await sessionData.memory.saveContext(
-                                { input: query },
-                                { output: errorSummary }
-                            );
-                            console.log('💾 Saved error to conversation context');
-                        } catch (saveError) {
-                            console.error('❌ Error saving conversation:', saveError);
-                        }
+                } catch (error) {
+                    // Handle errors within the retry loop
+                    console.error(`❌ Attempt ${currentAttempt} failed with error:`, error);
+
+                    // If this is not the final attempt, try again
+                    if (currentAttempt < maxRetryAttempts) {
+                        console.log(`🔄 Error on attempt ${currentAttempt}. Trying again...`);
+                        debugInfo.sqlCorrections.push(`Attempt ${currentAttempt}: Error occurred - ${(error as Error).message}. Retrying...`);
+                        currentAttempt++;
+                        continue; // Try again
                     }
+
+                    // Final attempt failed - handle error
+                    const processingTime = performance.now() - startTime;
+                    console.error('❌ Manual SQL query processing error after all retries:', error);
+
+                    // Cleanup: Log connection management for debugging
+                    console.log(`🔌 API request failed with general error after ${currentAttempt} attempts`);
+
+                    // Ensure these variables are accessible in the error handler
+                    const conversational = req.body.conversational === true;
+                    const sessionId = req.body.sessionId || uuidv4();
+                    const chatHistory: any[] = [];
 
                     res.status(500).json({
-                        error: 'SQL execution failed',
-                        message: sqlError.message,
-                        sql_code: sqlError.code,
-                        sql_errno: sqlError.errno,
-                        query_processed: query,
-                        sql_extracted: extractedSQL,
-                        sql_final: finalSQL,
-                        processing_time: `${processingTime.toFixed(2)}ms`,
-                        agent_response: agentResult.output,
-
-                        // User-friendly error description
-                        error_description: errorDescription,
-
+                        error: 'Manual SQL query processing failed',
+                        message: (error as Error).message,
+                        raw_agent_response: rawAgentResponse,
                         // Add conversation information if in conversational mode
                         ...(conversational ? {
                             conversation: {
@@ -5833,47 +6249,18 @@ Avoid technical jargon and focus on helping the user get the information they ne
                                 mode: 'conversational'
                             }
                         } : {}),
-                        captured_queries: capturedSQLQueries,
-                        intermediate_steps: intermediateSteps,
                         debug_info: debugInfo,
-                        error_details: errorDetails,
-                        database_info: {
-                            mysql_version: mySQLVersionString,
-                            version_details: mysqlVersionInfo ? JSON.stringify(mysqlVersionInfo) : null,
-                            query_adapted_to_version: !!mysqlVersionInfo
-                        },
+                        processing_time: `${processingTime.toFixed(2)}ms`,
                         timestamp: new Date().toISOString()
                     });
+                    break; // Exit retry loop after sending error response
                 }
+            } // End of retry while loop
 
-            } catch (error) {
-                const processingTime = performance.now() - startTime;
-                console.error('❌ Manual SQL query processing error:', error);
-
-                // Cleanup: Log connection management for debugging
-                console.log(`🔌 API request failed with general error`);
-
-                // Ensure these variables are accessible in the error handler
-                const conversational = req.body.conversational === true;
-                const sessionId = req.body.sessionId || uuidv4();
-                const chatHistory: any[] = [];
-
-                res.status(500).json({
-                    error: 'Manual SQL query processing failed',
-                    message: (error as Error).message,
-                    raw_agent_response: rawAgentResponse,
-                    // Add conversation information if in conversational mode
-                    ...(conversational ? {
-                        conversation: {
-                            sessionId: sessionId,
-                            historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
-                            mode: 'conversational'
-                        }
-                    } : {}),
-                    debug_info: debugInfo,
-                    processing_time: `${processingTime.toFixed(2)}ms`,
-                    timestamp: new Date().toISOString()
-                });
+            // Send final successful response (if we have one)
+            if (finalResult) {
+                console.log(`🎯 Sending final successful response after ${currentAttempt} attempt(s)`);
+                res.json(finalResult);
             }
         }
     );
