@@ -2221,7 +2221,7 @@ export function medicalRoutes(): Router {
             let globalTableSampleData: { [table: string]: any[] } = {};
 
             // ========== RETRY LOOP FOR ZERO RECORDS ==========
-            let maxRetryAttempts = 4; // Total of 4 attempts (original + 3 retries)
+            let maxRetryAttempts = 2; // Total of 2 attempts (original + 1 retry)
             let currentAttempt = 1;
             let finalResult: any = null;
 
@@ -2779,70 +2779,122 @@ CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase(
                                     const tableSchemaData: any = {};
                                     // Use the global tableSampleData instead of local declaration
 
-                                    // Get schema for each table
-                                    for (const tableName of allTables) {
-                                        try {
-                                            let columnInfo: any[] = [];
+                                    // Get schema for each table using single connection
+                                    console.log(`🔄 Fetching schema for ${allTables.length} tables using single connection...`);
+                                    let schemaConnection: any = null;
+                                    
+                                    try {
+                                        // Create one shared connection for all schema fetching
+                                        if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
+                                            schemaConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                        } else if (databaseType.toLowerCase() === 'postgresql') {
+                                            schemaConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                        }
 
-                                            if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
-                                                const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                                                const [rows] = await connection.execute(
-                                                    `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT 
-                                                 FROM INFORMATION_SCHEMA.COLUMNS 
-                                                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? 
-                                                 ORDER BY ORDINAL_POSITION`,
-                                                    [tableName]
-                                                );
-                                                columnInfo = rows as any[];
-                                                await connection.end();
-                                            } else if (databaseType.toLowerCase() === 'postgresql') {
-                                                const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                                                const result = await client.query(
-                                                    `SELECT column_name as "COLUMN_NAME", data_type as "DATA_TYPE", is_nullable as "IS_NULLABLE", column_default as "COLUMN_DEFAULT", '' as "COLUMN_COMMENT"
-                                                 FROM information_schema.columns 
-                                                 WHERE table_schema = 'public' AND table_name = $1 
-                                                 ORDER BY ordinal_position`,
-                                                    [tableName]
-                                                );
-                                                columnInfo = result.rows;
-                                                await client.end();
+                                        for (const tableName of allTables) {
+                                            try {
+                                                let columnInfo: any[] = [];
+
+                                                if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
+                                                    const [rows] = await schemaConnection.execute(
+                                                        `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT 
+                                                     FROM INFORMATION_SCHEMA.COLUMNS 
+                                                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? 
+                                                     ORDER BY ORDINAL_POSITION`,
+                                                        [tableName]
+                                                    );
+                                                    columnInfo = rows as any[];
+                                                } else if (databaseType.toLowerCase() === 'postgresql') {
+                                                    const result = await schemaConnection.query(
+                                                        `SELECT column_name as "COLUMN_NAME", data_type as "DATA_TYPE", is_nullable as "IS_NULLABLE", column_default as "COLUMN_DEFAULT", '' as "COLUMN_COMMENT"
+                                                     FROM information_schema.columns 
+                                                     WHERE table_schema = 'public' AND table_name = $1 
+                                                     ORDER BY ordinal_position`,
+                                                        [tableName]
+                                                    );
+                                                    columnInfo = result.rows;
+                                                }
+
+                                                tableSchemaData[tableName] = Array.isArray(columnInfo) ? columnInfo : [];
+                                                console.log(`✅ Got schema for table ${tableName}: ${tableSchemaData[tableName].length} columns`);
+                                            } catch (schemaError) {
+                                                console.warn(`⚠️ Could not get schema for table ${tableName}:`, schemaError);
+                                                tableSchemaData[tableName] = [];
                                             }
-
-                                            tableSchemaData[tableName] = Array.isArray(columnInfo) ? columnInfo : [];
-                                            console.log(`✅ Got schema for table ${tableName}: ${tableSchemaData[tableName].length} columns`);
-                                        } catch (schemaError) {
-                                            console.warn(`⚠️ Could not get schema for table ${tableName}:`, schemaError);
-                                            tableSchemaData[tableName] = [];
+                                        }
+                                    } finally {
+                                        // Close the shared schema connection
+                                        if (schemaConnection) {
+                                            try {
+                                                if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
+                                                    await schemaConnection.end();
+                                                } else if (databaseType.toLowerCase() === 'postgresql') {
+                                                    await schemaConnection.end();
+                                                }
+                                                console.log('🔌 Closed shared schema connection');
+                                            } catch (closeError) {
+                                                console.warn('⚠️ Error closing shared schema connection:', closeError);
+                                            }
                                         }
                                     }
 
-                                    // Get sample data (first 3 records) for each table
-                                    for (const tableName of allTables) {
+                                    // Get sample data (first 3 records) for each table using Promise.all for parallel execution
+                                    console.log(`🔄 Fetching sample data for ${allTables.length} tables in parallel...`);
+                                    
+                                    // Create array of sample data fetch promises
+                                    const sampleDataPromises = allTables.map(async (tableName) => {
                                         try {
                                             let sampleRecords: any[] = [];
+                                            let tableConnection: any = null;
 
-                                            if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
-                                                const connection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                                                const [rows] = await connection.execute(
-                                                    `SELECT * FROM \`${tableName}\` LIMIT 3`
-                                                );
-                                                sampleRecords = rows as any[];
-                                                await connection.end();
-                                            } else if (databaseType.toLowerCase() === 'postgresql') {
-                                                const client = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                                                const result = await client.query(
-                                                    `SELECT * FROM "${tableName}" LIMIT 3`
-                                                );
-                                                sampleRecords = result.rows;
-                                                await client.end();
+                                            try {
+                                                // Create individual connection for this table (for parallel execution)
+                                                if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
+                                                    tableConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
+                                                    const [rows] = await tableConnection.execute(
+                                                        `SELECT * FROM \`${tableName}\` LIMIT 3`
+                                                    );
+                                                    sampleRecords = rows as any[];
+                                                } else if (databaseType.toLowerCase() === 'postgresql') {
+                                                    tableConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
+                                                    const result = await tableConnection.query(
+                                                        `SELECT * FROM "${tableName}" LIMIT 3`
+                                                    );
+                                                    sampleRecords = result.rows;
+                                                }
+
+                                                globalTableSampleData[tableName] = Array.isArray(sampleRecords) ? sampleRecords : [];
+                                                console.log(`✅ Got sample data for table ${tableName}: ${globalTableSampleData[tableName].length} records`);
+                                                
+                                                return { tableName, success: true };
+                                            } finally {
+                                                // Clean up individual connection
+                                                if (tableConnection) {
+                                                    try {
+                                                        if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
+                                                            await tableConnection.end();
+                                                        } else if (databaseType.toLowerCase() === 'postgresql') {
+                                                            await tableConnection.end();
+                                                        }
+                                                    } catch (closeError) {
+                                                        console.warn(`⚠️ Error closing connection for table ${tableName}:`, closeError);
+                                                    }
+                                                }
                                             }
-
-                                            globalTableSampleData[tableName] = Array.isArray(sampleRecords) ? sampleRecords : [];
-                                            console.log(`✅ Got sample data for table ${tableName}: ${globalTableSampleData[tableName].length} records`);
                                         } catch (sampleError) {
                                             console.warn(`⚠️ Could not get sample data for table ${tableName}:`, sampleError);
                                             globalTableSampleData[tableName] = [];
+                                            return { tableName, success: false, error: (sampleError as any)?.message || 'Unknown error' };
                                         }
+                                    });
+
+                                    // Execute all sample data fetching in parallel
+                                    try {
+                                        const sampleResults = await Promise.all(sampleDataPromises);
+                                        const successCount = sampleResults.filter(r => r.success).length;
+                                        console.log(`🎯 Sample data collection completed: ${successCount}/${allTables.length} tables successful`);
+                                    } catch (parallelError) {
+                                        console.error('❌ Error during parallel sample data fetching:', parallelError);
                                     }
 
                                     // Generate AI descriptions for all tables
@@ -3004,6 +3056,24 @@ ${versionSpecificInstructions}
 - Use sample data values to understand which tables contain the information needed for the user's query
 - Look for patterns in the sample data that match the user's query requirements
 - Choose tables based on actual data content, not just table names or column names
+
+**STEP 2.2: SMART TABLE SELECTION FOR SIMILAR NAMES**
+- When multiple tables have similar names (e.g., "patients", "patient_data", "patient_info"), choose wisely based on:
+  - The user's specific query requirements and what data they're asking for
+  - Sample data content that matches the query intent
+  - Table purpose revealed by column names and actual data values
+- Always prioritize tables that contain the most relevant and complete data for the user's question
+- Use sample data to verify which table has the right information before making your final selection
+
+**STEP 2.3: JOIN MULTIPLE RELATED TABLES WHEN NEEDED**
+- When the user query requires data from multiple related tables, DON'T choose just one table - JOIN all relevant tables
+- Look for foreign key relationships (columns ending in _id) to identify how tables connect
+- **CRITICAL: Use AI table descriptions to guide JOIN decisions**
+  - **JOIN ALL tables marked with "Relevance to query: High" in the AI analysis**
+  - When multiple tables have "High" relevance, they should be JOINed together to provide complete information
+  - Review the AI-generated table descriptions to understand which tables contain complementary data for the query
+- Use sample data to identify foreign key connections and table relationships
+- Always include necessary JOIN conditions to get complete information for the user's query
 
 **STEP 3: GENERATE VERSION-COMPATIBLE SQL**
 - Create a SQL query compatible with ${databaseType.toUpperCase()} ${databaseVersionString}
@@ -3378,6 +3448,8 @@ CRITICAL CONSISTENCY RULES:
 - **ABSOLUTE RULE: Be selective - don't include all available columns, focus on what answers the user's question**
 - **ABSOLUTE RULE: NEVER use SQL features not supported by ${databaseType.toUpperCase()} ${databaseVersionString}**
 - **ABSOLUTE RULE: Strictly adhere to the version-specific GROUP BY rules**
+- **🚨 ABSOLUTE RULE: JOIN ALL tables marked with "Relevance to query: High" in AI analysis - DO NOT choose just one table when multiple have High relevance**
+- **🚨 ABSOLUTE RULE: Use AI table descriptions to identify which tables should be JOINed together for complete answers**
 - NEVER skip any of the 6 steps above
 - ALWAYS document your findings at each step
 - ALWAYS include ALL conditions from the user query
@@ -3445,6 +3517,8 @@ Example 4: "Show recent lab tests from last 30 days"
 ✅ No unnecessary columns that don't contribute to query intent
 ✅ **CONDITION-BASED TABLE SELECTION: Primary table chosen based on WHERE clause columns**
 ✅ **MULTIPLE TABLE RULE: If tables have similar meaning, chose the one with condition columns**
+✅ **🚨 CRITICAL JOIN REQUIREMENT: JOIN ALL tables marked with "Relevance to query: High" in AI analysis**
+✅ **AI-GUIDED JOINS: Use AI table descriptions to identify complementary High-relevance tables for JOINs**
 ✅ **SCHEMA INTELLIGENCE: All references validated against actual database schema**
 ${databaseType.toLowerCase() === 'mysql' && databaseVersionInfo && databaseVersionInfo.hasOnlyFullGroupBy ? `
 ✅ **GROUP BY COMPLIANCE: All non-aggregated columns in SELECT are included in GROUP BY**
