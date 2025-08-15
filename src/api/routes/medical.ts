@@ -1001,34 +1001,52 @@ CRITICAL REQUIREMENTS FOR MULTI-SHEET EXCEL FORMAT:
 - The SQL should produce a flat result set that can be post-processed into the required nested array structure
 
 EXAMPLE SQL STRUCTURE (adapt to your specific tables and columns):
+
+CRITICAL: ALL SELECT statements in UNION must have the EXACT SAME number of columns in the EXACT SAME order!
+
 SELECT 
   'metadata' as sheet_type,
   'patients' as main_entity,
   COUNT(DISTINCT patient_id) as main_entity_count,
   'patient_id' as main_entity_identifier,
-  NULL as patient_id,
-  NULL as dob,
-  -- other null fields for consistency
-FROM your_tables
+  CAST(NULL as VARCHAR(50)) as patient_id,
+  CAST(NULL as VARCHAR(100)) as patient_name,
+  CAST(NULL as DATE) as dob,
+  CAST(NULL as VARCHAR(50)) as gender,
+  CAST(NULL as VARCHAR(100)) as city,
+  CAST(NULL as VARCHAR(100)) as medication_name,
+  CAST(NULL as VARCHAR(50)) as medication_status,
+  CAST(NULL as VARCHAR(20)) as dosage
+FROM your_main_table
 UNION ALL
 SELECT 
   'patient' as sheet_type,
-  NULL as main_entity,
-  NULL as main_entity_count,
-  NULL as main_entity_identifier,
+  CAST(NULL as VARCHAR(50)) as main_entity,
+  CAST(NULL as INTEGER) as main_entity_count,
+  CAST(NULL as VARCHAR(50)) as main_entity_identifier,
   patient_id,
+  patient_name,
   dob,
-  -- all patient fields
+  gender,
+  city,
+  CAST(NULL as VARCHAR(100)) as medication_name,
+  CAST(NULL as VARCHAR(50)) as medication_status,
+  CAST(NULL as VARCHAR(20)) as dosage
 FROM your_patient_table
 UNION ALL  
 SELECT
   'medication_summary' as sheet_type,
-  NULL as main_entity,
-  NULL as main_entity_count,
-  NULL as main_entity_identifier,
+  CAST(NULL as VARCHAR(50)) as main_entity,
+  CAST(NULL as INTEGER) as main_entity_count,
+  CAST(NULL as VARCHAR(50)) as main_entity_identifier,
   patient_id,
-  NULL as dob, -- maintain column consistency
-  -- medication fields
+  CAST(NULL as VARCHAR(100)) as patient_name,
+  CAST(NULL as DATE) as dob,
+  CAST(NULL as VARCHAR(50)) as gender,
+  CAST(NULL as VARCHAR(100)) as city,
+  medication_name,
+  medication_status,
+  dosage
 FROM your_medication_table
 
 This produces a single result set that can be separated by sheet_type into the required format.
@@ -1060,6 +1078,30 @@ This produces a single result set that can be separated by sheet_type into the r
 - AVOID SYNTAX ERRORS: Pay special attention to database-specific syntax requirements
 - HANDLE NULL VALUES: Use appropriate NULL handling for the specific database type (COALESCE, IFNULL)
 - FOLLOW EXACT VERSION CONSTRAINTS: Only use functions available in ${dbType.toUpperCase()} ${dbVersion}
+
+## CRITICAL UNION ALL REQUIREMENTS - MANDATORY FOR MULTI-SHEET FORMAT
+**UNION COLUMN MATCHING (PREVENTS "each UNION query must have the same number of columns" ERROR):**
+- **EXACT COLUMN COUNT**: Every SELECT statement in UNION ALL must have the EXACT SAME number of columns
+- **EXACT COLUMN ORDER**: All columns must appear in the EXACT SAME order in every SELECT statement
+- **CONSISTENT DATA TYPES**: Use CAST() or CONVERT() functions to ensure matching data types for each column position
+- **NULL PLACEHOLDER COLUMNS**: When a column doesn't exist in a particular entity, use CAST(NULL as DATA_TYPE) as column_name
+- **COLUMN NAME CONSISTENCY**: Use the same alias names for corresponding columns across all UNION statements
+- **NO MISSING COLUMNS**: Never omit columns in any SELECT statement - use NULL placeholders instead
+- **DATA TYPE CASTING**: Always cast NULL values to the appropriate data type (VARCHAR, INTEGER, DATE, etc.) to match other UNION statements
+
+**EXAMPLE OF CORRECT UNION COLUMN MATCHING:**
+\`\`\`
+SELECT 'metadata' as sheet_type, 'patients' as entity, COUNT(*) as count, CAST(NULL as VARCHAR(50)) as patient_id, CAST(NULL as VARCHAR(100)) as name
+UNION ALL
+SELECT 'patient' as sheet_type, CAST(NULL as VARCHAR(50)) as entity, CAST(NULL as INTEGER) as count, patient_id, patient_name as name
+\`\`\`
+
+**COMMON UNION ERRORS TO AVOID:**
+- Different number of columns in SELECT statements
+- Missing columns in some UNION statements  
+- Inconsistent data types (mixing VARCHAR with INTEGER without casting)
+- Using plain NULL instead of CAST(NULL as DATA_TYPE)
+- Changing column order between UNION statements
 ${dbSyntaxRules.criticalRequirements}
 
 BEFORE FINALIZING THE QUERY:
@@ -1071,21 +1113,24 @@ BEFORE FINALIZING THE QUERY:
 6. **NO INVENTED COLUMNS**: Never create or assume column names. Use ONLY columns from the original SQL and available sample data
 7. **NO AGGREGATED COLUMN ASSUMPTIONS**: NEVER use columns like 'medication_count', 'patient_count', 'total_*', '*_sum', '*_avg' unless they physically exist. If you need counts, use COUNT(*) or COUNT(existing_column)
 8. **VALIDATE HAVING CLAUSE**: If using HAVING clause, ensure all referenced columns either appear in GROUP BY or are aggregate functions
-9. **SQL STRUCTURE VALIDATION**: Ensure the generated SQL will produce results that include sheet_type fields for organizing into different Excel sheets
-10. **METADATA SECTION VALIDATION**: Ensure the response includes a metadata section with main_entity, main_entity_count (calculated using COUNT(*) or COUNT(DISTINCT)), and main_entity_identifier fields
-11. **SHEET_TYPE FIELD VALIDATION**: Verify that the generated SQL includes a "sheet_type" field in the SELECT clause to identify record categories
-12. **MULTI-SHEET STRUCTURE VALIDATION**: Ensure the query result can be properly organized into separate sheets by entity type (patients, medications, appointments, etc.)
-13. **FLAT STRUCTURE CHECK**: Verify that each record within an entity type is completely flat with no nested objects or arrays
-14. **SHEET CONSISTENCY**: Ensure all records of the same entity type have identical column structures for proper Excel sheet formatting
-15. **FOREIGN KEY RELATIONSHIPS**: Verify that relationships between entities are maintained through foreign key references (patient_id, appointment_id, etc.) rather than nesting
-16. **NO HIERARCHICAL NESTING**: Eliminate any JSON aggregation or array structures that would create nested data within records
-17. **ENTITY SEPARATION**: Ensure different entity types (patients vs medications vs appointments) can be clearly separated into different result sets or sheets
-18. Check that all JOIN conditions are logical and will maintain data relationships
-19. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
-20. Double-check all parentheses, commas, and syntax elements
-21. Verify ORDER BY clause uses either full expressions or positional references, not aliases
-22. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
-23. **MULTI-SHEET EXPORT READY**: Confirm the result structure is suitable for creating multiple Excel sheets with consistent, flat data in each sheet
+9. **UNION ALL VALIDATION**: If using UNION ALL for multi-sheet format, ensure ALL SELECT statements have the EXACT same number of columns in the EXACT same order with proper CAST(NULL as DATA_TYPE) for missing columns
+10. **UNION COLUMN CONSISTENCY**: Verify all UNION statements use consistent data types and column names to prevent "each UNION query must have the same number of columns" errors
+11. **SQL STRUCTURE VALIDATION**: Ensure the generated SQL will produce results that include sheet_type fields for organizing into different Excel sheets
+11. **SQL STRUCTURE VALIDATION**: Ensure the generated SQL will produce results that include sheet_type fields for organizing into different Excel sheets
+12. **METADATA SECTION VALIDATION**: Ensure the response includes a metadata section with main_entity, main_entity_count (calculated using COUNT(*) or COUNT(DISTINCT)), and main_entity_identifier fields
+13. **SHEET_TYPE FIELD VALIDATION**: Verify that the generated SQL includes a "sheet_type" field in the SELECT clause to identify record categories
+14. **MULTI-SHEET STRUCTURE VALIDATION**: Ensure the query result can be properly organized into separate sheets by entity type (patients, medications, appointments, etc.)
+15. **FLAT STRUCTURE CHECK**: Verify that each record within an entity type is completely flat with no nested objects or arrays
+16. **SHEET CONSISTENCY**: Ensure all records of the same entity type have identical column structures for proper Excel sheet formatting
+17. **FOREIGN KEY RELATIONSHIPS**: Verify that relationships between entities are maintained through foreign key references (patient_id, appointment_id, etc.) rather than nesting
+18. **NO HIERARCHICAL NESTING**: Eliminate any JSON aggregation or array structures that would create nested data within records
+19. **ENTITY SEPARATION**: Ensure different entity types (patients vs medications vs appointments) can be clearly separated into different result sets or sheets
+20. Check that all JOIN conditions are logical and will maintain data relationships
+21. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
+22. Double-check all parentheses, commas, and syntax elements
+23. Verify ORDER BY clause uses either full expressions or positional references, not aliases
+24. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
+25. **MULTI-SHEET EXPORT READY**: Confirm the result structure is suitable for creating multiple Excel sheets with consistent, flat data in each sheet
 
 DO NOT INCLUDE ANY EXPERIMENTAL OR UNTESTED SYNTAX. Only use proven, standard SQL constructs that are guaranteed to work with ${dbType.toUpperCase()} ${dbVersion}.
 
@@ -1108,7 +1153,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             messages: [
                 {
                     role: "system",
-                    content: "You are an expert data analyst specializing in restructuring relational database queries to produce multi-sheet Excel compatible results. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). CRITICAL: Return a JSON object with restructured_sql, explanation, and other metadata - NOT the final data structure. Generate only syntactically correct SQL that works with the specific database type and version. The SQL you generate should produce results that can be organized into multi-sheet Excel format with separate entity types. Each record in the SQL results should include a 'sheet_type' field to identify which sheet it belongs to (e.g., 'patient', 'medication_summary', 'appointment'). Use foreign key relationships (patient_id, etc.) to maintain connections between different entity types. Use ONLY column names that appear in the original SQL query and sample data provided. FORBIDDEN: NEVER create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. These types of errors cause SQL failures. Use only columns that physically appear in the original SQL or sample data. AGGREGATE FUNCTIONS: If you need counts or calculations, use SQL functions like COUNT(*), SUM(existing_column), AVG(existing_column) - do NOT reference made-up aggregated column names."
+                    content: "You are an expert data analyst specializing in restructuring relational database queries to produce multi-sheet Excel compatible results. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). CRITICAL: Return a JSON object with restructured_sql, explanation, and other metadata - NOT the final data structure. Generate only syntactically correct SQL that works with the specific database type and version. The SQL you generate should produce results that can be organized into multi-sheet Excel format with separate entity types. Each record in the SQL results should include a 'sheet_type' field to identify which sheet it belongs to (e.g., 'patient', 'medication_summary', 'appointment'). Use foreign key relationships (patient_id, etc.) to maintain connections between different entity types. Use ONLY column names that appear in the original SQL query and sample data provided. FORBIDDEN: NEVER create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. These types of errors cause SQL failures. Use only columns that physically appear in the original SQL or sample data. AGGREGATE FUNCTIONS: If you need counts or calculations, use SQL functions like COUNT(*), SUM(existing_column), AVG(existing_column) - do NOT reference made-up aggregated column names. UNION ALL CRITICAL: If using UNION ALL to combine different entity types, ensure ALL SELECT statements have the EXACT same number of columns in the EXACT same order with proper CAST(NULL as DATA_TYPE) for missing columns to prevent 'each UNION query must have the same number of columns' errors."
                 },
                 {
                     role: "user",
@@ -5993,6 +6038,135 @@ Avoid technical jargon and focus on helping the user get the information they ne
         }
 
         return { isCompliant: true, issues: [] };
+    }
+
+    /**
+     * Validates UNION ALL statements to ensure all SELECT statements have matching column counts and types
+     * @param sql SQL query to validate
+     * @returns Object with validation status and issues found
+     */
+    function validateUnionColumnMatching(sql: string): {
+        isValid: boolean;
+        issues: string[];
+        suggestedFix?: string;
+    } {
+        if (!sql || typeof sql !== "string") {
+            return { isValid: true, issues: [] };
+        }
+
+        const issues: string[] = [];
+        let suggestedFix = "";
+
+        // Check if the query contains UNION
+        const hasUnion = /UNION\s+(?:ALL\s+)?/gim.test(sql);
+        if (!hasUnion) {
+            return { isValid: true, issues: [] }; // No UNION, validation passes
+        }
+
+        // Split the SQL by UNION to get individual SELECT statements
+        const unionParts = sql.split(/UNION\s+(?:ALL\s+)?/gim);
+        
+        if (unionParts.length < 2) {
+            return { isValid: true, issues: [] }; // No actual UNION found
+        }
+
+        let referenceColumnCount = 0;
+        const selectClauses: string[] = [];
+
+        unionParts.forEach((part, index) => {
+            // Extract SELECT clause from each part
+            const selectMatch = part.match(/SELECT\s+(.*?)\s+FROM/im);
+            if (selectMatch) {
+                const selectClause = selectMatch[1];
+                selectClauses.push(selectClause);
+                
+                // Count columns (simple approach - count commas + 1, accounting for parentheses)
+                const columnCount = countColumnsInSelect(selectClause);
+                
+                if (index === 0) {
+                    referenceColumnCount = columnCount;
+                } else if (columnCount !== referenceColumnCount) {
+                    issues.push(
+                        `UNION statement ${index + 1} has ${columnCount} columns, but the first statement has ${referenceColumnCount} columns. All UNION statements must have the same number of columns.`
+                    );
+                }
+            } else {
+                // Try to find SELECT at the beginning of the part (first UNION part might not have FROM)
+                const selectAtStart = part.match(/^\s*SELECT\s+(.*?)(?:\s+FROM|\s+UNION|\s*$)/im);
+                if (selectAtStart) {
+                    const selectClause = selectAtStart[1];
+                    selectClauses.push(selectClause);
+                    
+                    const columnCount = countColumnsInSelect(selectClause);
+                    
+                    if (index === 0) {
+                        referenceColumnCount = columnCount;
+                    } else if (columnCount !== referenceColumnCount) {
+                        issues.push(
+                            `UNION statement ${index + 1} has ${columnCount} columns, but the first statement has ${referenceColumnCount} columns. All UNION statements must have the same number of columns.`
+                        );
+                    }
+                }
+            }
+        });
+
+        if (issues.length > 0) {
+            suggestedFix = "Ensure all SELECT statements in the UNION have the same number of columns. Use CAST(NULL as DATA_TYPE) as column_name for missing columns in each SELECT statement.";
+            
+            return { isValid: false, issues, suggestedFix };
+        }
+
+        return { isValid: true, issues: [] };
+    }
+
+    /**
+     * Helper function to count columns in a SELECT clause
+     * @param selectClause The SELECT clause string
+     * @returns Number of columns
+     */
+    function countColumnsInSelect(selectClause: string): number {
+        if (!selectClause || typeof selectClause !== "string") {
+            return 0;
+        }
+
+        let columnCount = 0;
+        let parenDepth = 0;
+        let inQuotes = false;
+        let quoteChar = '';
+        
+        for (let i = 0; i < selectClause.length; i++) {
+            const char = selectClause[i];
+            const prevChar = i > 0 ? selectClause[i - 1] : '';
+            
+            // Handle quotes
+            if ((char === '"' || char === "'" || char === '`') && prevChar !== '\\') {
+                if (!inQuotes) {
+                    inQuotes = true;
+                    quoteChar = char;
+                } else if (char === quoteChar) {
+                    inQuotes = false;
+                    quoteChar = '';
+                }
+                continue;
+            }
+            
+            if (inQuotes) continue;
+            
+            // Handle parentheses
+            if (char === '(') {
+                parenDepth++;
+            } else if (char === ')') {
+                parenDepth--;
+            }
+            
+            // Count commas at top level (outside parentheses and quotes)
+            if (char === ',' && parenDepth === 0) {
+                columnCount++;
+            }
+        }
+        
+        // Add 1 for the last column (no trailing comma)
+        return columnCount + 1;
     }
 
     function finalCleanSQL(sql: string): string {
