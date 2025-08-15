@@ -8,22 +8,66 @@ import databaseService from "../../services/databaseService";
 import multiTenantLangChainService from "../../services/multiTenantLangChainService";
 import { AzureOpenAI } from "openai";
 import {
-  generateBarChartAnalysis,
-  generateComprehensiveQuery,
-  generateCorrectionPrompt,
-  generateErrorDescriptionPrompt,
-  generateQueryDescriptionPrompt,
-  generateRestructuringPrompt,
-  generateResultExplanationPrompt,
-  getDatabaseSyntaxRules,
-  getJsonFunctionsForDatabase,
+    generateBarChartAnalysis,
+    generateComprehensiveQuery,
+    generateCorrectionPrompt,
+    generateErrorDescriptionPrompt,
+    generateQueryDescriptionPrompt,
+    generateRestructuringPrompt,
+    generateResultExplanationPrompt,
+    getDatabaseSyntaxRules,
+    getJsonFunctionsForDatabase,
 } from "../prompts/queryPropmt";
 import {
-  generateEnhancedQueryPrompt,
-  generateTableRelevancePrompt,
-  generateVersionSpecificInstructions,
+    generateEnhancedQueryPrompt,
+    generateTableRelevancePrompt,
+    generateVersionSpecificInstructions,
 } from "../prompts/enhanceQueryPrompt";
 import { AIGraphAnalyzer } from "../prompts/graphAnalyzerClass";
+
+
+/**
+ * Type definition for data items with sheet_type
+ */
+type DataItem = {
+    sheet_type: string;
+    [key: string]: any;
+};
+
+/**
+ * Groups data by sheet_type and removes null fields
+ * @param data Array of data items to process
+ * @returns Object with keys as sheet_types and values as arrays of cleaned items
+ */
+function groupAndCleanData(data: DataItem[]): { [sheetType: string]: object[] } {
+    const groupedData: { [sheetType: string]: object[] } = {};
+
+    for (const item of data) {
+        const { sheet_type } = item;
+
+        // Initialize the group if it doesn't exist
+        if (!groupedData[sheet_type]) {
+            groupedData[sheet_type] = [];
+        }
+
+        // Remove null fields
+        const cleanedItem: { [key: string]: any } = {};
+        for (const [key, value] of Object.entries(item)) {
+            if (value !== null) {
+                cleanedItem[key] = value;
+            }
+        }
+
+        groupedData[sheet_type].push(cleanedItem);
+    }
+
+    return groupedData;
+}
+
+// Example usage:
+// const result = groupAndCleanData(yourData);
+// console.log(result);
+
 /**
  * Recursively parses stringified JSON data within the input.
  * @param rows - The data that may contain stringified JSON at any nesting level.
@@ -42,195 +86,195 @@ import { AIGraphAnalyzer } from "../prompts/graphAnalyzerClass";
  * @returns Object containing extracted column error details
  */
 function extractColumnErrorDetails(errorMessage: string): any {
-  const details: any = {};
+    const details: any = {};
 
-  // Extract column name from common error patterns
-  const unknownColumnMatch = errorMessage.match(
-    /unknown column ['"](.*?)['"]|unknown column ([\w.]+)/i
-  );
-  const noSuchColumnMatch = errorMessage.match(
-    /no such column[: ]+['"](.*?)['"]|no such column[: ]+([\w.]+)/i
-  );
-  const invalidColumnMatch = errorMessage.match(
-    /invalid column name ['"](.*?)['"]|invalid column name ([\w.]+)/i
-  );
-  const fieldListMatch = errorMessage.match(
-    /['"](.*?)['"] in 'field list'|([\w.]+) in 'field list'/i
-  );
+    // Extract column name from common error patterns
+    const unknownColumnMatch = errorMessage.match(
+        /unknown column ['"](.*?)['"]|unknown column ([\w.]+)/i
+    );
+    const noSuchColumnMatch = errorMessage.match(
+        /no such column[: ]+['"](.*?)['"]|no such column[: ]+([\w.]+)/i
+    );
+    const invalidColumnMatch = errorMessage.match(
+        /invalid column name ['"](.*?)['"]|invalid column name ([\w.]+)/i
+    );
+    const fieldListMatch = errorMessage.match(
+        /['"](.*?)['"] in 'field list'|([\w.]+) in 'field list'/i
+    );
 
-  if (unknownColumnMatch) {
-    details.error_type = "unknown_column";
-    details.column_name = unknownColumnMatch[1] || unknownColumnMatch[2];
-  } else if (noSuchColumnMatch) {
-    details.error_type = "no_such_column";
-    details.column_name = noSuchColumnMatch[1] || noSuchColumnMatch[2];
-  } else if (invalidColumnMatch) {
-    details.error_type = "invalid_column_name";
-    details.column_name = invalidColumnMatch[1] || invalidColumnMatch[2];
-  } else if (fieldListMatch) {
-    details.error_type = "field_list_error";
-    details.column_name = fieldListMatch[1] || fieldListMatch[2];
-  }
+    if (unknownColumnMatch) {
+        details.error_type = "unknown_column";
+        details.column_name = unknownColumnMatch[1] || unknownColumnMatch[2];
+    } else if (noSuchColumnMatch) {
+        details.error_type = "no_such_column";
+        details.column_name = noSuchColumnMatch[1] || noSuchColumnMatch[2];
+    } else if (invalidColumnMatch) {
+        details.error_type = "invalid_column_name";
+        details.column_name = invalidColumnMatch[1] || invalidColumnMatch[2];
+    } else if (fieldListMatch) {
+        details.error_type = "field_list_error";
+        details.column_name = fieldListMatch[1] || fieldListMatch[2];
+    }
 
-  // Extract table alias or name if present
-  if (details.column_name && details.column_name.includes(".")) {
-    const parts = details.column_name.split(".");
-    details.table_alias = parts[0];
-    details.column_only = parts[1];
-  }
+    // Extract table alias or name if present
+    if (details.column_name && details.column_name.includes(".")) {
+        const parts = details.column_name.split(".");
+        details.table_alias = parts[0];
+        details.column_only = parts[1];
+    }
 
-  details.original_message = errorMessage;
+    details.original_message = errorMessage;
 
-  return details;
+    return details;
 }
 
 export function parseRows<T = any>(data: unknown): T {
-  // Handle arrays
-  if (Array.isArray(data)) {
-    return data.map((item) => parseRows(item)) as T;
-  }
-
-  // Handle objects
-  if (data && typeof data === "object") {
-    const result: Record<string, any> = {};
-
-    for (const [key, value] of Object.entries(data)) {
-      // Skip empty objects
-      if (
-        value &&
-        typeof value === "object" &&
-        Object.keys(value).length === 0
-      ) {
-        continue;
-      }
-
-      // Special handling for medications_json
-      if (typeof value === "string") {
-        try {
-          // Fix the JSON format by wrapping in array brackets
-          const fixedJson = `[${value}]`;
-          result[key] = JSON.parse(fixedJson);
-        } catch (e) {
-          // console.error('Error parsing medications_json:', e);
-          result[key] = value;
-        }
-      } else {
-        result[key] = parseRows(value);
-      }
+    // Handle arrays
+    if (Array.isArray(data)) {
+        return data.map((item) => parseRows(item)) as T;
     }
 
-    return result as T;
-  }
+    // Handle objects
+    if (data && typeof data === "object") {
+        const result: Record<string, any> = {};
 
-  // Return primitives as is
-  return data as T;
+        for (const [key, value] of Object.entries(data)) {
+            // Skip empty objects
+            if (
+                value &&
+                typeof value === "object" &&
+                Object.keys(value).length === 0
+            ) {
+                continue;
+            }
+
+            // Special handling for medications_json
+            if (typeof value === "string") {
+                try {
+                    // Fix the JSON format by wrapping in array brackets
+                    const fixedJson = `[${value}]`;
+                    result[key] = JSON.parse(fixedJson);
+                } catch (e) {
+                    // console.error('Error parsing medications_json:', e);
+                    result[key] = value;
+                }
+            } else {
+                result[key] = parseRows(value);
+            }
+        }
+
+        return result as T;
+    }
+
+    // Return primitives as is
+    return data as T;
 }
 
 // Graph Types Enum
 enum GraphType {
-  BAR_CHART = "bar_chart",
-  LINE_CHART = "line_chart",
-  PIE_CHART = "pie_chart",
-  SCATTER_PLOT = "scatter_plot",
-  HISTOGRAM = "histogram",
-  BOX_PLOT = "box_plot",
-  HEATMAP = "heatmap",
-  TIMELINE = "timeline",
-  TREE_MAP = "tree_map",
-  RADAR_CHART = "radar_chart",
-  FUNNEL_CHART = "funnel_chart",
-  GAUGE_CHART = "gauge_chart",
-  BUBBLE_CHART = "bubble_chart",
-  AREA_CHART = "area_chart",
-  STACKED_BAR = "stacked_bar",
-  GROUPED_BAR = "grouped_bar",
-  MULTI_LINE = "multi_line",
-  DONUT_CHART = "donut_chart",
-  WATERFALL = "waterfall",
-  SANKEY_DIAGRAM = "sankey_diagram",
+    BAR_CHART = "bar_chart",
+    LINE_CHART = "line_chart",
+    PIE_CHART = "pie_chart",
+    SCATTER_PLOT = "scatter_plot",
+    HISTOGRAM = "histogram",
+    BOX_PLOT = "box_plot",
+    HEATMAP = "heatmap",
+    TIMELINE = "timeline",
+    TREE_MAP = "tree_map",
+    RADAR_CHART = "radar_chart",
+    FUNNEL_CHART = "funnel_chart",
+    GAUGE_CHART = "gauge_chart",
+    BUBBLE_CHART = "bubble_chart",
+    AREA_CHART = "area_chart",
+    STACKED_BAR = "stacked_bar",
+    GROUPED_BAR = "grouped_bar",
+    MULTI_LINE = "multi_line",
+    DONUT_CHART = "donut_chart",
+    WATERFALL = "waterfall",
+    SANKEY_DIAGRAM = "sankey_diagram",
 }
 
 // Medical Data Categories for Graph Context
 enum MedicalDataCategory {
-  PATIENT_DEMOGRAPHICS = "patient_demographics",
-  LABORATORY_RESULTS = "laboratory_results",
-  MEDICATIONS = "medications",
-  VITAL_SIGNS = "vital_signs",
-  DIAGNOSES = "diagnoses",
-  TREATMENTS = "treatments",
-  PROCEDURES = "procedures",
-  GENETIC_DATA = "genetic_data",
-  PHARMACOGENOMICS = "pharmacogenomics",
-  CLINICAL_TRIALS = "clinical_trials",
-  EPIDEMIOLOGY = "epidemiology",
-  OUTCOMES = "outcomes",
-  COST_ANALYSIS = "cost_analysis",
-  QUALITY_METRICS = "quality_metrics",
-  PATIENT_FLOW = "patient_flow",
+    PATIENT_DEMOGRAPHICS = "patient_demographics",
+    LABORATORY_RESULTS = "laboratory_results",
+    MEDICATIONS = "medications",
+    VITAL_SIGNS = "vital_signs",
+    DIAGNOSES = "diagnoses",
+    TREATMENTS = "treatments",
+    PROCEDURES = "procedures",
+    GENETIC_DATA = "genetic_data",
+    PHARMACOGENOMICS = "pharmacogenomics",
+    CLINICAL_TRIALS = "clinical_trials",
+    EPIDEMIOLOGY = "epidemiology",
+    OUTCOMES = "outcomes",
+    COST_ANALYSIS = "cost_analysis",
+    QUALITY_METRICS = "quality_metrics",
+    PATIENT_FLOW = "patient_flow",
 }
 
 // Graph Configuration Interface
 interface GraphConfig {
-  type: GraphType;
-  category?: MedicalDataCategory;
-  xAxis?: string;
-  yAxis?: string;
-  colorBy?: string;
-  sizeBy?: string;
-  groupBy?: string;
-  sortBy?: string;
-  limit?: number;
-  aggregation?: "count" | "sum" | "avg" | "min" | "max" | "median";
-  timeFormat?: string;
-  showTrends?: boolean;
-  showOutliers?: boolean;
-  includeNulls?: boolean;
-  customColors?: string[];
-  title?: string;
-  subtitle?: string;
-  description?: string;
+    type: GraphType;
+    category?: MedicalDataCategory;
+    xAxis?: string;
+    yAxis?: string;
+    colorBy?: string;
+    sizeBy?: string;
+    groupBy?: string;
+    sortBy?: string;
+    limit?: number;
+    aggregation?: "count" | "sum" | "avg" | "min" | "max" | "median";
+    timeFormat?: string;
+    showTrends?: boolean;
+    showOutliers?: boolean;
+    includeNulls?: boolean;
+    customColors?: string[];
+    title?: string;
+    subtitle?: string;
+    description?: string;
 }
 
 // Graph Data Interface
 interface GraphData {
-  type: GraphType;
-  data: any[];
-  config: GraphConfig;
-  metadata: {
-    totalRecords: number;
-    processedAt: string;
-    dataQuality: {
-      completeness: number;
-      accuracy: number;
-      consistency: number;
+    type: GraphType;
+    data: any[];
+    config: GraphConfig;
+    metadata: {
+        totalRecords: number;
+        processedAt: string;
+        dataQuality: {
+            completeness: number;
+            accuracy: number;
+            consistency: number;
+        };
+        insights: string[];
+        recommendations: string[];
     };
-    insights: string[];
-    recommendations: string[];
-  };
 }
 
 interface ConversationSession {
-  memory: BufferMemory;
-  lastAccess: Date;
-  // Schema caching
-  cachedSchema?: string;
-  schemaLastUpdated?: Date;
-  // For multi-agent system
-  secondaryMemory?: BufferMemory;
-  // For advanced analytics
-  toolUsage?: Record<string, number>;
-  queryHistory?: Array<{
-    query: string;
-    success: boolean;
-    executionTime: number;
-  }>;
-  // For advanced conversation
-  ambiguityResolutions?: Record<string, string>;
-  userPreferences?: Record<string, any>;
-  // For autocomplete
-  frequentColumns?: string[];
-  frequentTables?: string[];
-  recentQueries?: string[];
+    memory: BufferMemory;
+    lastAccess: Date;
+    // Schema caching
+    cachedSchema?: string;
+    schemaLastUpdated?: Date;
+    // For multi-agent system
+    secondaryMemory?: BufferMemory;
+    // For advanced analytics
+    toolUsage?: Record<string, number>;
+    queryHistory?: Array<{
+        query: string;
+        success: boolean;
+        executionTime: number;
+    }>;
+    // For advanced conversation
+    ambiguityResolutions?: Record<string, string>;
+    userPreferences?: Record<string, any>;
+    // For autocomplete
+    frequentColumns?: string[];
+    frequentTables?: string[];
+    recentQueries?: string[];
 }
 
 const conversationSessions = new Map<string, ConversationSession>();
@@ -238,24 +282,24 @@ const conversationSessions = new Map<string, ConversationSession>();
 // Initialize Azure OpenAI client only if API key is available
 let azureOpenAI: AzureOpenAI | null = null;
 const isAzureOpenAIAvailable = !!(
-  process.env.AZURE_OPENAI_API_KEY && process.env.AZURE_OPENAI_ENDPOINT
+    process.env.AZURE_OPENAI_API_KEY && process.env.AZURE_OPENAI_ENDPOINT
 );
 
 // Function to get Azure OpenAI client lazily
 export function getAzureOpenAIClient(): AzureOpenAI | null {
-  if (!isAzureOpenAIAvailable) {
-    return null;
-  }
+    if (!isAzureOpenAIAvailable) {
+        return null;
+    }
 
-  if (!azureOpenAI) {
-    azureOpenAI = new AzureOpenAI({
-      apiKey: process.env.AZURE_OPENAI_API_KEY,
-      endpoint: process.env.AZURE_OPENAI_ENDPOINT,
-      apiVersion: process.env.AZURE_OPENAI_API_VERSION || "2024-08-01-preview",
-    });
-  }
+    if (!azureOpenAI) {
+        azureOpenAI = new AzureOpenAI({
+            apiKey: process.env.AZURE_OPENAI_API_KEY,
+            endpoint: process.env.AZURE_OPENAI_ENDPOINT,
+            apiVersion: process.env.AZURE_OPENAI_API_VERSION || "2024-08-01-preview",
+        });
+    }
 
-  return azureOpenAI;
+    return azureOpenAI;
 }
 
 /**
@@ -786,150 +830,8 @@ async function generateRestructuredSQL(
             };
         }
         console.log({ tableSampleData })
-        console.log('🤖 Step 1: Using SQL Agent to get accurate database schema...');
 
-        // Step 1: Use SQL Agent to explore and validate schema
-        let schemaInfo = '';
-        let tablesInfo = '';
-        let validatedTables: string[] = [];
-        let validatedColumns: { [table: string]: string[] } = {};
-
-        try {
-            // Improved table name extraction from original SQL
-            // This regex handles more complex SQL with table aliases and subqueries
-            const sqlWithoutComments = originalSQL.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-            const tableNamePattern = /(?:FROM|JOIN)\s+(?:(?:\w+\.)?"?(\w+)"?(?:\s+(?:AS\s+)?"?(\w+)"?)?|\([\s\S]*?\)(?:\s+(?:AS\s+)?"?(\w+)"?)?)/gi;
-            const tableMatches = [...sqlWithoutComments.matchAll(tableNamePattern)];
-
-            // Extract table names and remove SQL keywords
-            const tableNames = [...new Set(tableMatches
-                .flatMap(match => [match[1], match[2], match[3]].filter(Boolean))
-                .filter(name => name && !['SELECT', 'WHERE', 'AND', 'OR', 'ORDER', 'GROUP', 'HAVING', 'LIMIT', 'BY', 'ON', 'AS'].includes(name.toUpperCase()))
-            )];
-
-            console.log(`🔍 Detected tables from original SQL: ${tableNames.join(', ')}`);
-            console.log(`🔍 Using pre-fetched sample data for ${Object.keys(tableSampleData).length} tables`);
-
-            // Use SQL Agent to get comprehensive table schema and validate tables
-            if (sqlAgent) {
-                const tableListResult = await sqlAgent.call({
-                    input: `CRITICAL: I need the COMPLETE and ACCURATE schema for these specific tables: ${tableNames.join(', ')}.
-
-For each table, provide:
-1. The EXACT table name (case-sensitive if applicable)
-2. ALL column names (complete list, no abbreviations)
-3. Data types for each column
-4. Primary keys and foreign keys
-5. Any constraints or relationships
-
-Format the response clearly with:
-- Table: [exact_table_name]
-- Columns: [column1, column2, column3, ...]
-
-IMPORTANT: 
-- Show ALL columns for each table, not just a sample
-- Use the EXACT column names as they exist in the database
-- Do NOT assume or guess column names
-- If a column name contains spaces or special characters, show the exact format
-
-Example format:
-Table: patients
-Columns: patient_id, first_name, last_name, date_of_birth, gender, city, phone_number
-
-Table: medications  
-Columns: medication_id, medication_name, dosage, frequency, side_effects
-
-Provide complete schema information for: ${tableNames.join(', ')}`
-                });
-
-                if (tableListResult && tableListResult.output) {
-                    tablesInfo = tableListResult.output;
-                    console.log('✅ Got comprehensive table information from SQL Agent');
-
-                    // Improved extraction of table and column information
-                    const lines = tablesInfo.split('\n');
-                    let currentTable = '';
-                    let inTableDefinition = false;
-
-                    for (const line of lines) {
-                        const lowerLine = line.toLowerCase();
-
-                        // Better table detection pattern
-                        if (lowerLine.includes('table') && (lowerLine.includes('schema') || lowerLine.includes('structure') || lowerLine.includes('columns'))) {
-                            for (const tableName of tableNames) {
-                                if (lowerLine.includes(tableName.toLowerCase())) {
-                                    currentTable = tableName;
-                                    if (!validatedTables.includes(currentTable)) {
-                                        validatedTables.push(currentTable);
-                                        validatedColumns[currentTable] = [];
-                                    }
-                                    inTableDefinition = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Better column detection with awareness of markdown table format and list formats
-                        if (currentTable && inTableDefinition) {
-                            // Skip header rows in markdown tables
-                            if (lowerLine.includes('column') && (lowerLine.includes('type') || lowerLine.includes('data type'))) {
-                                continue;
-                            }
-
-                            // Handle both markdown tables and lists
-                            if (lowerLine.includes('|') || lowerLine.match(/^\s*[\-\*\•]\s+\w+/) || lowerLine.match(/^\s*\d+\.\s+\w+/)) {
-                                // For markdown tables, typically the column name is in the first cell
-                                let columnName = '';
-
-                                if (lowerLine.includes('|')) {
-                                    const cells = lowerLine.split('|').map(cell => cell.trim());
-                                    // First non-empty cell is usually the column name
-                                    columnName = cells.find(cell => cell.length > 0) || '';
-                                } else {
-                                    // For lists, extract the column name after the bullet/number
-                                    const match = lowerLine.match(/^\s*(?:[\-\*\•]|\d+\.)\s+(\w+)/);
-                                    if (match && match[1]) {
-                                        columnName = match[1];
-                                    }
-                                }
-
-                                // Clean up the column name and filter out data type words
-                                if (columnName) {
-                                    // Remove data type information if present in the same string
-                                    columnName = columnName.split(/\s+/)[0];
-
-                                    // Skip known data type words and SQL keywords
-                                    const skipWords = ['varchar', 'int', 'text', 'date', 'timestamp', 'boolean', 'float', 'double',
-                                        'decimal', 'char', 'null', 'not', 'primary', 'key', 'foreign', 'references',
-                                        'unique', 'index', 'constraint', 'default', 'auto_increment', 'serial'];
-
-                                    if (columnName.length > 1 && !skipWords.includes(columnName.toLowerCase())) {
-                                        if (!validatedColumns[currentTable].includes(columnName)) {
-                                            validatedColumns[currentTable].push(columnName);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Detect end of table definition
-                        if (inTableDefinition && (line.trim() === '' || (lowerLine.includes('table') && !lowerLine.includes(currentTable.toLowerCase())))) {
-                            inTableDefinition = false;
-                        }
-                    }
-
-                    console.log(`✅ Validated tables: ${validatedTables.join(', ')}`);
-                    for (const table in validatedColumns) {
-                        console.log(`✅ Validated columns for ${table}: ${validatedColumns[table].join(', ')}`);
-                    }
-                }
-            }
-        } catch (schemaError: any) {
-            console.error('❌ Error getting schema from SQL Agent:', schemaError.message);
-            // Continue with Azure OpenAI only approach as fallback
-        }
-
-        console.log('🤖 Step 2: Using Azure OpenAI for restructuring logic with validated schema...');
+        console.log('🤖 Using Azure OpenAI for restructuring logic...');
 
         // Determine JSON function syntax based on database type and version
         const jsonFunctions = getJsonFunctionsForDatabase(dbType, dbVersion);
@@ -937,15 +839,6 @@ Provide complete schema information for: ${tableNames.join(', ')}`
 
         const restructuringPrompt = `
 You are an expert SQL developer specializing in transforming flat relational queries into structured, hierarchical queries that eliminate redundancy using JSON aggregation functions.
-
-⚠️  CRITICAL COLUMN NAME WARNING ⚠️ 
-DO NOT ASSUME, GUESS, OR MAKE UP COLUMN NAMES. Use ONLY the exact column names from the validated schema provided below. Common errors to AVOID:
-- Using 'patient_id' when the actual column is 'id' or vice versa
-- Using 'medication_histories.patient_id' when no such column exists
-- Assuming standard naming conventions - always use the actual column names
-- Making up foreign key column names without verification
-
-If you cannot find the exact column name in the validated schema, DO NOT USE IT in the query.
 
 USER PROMPT: "${userPrompt}"
 
@@ -964,20 +857,6 @@ DATABASE VERSION: ${dbVersion}
 
 TOTAL RECORDS IN ORIGINAL RESULT: ${sqlResults.length}
 
-${tablesInfo ? `
-VALIDATED DATABASE SCHEMA FROM SQL AGENT:
-${tablesInfo}
-
-CRITICAL: Use ONLY the table and column names shown above. These are the actual names in the database.
-` : ''}
-
-VALIDATED TABLES: ${validatedTables.length > 0 ? validatedTables.join(', ') : 'Schema validation failed - use original SQL table names'}
-
-${Object.keys(validatedColumns).length > 0 ? `
-VALIDATED COLUMNS BY TABLE:
-${Object.entries(validatedColumns).map(([table, columns]) => `- ${table}: ${columns.join(', ')}`).join('\n')}
-` : ''}
-
 ${Object.keys(tableSampleData).length > 0 ? `
 TABLE SAMPLE DATA (First 3 records from each table):
 ${Object.entries(tableSampleData).map(([table, sampleData]) => {
@@ -987,13 +866,13 @@ ${Object.entries(tableSampleData).map(([table, sampleData]) => {
             return `- ${table}: ${samples}`;
         }).join('\n')}
 
-**CRITICAL: Use the sample data above to understand:**
+**Use the sample data above to understand:**
 - The actual data types and formats in each table
 - Which tables contain the information relevant to the user query
 - How the data is structured and what values to expect
 - Relationships between tables based on actual data content
 - Which columns have meaningful data vs empty/null values
-` : ''}
+` : 'Use the original SQL structure and column names as shown in the query above.'}
 
 TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database.
 
@@ -1020,15 +899,26 @@ RESTRUCTURING REQUIREMENTS:
 20. **FORBIDDEN COLUMN PATTERNS**: NEVER use columns ending in '_count', '_total', '_sum', '_avg' unless they physically exist in the sample data. Do NOT generate queries with aggregated column names that don't exist in the actual database schema.
 21. **SAMPLE DATA IS GROUND TRUTH**: The sample data shows you EXACTLY which columns exist. If a column is not in the sample data, it does NOT exist. Period. No exceptions. No assumptions. No guessing.
 22. **AGGREGATE FUNCTIONS ONLY**: If you need counts, sums, or calculations, use SQL aggregate functions like COUNT(*), SUM(existing_column), AVG(existing_column). Do NOT reference made-up column names to get these values.
+23. **MULTI-SHEET EXCEL FORMAT**: Generate results organized for multi-sheet Excel export where different record types are separated into different sheets. Structure the output as a JSON object with sheet names as keys and their corresponding data arrays as values. Each sheet should contain homogeneous records (same entity type) with consistent column structures. 
 
-**CRITICAL STRUCTURING REQUIREMENTS (MUST DO):**
-- You MUST analyze the main entity from the original SQL and BASE the structured query on this entity.
-- The structured query MUST associate all dependent or related arrays as inner arrays within a single record for each main entity.
-- DO NOT repeat the same entity as separate records in the structured query output. Instead, group all associated data (from dependent tables/entities) into arrays nested under the main entity.
-- If multiple records in the original SQL represent the same main entity, you MUST consolidate them into a single structured record, with their dependents grouped as inner arrays.
-- The structured SQL output should ALWAYS produce a single record per main entity, with all related/dependent data aggregated as arrays inside that record.
-- DO NOT return multiple rows for the same main entity. Structure the query so that each main entity appears only once, and all its related data is nested inside.
-- You MUST avoid redundant/repetitive data by grouping and nesting related data properly.
+24. **MAIN ENTITY COUNT AND IDENTIFIER**: ALWAYS include metadata about the main entity being queried. Add a "metadata" section in the response that includes:
+- "main_entity": The name of the primary entity type (e.g., "patients", "medications", "appointments")
+- "main_entity_count": The total count of unique main entities using COUNT(*) or COUNT(DISTINCT main_entity_id)
+- "main_entity_identifier": The primary key field name used to identify the main entity (e.g., "patient_id", "medication_id", "appointment_id")
+
+**CRITICAL STRUCTURING REQUIREMENTS FOR MULTI-SHEET EXCEL:**
+- MANDATORY ARRAY WRAPPER: The response MUST ALWAYS be wrapped in an array with a single object: [{ metadata: {...}, patients: [...], medications: [...] }]
+- Organize results by entity type: patients, medications, appointments, diagnoses, etc. into separate logical sheets within the single array object.
+- Return EXACTLY this structure: [{"metadata": {"main_entity": "patients", "main_entity_count": 25, "main_entity_identifier": "patient_id"}, "patients": [patient_records], "medications": [medication_records], "appointments": [appointment_records]}]
+- Each sheet (array) should contain flat, denormalized records with consistent column structures.
+- Within each sheet, ensure all rows have the same column structure for proper Excel formatting.
+- Use descriptive sheet names that clearly identify the record type (e.g., "patients", "medications", "appointments", "lab_results").
+- MANDATORY: Include a "sheet_type" field in each record to identify its category (e.g., "patient", "medication_summary", "appointment", etc.).
+- Maintain relationships through foreign keys (patient_id in medication records, etc.) rather than nesting.
+- Each sheet should be independently exportable to Excel with proper headers and consistent data types per column.
+- For complex queries involving multiple entities, determine the primary focus and create appropriate sheet divisions.
+- MANDATORY: Always include the metadata section with main entity information and count.
+- CRITICAL: The frontend expects EXACTLY this array structure - never return a plain object, always wrap in array.
 
 DATABASE-SPECIFIC SYNTAX RULES FOR ${dbType.toUpperCase()} ${dbVersion}:
 ${dbSyntaxRules.general}
@@ -1057,34 +947,111 @@ Return a JSON object with this structure:
   "restructured_sql": "your_new_sql_query_here",
   "explanation": "Brief explanation of how you restructured the query and why",
   "grouping_logic": "Explanation of what entities you grouped together (e.g., 'Grouped by patient_id to eliminate patient duplication')",
-  "expected_structure": "Description of the JSON structure the new query will produce",
+  "expected_structure": "The SQL results should be transformable into: [{ metadata: { main_entity: 'patients', main_entity_count: X, main_entity_identifier: 'patient_id' }, patients: [...], medications: [...] }]",
   "main_entity": "The primary entity being grouped (e.g., 'patient', 'medication', 'lab_test')"
 }
-**Orignal SQL :- you need to use same table names from original SQL**
+
+CRITICAL: The generated SQL should produce results that can be transformed into this EXACT format:
+[
+  {
+    "metadata": {
+      "main_entity": "patients",
+      "main_entity_count": 2,
+      "main_entity_identifier": "patient_id"
+    },
+    "patients": [
+      {
+        "patient_id": "WHP-1584821",
+        "sheet_type": "patient",
+        "dob": "2019-07-23",
+        "city": "Fort Salmaside",
+        "gender": "Male",
+        "medications": "Fresh Concrete Chair (62MG), Bespoke Steel Shoes (23MG), ...",
+        // all patient fields as separate columns
+      }
+    ],
+    "medications": [
+      {
+        "id": 1,
+        "patient_id": "WHP-1584821",
+        "sheet_type": "medication_summary",
+        "medication_name": "Practical Bamboo Shirt",
+        "medication_status": "Safe",
+        // all medication fields as separate columns
+      }
+    ]
+  }
+]
+
+**Original SQL :- you need to use same table names from original SQL**
 
 ${originalSQL}
 
 
-CRITICAL REQUIREMENTS:
-- Generate a complete, executable SQL query that uses JSON functions compatible with ${dbType.toUpperCase()} ${dbVersion}
-- The query should return fewer rows than the original (due to grouping)
-- Each row should contain a JSON object with hierarchical structure
-- Use appropriate GROUP BY clause to eliminate redundancy
-- **ELIMINATE IDENTICAL DATA**: Do NOT generate queries that produce the same values repeated across multiple rows. Use DISTINCT, proper aggregation, and JSON grouping to ensure each piece of data appears only once in the result set.
-- **RETURN NATIVE JSON OBJECTS**: The SQL query must return actual JSON objects, NOT stringified JSON. Use proper JSON functions that produce structured JSON objects directly from the database. Avoid any string concatenation or JSON serialization that would require additional parsing.
-- **MANDATORY COLUMN VALIDATION**: Every single column reference in the query MUST exist in the validated schema above. Do NOT use columns that are not explicitly listed. Do NOT assume column names or guess variations.
-- **STRICT TABLE.COLUMN FORMAT**: Always use the exact table.column format when referencing columns (e.g., patients.patient_id, medications.medication_name). Use the exact names from the validated schema.
-- Include all original data but organized hierarchically
-- Use LEFT JOIN if needed to preserve main entities even without related data
-- Ensure SQL syntax is correct and compatible with ${dbType.toUpperCase()} ${dbVersion}
-- Handle NULL values appropriately in JSON functions
-- Use version-appropriate JSON function syntax
+CRITICAL REQUIREMENTS FOR MULTI-SHEET EXCEL FORMAT:
+- Generate a complete, executable SQL query that produces results in the EXACT format shown above
+- The SQL should return results that can be transformed into the multi-sheet array structure with metadata, patients array, medications array, etc.
+- MANDATORY: Include metadata information in the SQL results (main_entity, main_entity_count, main_entity_identifier)
+- Each record must include a "sheet_type" field to identify which sheet it belongs to (e.g., "patient", "medication_summary", "appointment")
+- Patient records should have sheet_type = "patient" and include all patient demographic fields
+- Medication records should have sheet_type = "medication_summary" and include all medication-specific fields
+- Use UNION ALL to combine different entity types into a single result set that can be separated by sheet_type
+- Ensure consistent column structures within each sheet_type (all patient records have same columns, all medication records have same columns)
+- Include foreign key relationships (patient_id) to maintain connections between different entity types
+- The SQL should produce a flat result set that can be post-processed into the required nested array structure
+
+EXAMPLE SQL STRUCTURE (adapt to your specific tables and columns):
+SELECT 
+  'metadata' as sheet_type,
+  'patients' as main_entity,
+  COUNT(DISTINCT patient_id) as main_entity_count,
+  'patient_id' as main_entity_identifier,
+  NULL as patient_id,
+  NULL as dob,
+  -- other null fields for consistency
+FROM your_tables
+UNION ALL
+SELECT 
+  'patient' as sheet_type,
+  NULL as main_entity,
+  NULL as main_entity_count,
+  NULL as main_entity_identifier,
+  patient_id,
+  dob,
+  -- all patient fields
+FROM your_patient_table
+UNION ALL  
+SELECT
+  'medication_summary' as sheet_type,
+  NULL as main_entity,
+  NULL as main_entity_count,
+  NULL as main_entity_identifier,
+  patient_id,
+  NULL as dob, -- maintain column consistency
+  -- medication fields
+FROM your_medication_table
+
+This produces a single result set that can be separated by sheet_type into the required format.
+- Include metadata fields in the results like main_entity, main_entity_count, and main_entity_identifier
+- Use appropriate JOINs to gather related data but maintain flat, tabular structure within each entity type
+- The generated SQL should produce results in a format that can later be transformed into: [{"metadata": {"main_entity": "patients", "main_entity_count": 25, "main_entity_identifier": "patient_id"}, "patients": [], "medications": [], "appointments": []}]
+- Each record should be completely flat with no nested objects or arrays
+- Use foreign key relationships (patient_id, appointment_id, etc.) to maintain relationships between different entity types
+- The SQL should be designed so that when executed, the results can be grouped by sheet_type to create separate Excel sheets
+- **MANDATORY SHEET_TYPE FIELD**: Every record in every sheet must include a "sheet_type" field (e.g., "patient", "medication_summary", "appointment")
+- **FLAT RECORDS WITHIN SHEETS**: Each record within a sheet should be flat with no nested objects or arrays
+- **CONSISTENT SHEET STRUCTURE**: All records within the same sheet must have identical column structures
+- **FOREIGN KEY RELATIONSHIPS**: Use foreign keys (patient_id, appointment_id, etc.) to maintain relationships between sheets instead of nesting
+- **USE ORIGINAL SQL COLUMNS**: Use the exact column names as they appear in the original SQL query and sample data
+- **STRICT TABLE.COLUMN FORMAT**: Always use the exact table.column format when referencing columns (e.g., patients.patient_id, medications.medication_name)
+- **ENTITY-BASED GROUPING**: Group related data by entity type rather than hierarchical nesting
+- Handle NULL values appropriately and ensure data integrity across sheets
+- Use version-appropriate SQL syntax for ${dbType.toUpperCase()} ${dbVersion}
 
 ## CRITICAL SQL CORRECTNESS REQUIREMENTS
 - VALIDATE ALL SYNTAX: Double-check every function, clause, and operator for compatibility with ${dbType.toUpperCase()} ${dbVersion}
 - TEST QUERY STRUCTURE: Ensure proper nesting of JSON functions and correct parentheses matching
-- **VERIFY COLUMN REFERENCES**: All columns must exist in the referenced tables and be properly qualified. Cross-check every column name against the validated schema before using it.
-- **COLUMN EXISTENCE CHECK**: Before generating the query, verify that every column you plan to use exists in the validated columns list for its respective table.
+- **USE SAMPLE DATA COLUMNS**: Use only column names that appear in the sample data and original SQL query
 - CHECK JOIN CONDITIONS: All joins must have proper conditions and table relationships
 - ENSURE PROPER GROUPING: All non-aggregated columns must be included in GROUP BY clauses
 - **MYSQL GROUP BY COMPLIANCE**: For MySQL with sql_mode=only_full_group_by, ALL non-aggregated columns in SELECT must appear in GROUP BY clause
@@ -1097,28 +1064,28 @@ ${dbSyntaxRules.criticalRequirements}
 
 BEFORE FINALIZING THE QUERY:
 1. Review the entire query line by line for syntax errors
-2. Verify all column references match the validated schema
-3. **VALIDATE EVERY COLUMN**: Cross-check each column name in SELECT, FROM, JOIN, WHERE, GROUP BY, and ORDER BY clauses against the validated columns list. Ensure every column exists in the specified table.
-4. **CHECK TABLE.COLUMN REFERENCES**: Ensure all column references use the correct table prefix (e.g., table_name.column_name) with exact names from the validated schema.
-5. **CROSS-REFERENCE WITH SAMPLE DATA**: Verify that every column you use appears in the sample data provided. Do NOT use any column that is not visible in the sample data.
-6. **NO INVENTED COLUMNS**: Never create or assume column names like 'summary_id', 'medication_id', 'patient_summary', etc. Use ONLY columns that appear in the sample data.
-7. **SAMPLE DATA COLUMN CHECK**: For each table, look at the sample data and use ONLY the column names that appear in those sample records.
-8. **CRITICAL COLUMN VALIDATION**: Go through your generated SQL character by character and identify every single column reference. For each column reference, ask yourself: "Is this exact column name present in the sample data for this table?" If the answer is NO, REMOVE or REPLACE that column reference.
-9. **NO AGGREGATED COLUMN ASSUMPTIONS**: NEVER use columns like 'medication_count', 'patient_count', 'total_*', '*_sum', '*_avg' unless they physically exist in the sample data. If you need counts, use COUNT(*) or COUNT(existing_column).
-10. **SAMPLE DATA IS TRUTH**: The sample data is the single source of truth for what columns exist. If it's not in the sample data, it doesn't exist. No exceptions.
-11. **VALIDATE HAVING CLAUSE**: If using HAVING clause, ensure all referenced columns either appear in GROUP BY or are aggregate functions. Do NOT reference non-existent columns in HAVING clause.
-12. Ensure JSON function nesting is correct and properly closed
-13. Confirm GROUP BY clauses include all non-aggregated columns
-14. **FOR MYSQL: Verify sql_mode=only_full_group_by compliance - every non-aggregated column in SELECT must be in GROUP BY**
-15. **CHECK SUBQUERY AGGREGATIONS: Ensure aggregated columns from subqueries don't violate GROUP BY rules in main query**
-16. **VERIFY NO IDENTICAL DATA**: Ensure the query will not produce identical values repeated across multiple rows - use DISTINCT and proper grouping
-17. **VERIFY JSON OBJECT STRUCTURE**: Ensure the query returns native JSON objects, NOT stringified JSON. The JSON functions must produce actual structured data that doesn't require additional parsing.
-18. **FINAL COLUMN VALIDATION**: Do one final check that no assumed or guessed column names are used. All columns must be from the validated schema AND visible in sample data.
-19. Check that all JOIN conditions are logical and will maintain data relationships
-20. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
-21. Double-check all parentheses, commas, and syntax elements
-22. Verify ORDER BY clause uses either full expressions or positional references, not aliases
-23. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
+2. Use only column names from the original SQL and sample data
+3. **VALIDATE EVERY COLUMN**: Use only columns that appear in the original SQL query and sample data
+4. **CHECK TABLE.COLUMN REFERENCES**: Ensure all column references use the correct table prefix from the original SQL
+5. **USE SAMPLE DATA COLUMNS**: If sample data is available, use only columns that appear in the sample data
+6. **NO INVENTED COLUMNS**: Never create or assume column names. Use ONLY columns from the original SQL and available sample data
+7. **NO AGGREGATED COLUMN ASSUMPTIONS**: NEVER use columns like 'medication_count', 'patient_count', 'total_*', '*_sum', '*_avg' unless they physically exist. If you need counts, use COUNT(*) or COUNT(existing_column)
+8. **VALIDATE HAVING CLAUSE**: If using HAVING clause, ensure all referenced columns either appear in GROUP BY or are aggregate functions
+9. **SQL STRUCTURE VALIDATION**: Ensure the generated SQL will produce results that include sheet_type fields for organizing into different Excel sheets
+10. **METADATA SECTION VALIDATION**: Ensure the response includes a metadata section with main_entity, main_entity_count (calculated using COUNT(*) or COUNT(DISTINCT)), and main_entity_identifier fields
+11. **SHEET_TYPE FIELD VALIDATION**: Verify that the generated SQL includes a "sheet_type" field in the SELECT clause to identify record categories
+12. **MULTI-SHEET STRUCTURE VALIDATION**: Ensure the query result can be properly organized into separate sheets by entity type (patients, medications, appointments, etc.)
+13. **FLAT STRUCTURE CHECK**: Verify that each record within an entity type is completely flat with no nested objects or arrays
+14. **SHEET CONSISTENCY**: Ensure all records of the same entity type have identical column structures for proper Excel sheet formatting
+15. **FOREIGN KEY RELATIONSHIPS**: Verify that relationships between entities are maintained through foreign key references (patient_id, appointment_id, etc.) rather than nesting
+16. **NO HIERARCHICAL NESTING**: Eliminate any JSON aggregation or array structures that would create nested data within records
+17. **ENTITY SEPARATION**: Ensure different entity types (patients vs medications vs appointments) can be clearly separated into different result sets or sheets
+18. Check that all JOIN conditions are logical and will maintain data relationships
+19. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
+20. Double-check all parentheses, commas, and syntax elements
+21. Verify ORDER BY clause uses either full expressions or positional references, not aliases
+22. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
+23. **MULTI-SHEET EXPORT READY**: Confirm the result structure is suitable for creating multiple Excel sheets with consistent, flat data in each sheet
 
 DO NOT INCLUDE ANY EXPERIMENTAL OR UNTESTED SYNTAX. Only use proven, standard SQL constructs that are guaranteed to work with ${dbType.toUpperCase()} ${dbVersion}.
 
@@ -1141,7 +1108,7 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             messages: [
                 {
                     role: "system",
-                    content: "You are an expert data analyst specializing in restructuring relational database results into meaningful hierarchical JSON structures. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). Generate only syntactically correct SQL that works with the specific database type and version. CRITICAL COLUMN VALIDATION: You must use ONLY the exact table and column names provided in the validated schema and sample data - never assume, guess, or make up column names. Verify every column reference against the provided schema before using it. FORBIDDEN: NEVER create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. These types of errors cause SQL failures like 'Unknown column mc.medication_count in having clause'. SAMPLE DATA IS TRUTH: The sample data shows EXACTLY which columns exist. If a column is not visible in the sample data, it does NOT exist. Use only columns that physically appear in the provided sample records. AGGREGATE FUNCTIONS: If you need counts or calculations, use SQL functions like COUNT(*), SUM(existing_column), AVG(existing_column) - do NOT reference made-up aggregated column names. ERROR PREVENTION: Before finalizing your SQL, mentally check every column reference against the sample data. Ask yourself: 'Is this exact column name present in the sample data?' If NO, remove or replace it."
+                    content: "You are an expert data analyst specializing in restructuring relational database queries to produce multi-sheet Excel compatible results. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). CRITICAL: Return a JSON object with restructured_sql, explanation, and other metadata - NOT the final data structure. Generate only syntactically correct SQL that works with the specific database type and version. The SQL you generate should produce results that can be organized into multi-sheet Excel format with separate entity types. Each record in the SQL results should include a 'sheet_type' field to identify which sheet it belongs to (e.g., 'patient', 'medication_summary', 'appointment'). Use foreign key relationships (patient_id, etc.) to maintain connections between different entity types. Use ONLY column names that appear in the original SQL query and sample data provided. FORBIDDEN: NEVER create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. These types of errors cause SQL failures. Use only columns that physically appear in the original SQL or sample data. AGGREGATE FUNCTIONS: If you need counts or calculations, use SQL functions like COUNT(*), SUM(existing_column), AVG(existing_column) - do NOT reference made-up aggregated column names."
                 },
                 {
                     role: "user",
@@ -1358,841 +1325,841 @@ Return only valid JSON without any markdown formatting, comments, or explanation
 // Cleanup function for expired conversations (runs every hour)
 const CONVERSATION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 setInterval(() => {
-  const now = new Date();
-  let expiredCount = 0;
+    const now = new Date();
+    let expiredCount = 0;
 
-  conversationSessions.forEach((session, sessionId) => {
-    const timeDiff = now.getTime() - session.lastAccess.getTime();
-    if (timeDiff > CONVERSATION_TIMEOUT_MS) {
-      conversationSessions.delete(sessionId);
-      expiredCount++;
+    conversationSessions.forEach((session, sessionId) => {
+        const timeDiff = now.getTime() - session.lastAccess.getTime();
+        if (timeDiff > CONVERSATION_TIMEOUT_MS) {
+            conversationSessions.delete(sessionId);
+            expiredCount++;
+        }
+    });
+
+    if (expiredCount > 0) {
+        console.log(`🧹 Cleaned up ${expiredCount} expired conversation sessions`);
     }
-  });
-
-  if (expiredCount > 0) {
-    console.log(`🧹 Cleaned up ${expiredCount} expired conversation sessions`);
-  }
 }, 60 * 60 * 1000); // Check every hour
 
 // Graph Processing Functions
 class GraphProcessor {
-  /**
-   * Convert SQL results to graph data based on configuration
-   */
-  static processGraphData(
-    sqlResults: any[],
-    graphConfig: GraphConfig
-  ): GraphData {
-    console.log(`📊 Processing graph data for type: ${graphConfig.type}`);
-
-    let processedData = this.transformData(sqlResults, graphConfig);
-    let insights = this.generateInsights(processedData, graphConfig);
-    let recommendations = this.generateRecommendations(
-      processedData,
-      graphConfig
-    );
-
-    return {
-      type: graphConfig.type,
-      data: processedData,
-      config: graphConfig,
-      metadata: {
-        totalRecords: sqlResults.length,
-        processedAt: new Date().toISOString(),
-        dataQuality: this.assessDataQuality(sqlResults),
-        insights,
-        recommendations,
-      },
-    };
-  }
-
-  /**
-   * Transform SQL results into graph-specific format
-   */
-  private static transformData(data: any[], config: GraphConfig): any[] {
-    if (!data || data.length === 0) return [];
-
-    switch (config.type) {
-      case GraphType.BAR_CHART:
-        return this.transformForBarChart(data, config);
-      case GraphType.LINE_CHART:
-        return this.transformForLineChart(data, config);
-      case GraphType.PIE_CHART:
-        return this.transformForPieChart(data, config);
-      case GraphType.SCATTER_PLOT:
-        return this.transformForScatterPlot(data, config);
-      case GraphType.HISTOGRAM:
-        return this.transformForHistogram(data, config);
-      case GraphType.BOX_PLOT:
-        return this.transformForBoxPlot(data, config);
-      case GraphType.HEATMAP:
-        return this.transformForHeatmap(data, config);
-      case GraphType.TIMELINE:
-        return this.transformForTimeline(data, config);
-      case GraphType.STACKED_BAR:
-        return this.transformForStackedBar(data, config);
-      case GraphType.GROUPED_BAR:
-        return this.transformForGroupedBar(data, config);
-      case GraphType.MULTI_LINE:
-        return this.transformForMultiLine(data, config);
-      case GraphType.AREA_CHART:
-        return this.transformForAreaChart(data, config);
-      case GraphType.BUBBLE_CHART:
-        return this.transformForBubbleChart(data, config);
-      case GraphType.DONUT_CHART:
-        return this.transformForDonutChart(data, config);
-      case GraphType.WATERFALL:
-        return this.transformForWaterfall(data, config);
-      default:
-        return this.transformForGenericChart(data, config);
-    }
-  }
-
-  /**
-   * Combine data with same labels to prevent duplicates
-   */
-  private static combineDataByLabel(
-    data: any[],
-    labelKey: string = "label",
-    valueKey: string = "y",
-    aggregation: string = "sum"
-  ): any[] {
-    const grouped = new Map<string, any>();
-
-    data.forEach((item) => {
-      const label = item[labelKey];
-      if (!label) return;
-
-      if (!grouped.has(label)) {
-        grouped.set(label, { ...item });
-      } else {
-        const existing = grouped.get(label);
-        const existingValue = this.parseNumericValue(existing[valueKey]);
-        const newValue = this.parseNumericValue(item[valueKey]);
-
-        let combinedValue: number;
-        switch (aggregation) {
-          case "sum":
-            combinedValue = existingValue + newValue;
-            break;
-          case "avg":
-            // For average, we need to track count and sum
-            const count = existing.count || 1;
-            const sum = existing.sum || existingValue;
-            combinedValue = (sum + newValue) / (count + 1);
-            existing.count = count + 1;
-            existing.sum = sum + newValue;
-            break;
-          case "max":
-            combinedValue = Math.max(existingValue, newValue);
-            break;
-          case "min":
-            combinedValue = Math.min(existingValue, newValue);
-            break;
-          default:
-            combinedValue = existingValue + newValue;
-        }
-
-        existing[valueKey] = combinedValue;
-
-        // Merge additional properties if they exist
-        if (item.color && !existing.color) {
-          existing.color = item.color;
-        }
-        if (item.group && !existing.group) {
-          existing.group = item.group;
-        }
-      }
-    });
-
-    return Array.from(grouped.values());
-  }
-
-  /**
-   * Transform data for bar charts
-   */
-  private static transformForBarChart(data: any[], config: GraphConfig): any[] {
-    const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
-    const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
-
-    console.log(`📊 Bar chart transformation: xAxis=${xAxis}, yAxis=${yAxis}`);
-
-    if (config.aggregation) {
-      return this.aggregateData(data, xAxis, yAxis, config.aggregation);
-    }
-
-    // Transform data first
-    const transformedData = data.map((item) => ({
-      x: item[xAxis],
-      y: this.parseNumericValue(item[yAxis]),
-      label: item[xAxis],
-      color: config.colorBy ? item[config.colorBy] : undefined,
-    }));
-
-    // Combine data with same labels to prevent duplicates
-    return this.combineDataByLabel(
-      transformedData,
-      "label",
-      "y",
-      config.aggregation || "sum"
-    );
-  }
-
-  /**
-   * Transform data for line charts
-   */
-  private static transformForLineChart(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
-    const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
-
-    return data
-      .map((item) => ({
-        x: this.parseDateValue(item[xAxis]),
-        y: this.parseNumericValue(item[yAxis]),
-        label: item[xAxis],
-        group: config.colorBy ? item[config.colorBy] : undefined,
-      }))
-      .sort((a, b) => a.x - b.x);
-  }
-
-  /**
-   * Transform data for pie charts
-   */
-  private static transformForPieChart(data: any[], config: GraphConfig): any[] {
-    const labelField = config.xAxis || Object.keys(data[0] || {})[0];
-    const valueField = config.yAxis || Object.keys(data[0] || {})[1];
-
-    if (config.aggregation) {
-      return this.aggregateData(
-        data,
-        labelField,
-        valueField,
-        config.aggregation
-      );
-    }
-
-    // Transform data first
-    const transformedData = data.map((item) => ({
-      label: item[labelField],
-      value: this.parseNumericValue(item[valueField]),
-      color: config.colorBy ? item[config.colorBy] : undefined,
-    }));
-
-    // Combine data with same labels to prevent duplicates
-    return this.combineDataByLabel(
-      transformedData,
-      "label",
-      "value",
-      config.aggregation || "sum"
-    );
-  }
-
-  /**
-   * Transform data for scatter plots
-   */
-  private static transformForScatterPlot(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
-    const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
-
-    return data.map((item) => ({
-      x: this.parseNumericValue(item[xAxis]),
-      y: this.parseNumericValue(item[yAxis]),
-      size: config.sizeBy ? this.parseNumericValue(item[config.sizeBy]) : 10,
-      color: config.colorBy ? item[config.colorBy] : undefined,
-      label: item[xAxis],
-    }));
-  }
-
-  /**
-   * Transform data for histograms
-   */
-  private static transformForHistogram(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const valueField = config.xAxis || Object.keys(data[0] || {})[0];
-    const values = data
-      .map((item) => this.parseNumericValue(item[valueField]))
-      .filter((v) => !isNaN(v));
-
-    if (values.length === 0) return [];
-
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const binCount = Math.min(10, Math.ceil(Math.sqrt(values.length)));
-    const binSize = (max - min) / binCount;
-
-    const bins = Array(binCount)
-      .fill(0)
-      .map((_, i) => ({
-        start: min + i * binSize,
-        end: min + (i + 1) * binSize,
-        count: 0,
-      }));
-
-    values.forEach((value) => {
-      const binIndex = Math.min(
-        Math.floor((value - min) / binSize),
-        binCount - 1
-      );
-      bins[binIndex].count++;
-    });
-
-    return bins.map((bin) => ({
-      x: `${bin.start.toFixed(2)}-${bin.end.toFixed(2)}`,
-      y: bin.count,
-      start: bin.start,
-      end: bin.end,
-    }));
-  }
-
-  /**
-   * Transform data for box plots
-   */
-  private static transformForBoxPlot(data: any[], config: GraphConfig): any[] {
-    const valueField = config.xAxis || Object.keys(data[0] || {})[0];
-    const groupField = config.groupBy || config.colorBy;
-
-    if (groupField) {
-      const groups = this.groupData(data, groupField);
-      return Object.entries(groups).map(([group, groupData]) => {
-        const values = groupData
-          .map((item) => this.parseNumericValue(item[valueField]))
-          .filter((v) => !isNaN(v));
-        return this.calculateBoxPlotStats(values, group);
-      });
-    } else {
-      const values = data
-        .map((item) => this.parseNumericValue(item[valueField]))
-        .filter((v) => !isNaN(v));
-      return [this.calculateBoxPlotStats(values, "all")];
-    }
-  }
-
-  /**
-   * Transform data for heatmaps
-   */
-  private static transformForHeatmap(data: any[], config: GraphConfig): any[] {
-    const xField = config.xAxis || Object.keys(data[0] || {})[0];
-    const yField = config.yAxis || Object.keys(data[0] || {})[1];
-    const valueField = config.sizeBy || Object.keys(data[0] || {})[2];
-
-    return data.map((item) => ({
-      x: item[xField],
-      y: item[yField],
-      value: this.parseNumericValue(item[valueField]),
-      color: this.getHeatmapColor(this.parseNumericValue(item[valueField])),
-    }));
-  }
-
-  /**
-   * Transform data for timelines
-   */
-  private static transformForTimeline(data: any[], config: GraphConfig): any[] {
-    const timeField = config.xAxis || Object.keys(data[0] || {})[0];
-    const eventField = config.yAxis || Object.keys(data[0] || {})[1];
-
-    return data
-      .map((item) => ({
-        time: this.parseDateValue(item[timeField]),
-        event: item[eventField],
-        description: config.colorBy ? item[config.colorBy] : undefined,
-        category: config.groupBy ? item[config.groupBy] : undefined,
-      }))
-      .sort((a, b) => a.time - b.time);
-  }
-
-  /**
-   * Transform data for stacked bar charts
-   */
-  private static transformForStackedBar(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
-    const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
-    const stackBy = config.groupBy || config.colorBy;
-
-    if (!stackBy) return this.transformForBarChart(data, config);
-
-    const groups = this.groupData(data, xAxis);
-    return Object.entries(groups).map(([xValue, groupData]) => {
-      const stacks = this.groupData(groupData, stackBy);
-      return {
-        x: xValue,
-        stacks: Object.entries(stacks).map(([stackName, stackData]) => ({
-          name: stackName,
-          value: stackData.reduce(
-            (sum, item) => sum + this.parseNumericValue(item[yAxis]),
-            0
-          ),
-        })),
-      };
-    });
-  }
-
-  /**
-   * Transform data for grouped bar charts
-   */
-  private static transformForGroupedBar(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
-    const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
-    const groupBy = config.groupBy || config.colorBy;
-
-    if (!groupBy) return this.transformForBarChart(data, config);
-
-    const groups = this.groupData(data, groupBy);
-    return Object.entries(groups).map(([groupName, groupData]) => ({
-      group: groupName,
-      bars: groupData.map((item) => ({
-        x: item[xAxis],
-        y: this.parseNumericValue(item[yAxis]),
-        label: item[xAxis],
-      })),
-    }));
-  }
-
-  /**
-   * Transform data for multi-line charts
-   */
-  private static transformForMultiLine(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
-    const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
-    const lineBy = config.groupBy || config.colorBy;
-
-    if (!lineBy) return this.transformForLineChart(data, config);
-
-    const lines = this.groupData(data, lineBy);
-    return Object.entries(lines).map(([lineName, lineData]) => ({
-      name: lineName,
-      data: lineData
-        .map((item) => ({
-          x: this.parseDateValue(item[xAxis]),
-          y: this.parseNumericValue(item[yAxis]),
-        }))
-        .sort((a, b) => a.x - b.x),
-    }));
-  }
-
-  /**
-   * Transform data for area charts
-   */
-  private static transformForAreaChart(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const result = this.transformForLineChart(data, config);
-    return result.map((item) => ({
-      ...item,
-      area: true,
-    }));
-  }
-
-  /**
-   * Transform data for bubble charts
-   */
-  private static transformForBubbleChart(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
-    const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
-    const sizeField = config.sizeBy || Object.keys(data[0] || {})[2];
-
-    return data.map((item) => ({
-      x: this.parseNumericValue(item[xAxis]),
-      y: this.parseNumericValue(item[yAxis]),
-      size: this.parseNumericValue(item[sizeField]),
-      color: config.colorBy ? item[config.colorBy] : undefined,
-      label: item[xAxis],
-    }));
-  }
-
-  /**
-   * Transform data for donut charts
-   */
-  private static transformForDonutChart(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    return this.transformForPieChart(data, config);
-  }
-
-  /**
-   * Transform data for waterfall charts
-   */
-  private static transformForWaterfall(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    const labelField = config.xAxis || Object.keys(data[0] || {})[0];
-    const valueField = config.yAxis || Object.keys(data[0] || {})[1];
-
-    let runningTotal = 0;
-    return data.map((item) => {
-      const value = this.parseNumericValue(item[valueField]);
-      const start = runningTotal;
-      runningTotal += value;
-      return {
-        label: item[labelField],
-        value: value,
-        start: start,
-        end: runningTotal,
-        color: value >= 0 ? "positive" : "negative",
-      };
-    });
-  }
-
-  /**
-   * Generic chart transformation
-   */
-  private static transformForGenericChart(
-    data: any[],
-    config: GraphConfig
-  ): any[] {
-    return data.map((item) => ({
-      ...item,
-      processed: true,
-    }));
-  }
-
-  /**
-   * Aggregate data based on specified function
-   */
-  private static aggregateData(
-    data: any[],
-    groupBy: string,
-    valueField: string,
-    aggregation: string
-  ): any[] {
-    const groups = this.groupData(data, groupBy);
-
-    return Object.entries(groups).map(([group, groupData]) => {
-      const values = groupData
-        .map((item) => this.parseNumericValue(item[valueField]))
-        .filter((v) => !isNaN(v));
-      let aggregatedValue = 0;
-
-      switch (aggregation) {
-        case "count":
-          aggregatedValue = groupData.length;
-          break;
-        case "sum":
-          aggregatedValue = values.reduce((sum, val) => sum + val, 0);
-          break;
-        case "avg":
-          aggregatedValue =
-            values.length > 0
-              ? values.reduce((sum, val) => sum + val, 0) / values.length
-              : 0;
-          break;
-        case "min":
-          aggregatedValue = values.length > 0 ? Math.min(...values) : 0;
-          break;
-        case "max":
-          aggregatedValue = values.length > 0 ? Math.max(...values) : 0;
-          break;
-        case "median":
-          aggregatedValue = this.calculateMedian(values);
-          break;
-        default:
-          aggregatedValue = values.reduce((sum, val) => sum + val, 0);
-      }
-
-      return {
-        label: group,
-        value: aggregatedValue,
-        count: groupData.length,
-      };
-    });
-  }
-
-  /**
-   * Group data by a specific field
-   */
-  private static groupData(
-    data: any[],
-    groupBy: string
-  ): Record<string, any[]> {
-    return data.reduce((groups, item) => {
-      const key = item[groupBy] || "Unknown";
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(item);
-      return groups;
-    }, {} as Record<string, any[]>);
-  }
-
-  /**
-   * Calculate box plot statistics
-   */
-  private static calculateBoxPlotStats(values: number[], group: string): any {
-    if (values.length === 0)
-      return { group, min: 0, q1: 0, median: 0, q3: 0, max: 0 };
-
-    values.sort((a, b) => a - b);
-    const min = values[0];
-    const max = values[values.length - 1];
-    const q1 = this.calculatePercentile(values, 25);
-    const median = this.calculatePercentile(values, 50);
-    const q3 = this.calculatePercentile(values, 75);
-
-    return { group, min, q1, median, q3, max };
-  }
-
-  /**
-   * Calculate percentile
-   */
-  private static calculatePercentile(
-    values: number[],
-    percentile: number
-  ): number {
-    const index = (percentile / 100) * (values.length - 1);
-    const lower = Math.floor(index);
-    const upper = Math.ceil(index);
-    const weight = index - lower;
-
-    if (upper === lower) return values[lower];
-    return values[lower] * (1 - weight) + values[upper] * weight;
-  }
-
-  /**
-   * Calculate median
-   */
-  private static calculateMedian(values: number[]): number {
-    if (values.length === 0) return 0;
-    values.sort((a, b) => a - b);
-    const mid = Math.floor(values.length / 2);
-    return values.length % 2 === 0
-      ? (values[mid - 1] + values[mid]) / 2
-      : values[mid];
-  }
-
-  /**
-   * Parse numeric value safely
-   */
-  private static parseNumericValue(value: any): number {
-    if (value === null || value === undefined) return 0;
-    const parsed = parseFloat(value);
-    return isNaN(parsed) ? 0 : parsed;
-  }
-
-  /**
-   * Parse date value safely
-   */
-  private static parseDateValue(value: any): number {
-    if (value === null || value === undefined) return 0;
-    const date = new Date(value);
-    return isNaN(date.getTime()) ? 0 : date.getTime();
-  }
-
-  /**
-   * Get heatmap color based on value
-   */
-  private static getHeatmapColor(value: number): string {
-    // Simple color scale from blue (low) to red (high)
-    const normalized = Math.max(0, Math.min(1, value / 100));
-    const r = Math.round(255 * normalized);
-    const b = Math.round(255 * (1 - normalized));
-    return `rgb(${r}, 0, ${b})`;
-  }
-
-  /**
-   * Assess data quality
-   */
-  private static assessDataQuality(data: any[]): {
-    completeness: number;
-    accuracy: number;
-    consistency: number;
-  } {
-    if (data.length === 0)
-      return { completeness: 0, accuracy: 0, consistency: 0 };
-
-    const totalFields = Object.keys(data[0] || {}).length;
-    let totalNulls = 0;
-    let totalValues = 0;
-
-    data.forEach((item) => {
-      Object.values(item).forEach((value) => {
-        totalValues++;
-        if (value === null || value === undefined || value === "") {
-          totalNulls++;
-        }
-      });
-    });
-
-    const completeness = ((totalValues - totalNulls) / totalValues) * 100;
-    const accuracy = Math.min(
-      100,
-      Math.max(0, 100 - (totalNulls / data.length) * 10)
-    );
-    const consistency = Math.min(
-      100,
-      Math.max(0, 100 - (totalNulls / totalValues) * 20)
-    );
-
-    return { completeness, accuracy, consistency };
-  }
-
-  /**
-   * Generate insights from data
-   */
-  private static generateInsights(data: any[], config: GraphConfig): string[] {
-    const insights: string[] = [];
-
-    if (data.length === 0) {
-      insights.push("No data available for visualization");
-      return insights;
-    }
-
-    // Basic insights based on data type
-    switch (config.type) {
-      case GraphType.BAR_CHART:
-      case GraphType.PIE_CHART:
-        const maxValue = Math.max(...data.map((d) => d.value || d.y || 0));
-        const minValue = Math.min(...data.map((d) => d.value || d.y || 0));
-        insights.push(`Highest value: ${maxValue}`);
-        insights.push(`Lowest value: ${minValue}`);
-        insights.push(`Data range: ${maxValue - minValue}`);
-        break;
-      case GraphType.LINE_CHART:
-      case GraphType.TIMELINE:
-        insights.push(`Time span: ${data.length} data points`);
-        if (data.length > 1) {
-          const trend =
-            data[data.length - 1].y > data[0].y ? "increasing" : "decreasing";
-          insights.push(`Overall trend: ${trend}`);
-        }
-        break;
-      case GraphType.SCATTER_PLOT:
-        insights.push(`Correlation analysis available`);
-        insights.push(`Outlier detection possible`);
-        break;
-    }
-
-    // Medical-specific insights
-    if (config.category) {
-      switch (config.category) {
-        case MedicalDataCategory.PATIENT_DEMOGRAPHICS:
-          insights.push("Demographic distribution analysis");
-          break;
-        case MedicalDataCategory.LABORATORY_RESULTS:
-          insights.push("Lab result trends and ranges");
-          break;
-        case MedicalDataCategory.MEDICATIONS:
-          insights.push("Medication usage patterns");
-          break;
-        case MedicalDataCategory.VITAL_SIGNS:
-          insights.push("Vital sign monitoring trends");
-          break;
-      }
-    }
-
-    return insights;
-  }
-
-  /**
-   * Generate recommendations based on data and graph type
-   */
-  private static generateRecommendations(
-    data: any[],
-    config: GraphConfig
-  ): string[] {
-    const recommendations: string[] = [];
-
-    if (data.length === 0) {
-      recommendations.push(
-        "Consider expanding the data query to include more records"
-      );
-      return recommendations;
-    }
-
-    // Recommendations based on data quality
-    const quality = this.assessDataQuality(data);
-    if (quality.completeness < 80) {
-      recommendations.push("Data completeness is low - consider data cleaning");
-    }
-    if (quality.accuracy < 90) {
-      recommendations.push(
-        "Data accuracy could be improved - verify data sources"
-      );
-    }
-
-    // Recommendations based on graph type
-    switch (config.type) {
-      case GraphType.BAR_CHART:
-        if (data.length > 20) {
-          recommendations.push(
-            "Consider grouping categories for better readability"
-          );
-        }
-        break;
-      case GraphType.LINE_CHART:
-        if (data.length < 5) {
-          recommendations.push(
-            "More data points recommended for trend analysis"
-          );
-        }
-        break;
-      case GraphType.PIE_CHART:
-        if (data.length > 8) {
-          recommendations.push(
-            'Consider combining smaller segments into "Other" category'
-          );
-        }
-        break;
-      case GraphType.SCATTER_PLOT:
-        recommendations.push(
-          "Consider adding trend lines for pattern analysis"
+    /**
+     * Convert SQL results to graph data based on configuration
+     */
+    static processGraphData(
+        sqlResults: any[],
+        graphConfig: GraphConfig
+    ): GraphData {
+        console.log(`📊 Processing graph data for type: ${graphConfig.type}`);
+
+        let processedData = this.transformData(sqlResults, graphConfig);
+        let insights = this.generateInsights(processedData, graphConfig);
+        let recommendations = this.generateRecommendations(
+            processedData,
+            graphConfig
         );
-        break;
+
+        return {
+            type: graphConfig.type,
+            data: processedData,
+            config: graphConfig,
+            metadata: {
+                totalRecords: sqlResults.length,
+                processedAt: new Date().toISOString(),
+                dataQuality: this.assessDataQuality(sqlResults),
+                insights,
+                recommendations,
+            },
+        };
     }
 
-    // Medical-specific recommendations
-    if (config.category) {
-      switch (config.category) {
-        case MedicalDataCategory.LABORATORY_RESULTS:
-          recommendations.push("Consider adding normal range indicators");
-          break;
-        case MedicalDataCategory.MEDICATIONS:
-          recommendations.push("Consider drug interaction analysis");
-          break;
-        case MedicalDataCategory.VITAL_SIGNS:
-          recommendations.push("Consider adding alert thresholds");
-          break;
-      }
+    /**
+     * Transform SQL results into graph-specific format
+     */
+    private static transformData(data: any[], config: GraphConfig): any[] {
+        if (!data || data.length === 0) return [];
+
+        switch (config.type) {
+            case GraphType.BAR_CHART:
+                return this.transformForBarChart(data, config);
+            case GraphType.LINE_CHART:
+                return this.transformForLineChart(data, config);
+            case GraphType.PIE_CHART:
+                return this.transformForPieChart(data, config);
+            case GraphType.SCATTER_PLOT:
+                return this.transformForScatterPlot(data, config);
+            case GraphType.HISTOGRAM:
+                return this.transformForHistogram(data, config);
+            case GraphType.BOX_PLOT:
+                return this.transformForBoxPlot(data, config);
+            case GraphType.HEATMAP:
+                return this.transformForHeatmap(data, config);
+            case GraphType.TIMELINE:
+                return this.transformForTimeline(data, config);
+            case GraphType.STACKED_BAR:
+                return this.transformForStackedBar(data, config);
+            case GraphType.GROUPED_BAR:
+                return this.transformForGroupedBar(data, config);
+            case GraphType.MULTI_LINE:
+                return this.transformForMultiLine(data, config);
+            case GraphType.AREA_CHART:
+                return this.transformForAreaChart(data, config);
+            case GraphType.BUBBLE_CHART:
+                return this.transformForBubbleChart(data, config);
+            case GraphType.DONUT_CHART:
+                return this.transformForDonutChart(data, config);
+            case GraphType.WATERFALL:
+                return this.transformForWaterfall(data, config);
+            default:
+                return this.transformForGenericChart(data, config);
+        }
     }
 
-    return recommendations;
-  }
+    /**
+     * Combine data with same labels to prevent duplicates
+     */
+    private static combineDataByLabel(
+        data: any[],
+        labelKey: string = "label",
+        valueKey: string = "y",
+        aggregation: string = "sum"
+    ): any[] {
+        const grouped = new Map<string, any>();
+
+        data.forEach((item) => {
+            const label = item[labelKey];
+            if (!label) return;
+
+            if (!grouped.has(label)) {
+                grouped.set(label, { ...item });
+            } else {
+                const existing = grouped.get(label);
+                const existingValue = this.parseNumericValue(existing[valueKey]);
+                const newValue = this.parseNumericValue(item[valueKey]);
+
+                let combinedValue: number;
+                switch (aggregation) {
+                    case "sum":
+                        combinedValue = existingValue + newValue;
+                        break;
+                    case "avg":
+                        // For average, we need to track count and sum
+                        const count = existing.count || 1;
+                        const sum = existing.sum || existingValue;
+                        combinedValue = (sum + newValue) / (count + 1);
+                        existing.count = count + 1;
+                        existing.sum = sum + newValue;
+                        break;
+                    case "max":
+                        combinedValue = Math.max(existingValue, newValue);
+                        break;
+                    case "min":
+                        combinedValue = Math.min(existingValue, newValue);
+                        break;
+                    default:
+                        combinedValue = existingValue + newValue;
+                }
+
+                existing[valueKey] = combinedValue;
+
+                // Merge additional properties if they exist
+                if (item.color && !existing.color) {
+                    existing.color = item.color;
+                }
+                if (item.group && !existing.group) {
+                    existing.group = item.group;
+                }
+            }
+        });
+
+        return Array.from(grouped.values());
+    }
+
+    /**
+     * Transform data for bar charts
+     */
+    private static transformForBarChart(data: any[], config: GraphConfig): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+
+        console.log(`📊 Bar chart transformation: xAxis=${xAxis}, yAxis=${yAxis}`);
+
+        if (config.aggregation) {
+            return this.aggregateData(data, xAxis, yAxis, config.aggregation);
+        }
+
+        // Transform data first
+        const transformedData = data.map((item) => ({
+            x: item[xAxis],
+            y: this.parseNumericValue(item[yAxis]),
+            label: item[xAxis],
+            color: config.colorBy ? item[config.colorBy] : undefined,
+        }));
+
+        // Combine data with same labels to prevent duplicates
+        return this.combineDataByLabel(
+            transformedData,
+            "label",
+            "y",
+            config.aggregation || "sum"
+        );
+    }
+
+    /**
+     * Transform data for line charts
+     */
+    private static transformForLineChart(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+
+        return data
+            .map((item) => ({
+                x: this.parseDateValue(item[xAxis]),
+                y: this.parseNumericValue(item[yAxis]),
+                label: item[xAxis],
+                group: config.colorBy ? item[config.colorBy] : undefined,
+            }))
+            .sort((a, b) => a.x - b.x);
+    }
+
+    /**
+     * Transform data for pie charts
+     */
+    private static transformForPieChart(data: any[], config: GraphConfig): any[] {
+        const labelField = config.xAxis || Object.keys(data[0] || {})[0];
+        const valueField = config.yAxis || Object.keys(data[0] || {})[1];
+
+        if (config.aggregation) {
+            return this.aggregateData(
+                data,
+                labelField,
+                valueField,
+                config.aggregation
+            );
+        }
+
+        // Transform data first
+        const transformedData = data.map((item) => ({
+            label: item[labelField],
+            value: this.parseNumericValue(item[valueField]),
+            color: config.colorBy ? item[config.colorBy] : undefined,
+        }));
+
+        // Combine data with same labels to prevent duplicates
+        return this.combineDataByLabel(
+            transformedData,
+            "label",
+            "value",
+            config.aggregation || "sum"
+        );
+    }
+
+    /**
+     * Transform data for scatter plots
+     */
+    private static transformForScatterPlot(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+
+        return data.map((item) => ({
+            x: this.parseNumericValue(item[xAxis]),
+            y: this.parseNumericValue(item[yAxis]),
+            size: config.sizeBy ? this.parseNumericValue(item[config.sizeBy]) : 10,
+            color: config.colorBy ? item[config.colorBy] : undefined,
+            label: item[xAxis],
+        }));
+    }
+
+    /**
+     * Transform data for histograms
+     */
+    private static transformForHistogram(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const valueField = config.xAxis || Object.keys(data[0] || {})[0];
+        const values = data
+            .map((item) => this.parseNumericValue(item[valueField]))
+            .filter((v) => !isNaN(v));
+
+        if (values.length === 0) return [];
+
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const binCount = Math.min(10, Math.ceil(Math.sqrt(values.length)));
+        const binSize = (max - min) / binCount;
+
+        const bins = Array(binCount)
+            .fill(0)
+            .map((_, i) => ({
+                start: min + i * binSize,
+                end: min + (i + 1) * binSize,
+                count: 0,
+            }));
+
+        values.forEach((value) => {
+            const binIndex = Math.min(
+                Math.floor((value - min) / binSize),
+                binCount - 1
+            );
+            bins[binIndex].count++;
+        });
+
+        return bins.map((bin) => ({
+            x: `${bin.start.toFixed(2)}-${bin.end.toFixed(2)}`,
+            y: bin.count,
+            start: bin.start,
+            end: bin.end,
+        }));
+    }
+
+    /**
+     * Transform data for box plots
+     */
+    private static transformForBoxPlot(data: any[], config: GraphConfig): any[] {
+        const valueField = config.xAxis || Object.keys(data[0] || {})[0];
+        const groupField = config.groupBy || config.colorBy;
+
+        if (groupField) {
+            const groups = this.groupData(data, groupField);
+            return Object.entries(groups).map(([group, groupData]) => {
+                const values = groupData
+                    .map((item) => this.parseNumericValue(item[valueField]))
+                    .filter((v) => !isNaN(v));
+                return this.calculateBoxPlotStats(values, group);
+            });
+        } else {
+            const values = data
+                .map((item) => this.parseNumericValue(item[valueField]))
+                .filter((v) => !isNaN(v));
+            return [this.calculateBoxPlotStats(values, "all")];
+        }
+    }
+
+    /**
+     * Transform data for heatmaps
+     */
+    private static transformForHeatmap(data: any[], config: GraphConfig): any[] {
+        const xField = config.xAxis || Object.keys(data[0] || {})[0];
+        const yField = config.yAxis || Object.keys(data[0] || {})[1];
+        const valueField = config.sizeBy || Object.keys(data[0] || {})[2];
+
+        return data.map((item) => ({
+            x: item[xField],
+            y: item[yField],
+            value: this.parseNumericValue(item[valueField]),
+            color: this.getHeatmapColor(this.parseNumericValue(item[valueField])),
+        }));
+    }
+
+    /**
+     * Transform data for timelines
+     */
+    private static transformForTimeline(data: any[], config: GraphConfig): any[] {
+        const timeField = config.xAxis || Object.keys(data[0] || {})[0];
+        const eventField = config.yAxis || Object.keys(data[0] || {})[1];
+
+        return data
+            .map((item) => ({
+                time: this.parseDateValue(item[timeField]),
+                event: item[eventField],
+                description: config.colorBy ? item[config.colorBy] : undefined,
+                category: config.groupBy ? item[config.groupBy] : undefined,
+            }))
+            .sort((a, b) => a.time - b.time);
+    }
+
+    /**
+     * Transform data for stacked bar charts
+     */
+    private static transformForStackedBar(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        const stackBy = config.groupBy || config.colorBy;
+
+        if (!stackBy) return this.transformForBarChart(data, config);
+
+        const groups = this.groupData(data, xAxis);
+        return Object.entries(groups).map(([xValue, groupData]) => {
+            const stacks = this.groupData(groupData, stackBy);
+            return {
+                x: xValue,
+                stacks: Object.entries(stacks).map(([stackName, stackData]) => ({
+                    name: stackName,
+                    value: stackData.reduce(
+                        (sum, item) => sum + this.parseNumericValue(item[yAxis]),
+                        0
+                    ),
+                })),
+            };
+        });
+    }
+
+    /**
+     * Transform data for grouped bar charts
+     */
+    private static transformForGroupedBar(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        const groupBy = config.groupBy || config.colorBy;
+
+        if (!groupBy) return this.transformForBarChart(data, config);
+
+        const groups = this.groupData(data, groupBy);
+        return Object.entries(groups).map(([groupName, groupData]) => ({
+            group: groupName,
+            bars: groupData.map((item) => ({
+                x: item[xAxis],
+                y: this.parseNumericValue(item[yAxis]),
+                label: item[xAxis],
+            })),
+        }));
+    }
+
+    /**
+     * Transform data for multi-line charts
+     */
+    private static transformForMultiLine(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        const lineBy = config.groupBy || config.colorBy;
+
+        if (!lineBy) return this.transformForLineChart(data, config);
+
+        const lines = this.groupData(data, lineBy);
+        return Object.entries(lines).map(([lineName, lineData]) => ({
+            name: lineName,
+            data: lineData
+                .map((item) => ({
+                    x: this.parseDateValue(item[xAxis]),
+                    y: this.parseNumericValue(item[yAxis]),
+                }))
+                .sort((a, b) => a.x - b.x),
+        }));
+    }
+
+    /**
+     * Transform data for area charts
+     */
+    private static transformForAreaChart(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const result = this.transformForLineChart(data, config);
+        return result.map((item) => ({
+            ...item,
+            area: true,
+        }));
+    }
+
+    /**
+     * Transform data for bubble charts
+     */
+    private static transformForBubbleChart(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const xAxis = config.xAxis || Object.keys(data[0] || {})[0];
+        const yAxis = config.yAxis || Object.keys(data[0] || {})[1];
+        const sizeField = config.sizeBy || Object.keys(data[0] || {})[2];
+
+        return data.map((item) => ({
+            x: this.parseNumericValue(item[xAxis]),
+            y: this.parseNumericValue(item[yAxis]),
+            size: this.parseNumericValue(item[sizeField]),
+            color: config.colorBy ? item[config.colorBy] : undefined,
+            label: item[xAxis],
+        }));
+    }
+
+    /**
+     * Transform data for donut charts
+     */
+    private static transformForDonutChart(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        return this.transformForPieChart(data, config);
+    }
+
+    /**
+     * Transform data for waterfall charts
+     */
+    private static transformForWaterfall(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        const labelField = config.xAxis || Object.keys(data[0] || {})[0];
+        const valueField = config.yAxis || Object.keys(data[0] || {})[1];
+
+        let runningTotal = 0;
+        return data.map((item) => {
+            const value = this.parseNumericValue(item[valueField]);
+            const start = runningTotal;
+            runningTotal += value;
+            return {
+                label: item[labelField],
+                value: value,
+                start: start,
+                end: runningTotal,
+                color: value >= 0 ? "positive" : "negative",
+            };
+        });
+    }
+
+    /**
+     * Generic chart transformation
+     */
+    private static transformForGenericChart(
+        data: any[],
+        config: GraphConfig
+    ): any[] {
+        return data.map((item) => ({
+            ...item,
+            processed: true,
+        }));
+    }
+
+    /**
+     * Aggregate data based on specified function
+     */
+    private static aggregateData(
+        data: any[],
+        groupBy: string,
+        valueField: string,
+        aggregation: string
+    ): any[] {
+        const groups = this.groupData(data, groupBy);
+
+        return Object.entries(groups).map(([group, groupData]) => {
+            const values = groupData
+                .map((item) => this.parseNumericValue(item[valueField]))
+                .filter((v) => !isNaN(v));
+            let aggregatedValue = 0;
+
+            switch (aggregation) {
+                case "count":
+                    aggregatedValue = groupData.length;
+                    break;
+                case "sum":
+                    aggregatedValue = values.reduce((sum, val) => sum + val, 0);
+                    break;
+                case "avg":
+                    aggregatedValue =
+                        values.length > 0
+                            ? values.reduce((sum, val) => sum + val, 0) / values.length
+                            : 0;
+                    break;
+                case "min":
+                    aggregatedValue = values.length > 0 ? Math.min(...values) : 0;
+                    break;
+                case "max":
+                    aggregatedValue = values.length > 0 ? Math.max(...values) : 0;
+                    break;
+                case "median":
+                    aggregatedValue = this.calculateMedian(values);
+                    break;
+                default:
+                    aggregatedValue = values.reduce((sum, val) => sum + val, 0);
+            }
+
+            return {
+                label: group,
+                value: aggregatedValue,
+                count: groupData.length,
+            };
+        });
+    }
+
+    /**
+     * Group data by a specific field
+     */
+    private static groupData(
+        data: any[],
+        groupBy: string
+    ): Record<string, any[]> {
+        return data.reduce((groups, item) => {
+            const key = item[groupBy] || "Unknown";
+            if (!groups[key]) groups[key] = [];
+            groups[key].push(item);
+            return groups;
+        }, {} as Record<string, any[]>);
+    }
+
+    /**
+     * Calculate box plot statistics
+     */
+    private static calculateBoxPlotStats(values: number[], group: string): any {
+        if (values.length === 0)
+            return { group, min: 0, q1: 0, median: 0, q3: 0, max: 0 };
+
+        values.sort((a, b) => a - b);
+        const min = values[0];
+        const max = values[values.length - 1];
+        const q1 = this.calculatePercentile(values, 25);
+        const median = this.calculatePercentile(values, 50);
+        const q3 = this.calculatePercentile(values, 75);
+
+        return { group, min, q1, median, q3, max };
+    }
+
+    /**
+     * Calculate percentile
+     */
+    private static calculatePercentile(
+        values: number[],
+        percentile: number
+    ): number {
+        const index = (percentile / 100) * (values.length - 1);
+        const lower = Math.floor(index);
+        const upper = Math.ceil(index);
+        const weight = index - lower;
+
+        if (upper === lower) return values[lower];
+        return values[lower] * (1 - weight) + values[upper] * weight;
+    }
+
+    /**
+     * Calculate median
+     */
+    private static calculateMedian(values: number[]): number {
+        if (values.length === 0) return 0;
+        values.sort((a, b) => a - b);
+        const mid = Math.floor(values.length / 2);
+        return values.length % 2 === 0
+            ? (values[mid - 1] + values[mid]) / 2
+            : values[mid];
+    }
+
+    /**
+     * Parse numeric value safely
+     */
+    private static parseNumericValue(value: any): number {
+        if (value === null || value === undefined) return 0;
+        const parsed = parseFloat(value);
+        return isNaN(parsed) ? 0 : parsed;
+    }
+
+    /**
+     * Parse date value safely
+     */
+    private static parseDateValue(value: any): number {
+        if (value === null || value === undefined) return 0;
+        const date = new Date(value);
+        return isNaN(date.getTime()) ? 0 : date.getTime();
+    }
+
+    /**
+     * Get heatmap color based on value
+     */
+    private static getHeatmapColor(value: number): string {
+        // Simple color scale from blue (low) to red (high)
+        const normalized = Math.max(0, Math.min(1, value / 100));
+        const r = Math.round(255 * normalized);
+        const b = Math.round(255 * (1 - normalized));
+        return `rgb(${r}, 0, ${b})`;
+    }
+
+    /**
+     * Assess data quality
+     */
+    private static assessDataQuality(data: any[]): {
+        completeness: number;
+        accuracy: number;
+        consistency: number;
+    } {
+        if (data.length === 0)
+            return { completeness: 0, accuracy: 0, consistency: 0 };
+
+        const totalFields = Object.keys(data[0] || {}).length;
+        let totalNulls = 0;
+        let totalValues = 0;
+
+        data.forEach((item) => {
+            Object.values(item).forEach((value) => {
+                totalValues++;
+                if (value === null || value === undefined || value === "") {
+                    totalNulls++;
+                }
+            });
+        });
+
+        const completeness = ((totalValues - totalNulls) / totalValues) * 100;
+        const accuracy = Math.min(
+            100,
+            Math.max(0, 100 - (totalNulls / data.length) * 10)
+        );
+        const consistency = Math.min(
+            100,
+            Math.max(0, 100 - (totalNulls / totalValues) * 20)
+        );
+
+        return { completeness, accuracy, consistency };
+    }
+
+    /**
+     * Generate insights from data
+     */
+    private static generateInsights(data: any[], config: GraphConfig): string[] {
+        const insights: string[] = [];
+
+        if (data.length === 0) {
+            insights.push("No data available for visualization");
+            return insights;
+        }
+
+        // Basic insights based on data type
+        switch (config.type) {
+            case GraphType.BAR_CHART:
+            case GraphType.PIE_CHART:
+                const maxValue = Math.max(...data.map((d) => d.value || d.y || 0));
+                const minValue = Math.min(...data.map((d) => d.value || d.y || 0));
+                insights.push(`Highest value: ${maxValue}`);
+                insights.push(`Lowest value: ${minValue}`);
+                insights.push(`Data range: ${maxValue - minValue}`);
+                break;
+            case GraphType.LINE_CHART:
+            case GraphType.TIMELINE:
+                insights.push(`Time span: ${data.length} data points`);
+                if (data.length > 1) {
+                    const trend =
+                        data[data.length - 1].y > data[0].y ? "increasing" : "decreasing";
+                    insights.push(`Overall trend: ${trend}`);
+                }
+                break;
+            case GraphType.SCATTER_PLOT:
+                insights.push(`Correlation analysis available`);
+                insights.push(`Outlier detection possible`);
+                break;
+        }
+
+        // Medical-specific insights
+        if (config.category) {
+            switch (config.category) {
+                case MedicalDataCategory.PATIENT_DEMOGRAPHICS:
+                    insights.push("Demographic distribution analysis");
+                    break;
+                case MedicalDataCategory.LABORATORY_RESULTS:
+                    insights.push("Lab result trends and ranges");
+                    break;
+                case MedicalDataCategory.MEDICATIONS:
+                    insights.push("Medication usage patterns");
+                    break;
+                case MedicalDataCategory.VITAL_SIGNS:
+                    insights.push("Vital sign monitoring trends");
+                    break;
+            }
+        }
+
+        return insights;
+    }
+
+    /**
+     * Generate recommendations based on data and graph type
+     */
+    private static generateRecommendations(
+        data: any[],
+        config: GraphConfig
+    ): string[] {
+        const recommendations: string[] = [];
+
+        if (data.length === 0) {
+            recommendations.push(
+                "Consider expanding the data query to include more records"
+            );
+            return recommendations;
+        }
+
+        // Recommendations based on data quality
+        const quality = this.assessDataQuality(data);
+        if (quality.completeness < 80) {
+            recommendations.push("Data completeness is low - consider data cleaning");
+        }
+        if (quality.accuracy < 90) {
+            recommendations.push(
+                "Data accuracy could be improved - verify data sources"
+            );
+        }
+
+        // Recommendations based on graph type
+        switch (config.type) {
+            case GraphType.BAR_CHART:
+                if (data.length > 20) {
+                    recommendations.push(
+                        "Consider grouping categories for better readability"
+                    );
+                }
+                break;
+            case GraphType.LINE_CHART:
+                if (data.length < 5) {
+                    recommendations.push(
+                        "More data points recommended for trend analysis"
+                    );
+                }
+                break;
+            case GraphType.PIE_CHART:
+                if (data.length > 8) {
+                    recommendations.push(
+                        'Consider combining smaller segments into "Other" category'
+                    );
+                }
+                break;
+            case GraphType.SCATTER_PLOT:
+                recommendations.push(
+                    "Consider adding trend lines for pattern analysis"
+                );
+                break;
+        }
+
+        // Medical-specific recommendations
+        if (config.category) {
+            switch (config.category) {
+                case MedicalDataCategory.LABORATORY_RESULTS:
+                    recommendations.push("Consider adding normal range indicators");
+                    break;
+                case MedicalDataCategory.MEDICATIONS:
+                    recommendations.push("Consider drug interaction analysis");
+                    break;
+                case MedicalDataCategory.VITAL_SIGNS:
+                    recommendations.push("Consider adding alert thresholds");
+                    break;
+            }
+        }
+
+        return recommendations;
+    }
 }
 
 export function medicalRoutes(): Router {
-  const router = Router();
+    const router = Router();
 
-  // SQL Validation Functions
-  interface SQLValidationResult {
-    isValid: boolean;
-    issues: string[];
-    suggestions: string[];
-  }
+    // SQL Validation Functions
+    interface SQLValidationResult {
+        isValid: boolean;
+        issues: string[];
+        suggestions: string[];
+    }
 
-  // Enhanced endpoint for manual SQL execution with complete query extraction
-  // Fixed endpoint for manual SQL execution with better SQL cleaning
-  // Fixed endpoint for manual SQL execution with schema validation
-  // Now includes conversational capabilities with session management
-   router.post('/query-sql-manual',
+    // Enhanced endpoint for manual SQL execution with complete query extraction
+    // Fixed endpoint for manual SQL execution with better SQL cleaning
+    // Fixed endpoint for manual SQL execution with schema validation
+    // Now includes conversational capabilities with session management
+    router.post('/query-sql-manual',
         [
             body('organizationId').isString().isLength({ min: 1, max: 100 }).withMessage('Organization ID is required and must be 1-100 characters'),
             body('query').isString().isLength({ min: 1, max: 500 }).withMessage('Query must be 1-500 characters'),
@@ -2254,7 +2221,7 @@ export function medicalRoutes(): Router {
             let globalTableSampleData: { [table: string]: any[] } = {};
 
             // ========== RETRY LOOP FOR ZERO RECORDS ==========
-            let maxRetryAttempts = 2; // Total of 2 attempts (original + 1 retry)
+            let maxRetryAttempts = 4; // Total of 4 attempts (original + 3 retries)
             let currentAttempt = 1;
             let finalResult: any = null;
 
@@ -4629,7 +4596,7 @@ Return only valid, semantic HTML.`;
                             sql_final: finalSQL,
                             sql_results: {
                                 resultExplanation,
-                                sql_final: parseRows(rows),
+                                sql_final: groupAndCleanData(parseRows(rows)),
                                 processing_time: `${processingTime.toFixed(2)}ms`,
                                 // Add graph data to sql_results if available
                                 ...(graphData ? { graph_data: graphData } : {})
@@ -4786,7 +4753,7 @@ Return only valid, semantic HTML.`;
                                             console.log(`✅ Restructured query executed successfully, returned ${Array.isArray(restructuredRows) ? restructuredRows.length : 0} structured rows`);
 
                                             // Add restructured data to sql_results
-                                            (response.sql_results as any).sql_final = parseRows(restructuredRows);
+                                            (response.sql_results as any).sql_final = groupAndCleanData(parseRows(restructuredRows));
                                             (response.sql_results as any).restructure_info = {
                                                 success: true,
                                                 message: "Successfully executed restructured SQL query",
@@ -4942,8 +4909,8 @@ Return only valid, semantic HTML.`;
                         console.log('📊 Step 5: Adding bar chart analysis layer...');
 
                         try {
-                            // Get the data for analysis (use restructured data if available, otherwise original data)
-                            const dataForAnalysis = (response.sql_results as any).sql_final || rows;
+                            // Use the original rows data for bar chart analysis (before restructuring)
+                            const dataForAnalysis = rows;
 
                             if (dataForAnalysis && Array.isArray(dataForAnalysis) && dataForAnalysis.length > 0) {
                                 console.log('🤖 Calling Azure OpenAI for bar chart analysis...');
@@ -4979,8 +4946,13 @@ Return only valid, semantic HTML.`;
 
                         // ========== RETRY LOGIC FOR ZERO RECORDS ==========
                         // Check if we got zero records and should retry entire API execution
-                        const hasZeroRecords = Array.isArray((response.sql_results as any).sql_final) &&
-                            (response.sql_results as any).sql_final.length === 0;
+                        // Use original rows data for zero check, not sql_final which may not be updated when restructuring is skipped
+                        const hasZeroRecords = Array.isArray(rows) && rows.length === 0;
+
+                        console.log(`🔍 Zero records check: hasZeroRecords=${hasZeroRecords}, currentAttempt=${currentAttempt}, maxRetryAttempts=${maxRetryAttempts}`);
+                        console.log(`🔍 original rows is array: ${Array.isArray(rows)}`);
+                        console.log(`🔍 original rows length: ${rows?.length}`);
+                        console.log(`🔍 Should retry: ${hasZeroRecords && currentAttempt < maxRetryAttempts}`);
 
                         if (hasZeroRecords && currentAttempt < maxRetryAttempts) {
                             console.log(`🔄 Zero records returned on attempt ${currentAttempt}. Triggering full API retry...`);
@@ -5525,663 +5497,662 @@ Avoid technical jargon and focus on helping the user get the information they ne
         }
     );
 
-  // We're not using database schema information since we're relying on
-  // sqlAgent's intelligence to handle database structure correctly
+    // We're not using database schema information since we're relying on
+    // sqlAgent's intelligence to handle database structure correctly
 
-  // We're relying on the sqlAgent's intelligence to handle column names correctly
-  // No hardcoded mappings or corrections are needed
+    // We're relying on the sqlAgent's intelligence to handle column names correctly
+    // No hardcoded mappings or corrections are needed
 
-  // The rest of the helper functions remain the same
-  // Function to fix malformed SQL structures commonly generated by SQL Agent
+    // The rest of the helper functions remain the same
+    // Function to fix malformed SQL structures commonly generated by SQL Agent
 
-  function cleanSQLQuery(input: string): string {
-    if (!input || typeof input !== "string") return "";
+    function cleanSQLQuery(input: string): string {
+        if (!input || typeof input !== "string") return "";
 
-    let sql = "";
+        let sql = "";
 
-    // Extract from code block (```sql ... ```)
-    const codeBlockMatch = input.match(/```(?:sql)?\s*([\s\S]*?)```/i);
-    if (codeBlockMatch) {
-      sql = codeBlockMatch[1].trim();
-    } else {
-      // Extract from inline code (`...`)
-      const inlineCodeMatch = input.match(/`([\s\S]*?)`/);
-      if (inlineCodeMatch) {
-        sql = inlineCodeMatch[1].trim();
-      } else {
-        sql = input.trim();
-      }
-    }
-
-    if (!sql) return "";
-
-    // Block INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE (case-insensitive, word-bound)
-    if (/\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE)\b/i.test(sql)) {
-      return "";
-    }
-
-    // Clean up markdown formatting (bold, italics, links, etc)
-    sql = sql
-      .replace(/\*\*(.*?)\*\*/g, "$1") // Bold
-      .replace(/\*(.*?)\*/g, "$1") // Italic
-      .replace(/__(.*?)__/g, "$1") // Bold
-      .replace(/~~(.*?)~~/g, "$1") // Strikethrough
-      .replace(/\[(.*?)\]\(.*?\)/g, "$1") // Links
-      .replace(/\[\[(.*?)\]\]/g, "$1") // Wiki links
-      .replace(/\{\{.*?\}\}/g, " ") // Template tags
-      .replace(/\{\%.*?\%\}/g, " "); // Template tags
-
-    // Remove SQL and JS comments, but NOT anything inside parentheses or strings
-    sql = sql
-      .replace(/^--.*$/gm, "") // SQL single line comments
-      .replace(/\/\/.*$/gm, "") // JS single line comments
-      .replace(/\/\*[\s\S]*?\*\//g, ""); // Multiline comments
-
-    // Replace all \n with a space
-    sql = sql.replace(/\n/g, " ");
-
-    // Normalize whitespace
-    sql = sql.replace(/[ \t]+/g, " ").trim();
-
-    // Add semicolon if not present
-    if (!sql.endsWith(";")) sql += ";";
-
-    return sql;
-  }
-
-  // Helper function to extract complete SQL queries with proper parentheses balance
-  function extractCompleteSQL(input: string): string | null {
-    // Find the start of a SELECT statement
-    const selectMatch = input.match(/SELECT/i);
-    if (!selectMatch) return null;
-
-    let startIndex = selectMatch.index!;
-    let currentPos = startIndex;
-    let parenthesesCount = 0;
-    let inSingleQuote = false;
-    let inDoubleQuote = false;
-    let inBacktick = false;
-    let sqlEnd = input.length;
-
-    // Track parentheses balance and find natural SQL ending
-    while (currentPos < input.length) {
-      const char = input[currentPos];
-      const nextChar =
-        currentPos + 1 < input.length ? input[currentPos + 1] : "";
-      const prevChar = currentPos > 0 ? input[currentPos - 1] : "";
-
-      // Handle string literals
-      if (char === "'" && !inDoubleQuote && !inBacktick && prevChar !== "\\") {
-        inSingleQuote = !inSingleQuote;
-      } else if (
-        char === '"' &&
-        !inSingleQuote &&
-        !inBacktick &&
-        prevChar !== "\\"
-      ) {
-        inDoubleQuote = !inDoubleQuote;
-      } else if (
-        char === "`" &&
-        !inSingleQuote &&
-        !inDoubleQuote &&
-        prevChar !== "\\"
-      ) {
-        inBacktick = !inBacktick;
-      }
-
-      // Only process non-string characters
-      if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
-        if (char === "(") {
-          parenthesesCount++;
-        } else if (char === ")") {
-          parenthesesCount--;
-        }
-
-        // Check for natural SQL endings when parentheses are balanced
-        if (parenthesesCount === 0) {
-          // Look for semicolon
-          if (char === ";") {
-            sqlEnd = currentPos + 1;
-            break;
-          }
-
-          // Look for natural text boundaries that indicate SQL end
-          const remainingText = input.substring(currentPos);
-          if (
-            remainingText.match(
-              /^\s*(?:Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s|\*\*|\#\#|```|\[\[|\]\])/i
-            )
-          ) {
-            sqlEnd = currentPos;
-            break;
-          }
-
-          // Look for line breaks followed by non-SQL content
-          if (char === "\n" && nextChar && !nextChar.match(/\s/)) {
-            const nextLine = input.substring(currentPos + 1).split("\n")[0];
-            if (
-              nextLine &&
-              !nextLine.match(
-                /^\s*(SELECT|FROM|WHERE|JOIN|GROUP|ORDER|HAVING|LIMIT|UNION|AND|OR)/i
-              )
-            ) {
-              // Check if this looks like explanatory text, not SQL continuation
-              if (
-                nextLine.match(/^[A-Z].*[.!?]$/) ||
-                nextLine.match(/^This|^The|^Note:|^Result|^Error/)
-              ) {
-                sqlEnd = currentPos;
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      currentPos++;
-    }
-
-    // Extract the SQL from start to the determined end
-    let extractedSQL = input.substring(startIndex, sqlEnd).trim();
-
-    // Clean up any trailing non-SQL text
-    extractedSQL = extractedSQL.replace(
-      /\s+(Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s).*$/i,
-      ""
-    );
-
-    // Validate that we have a complete SQL statement
-    if (extractedSQL.match(/SELECT\s+[\s\S]*?\s+FROM\s+/i)) {
-      return extractedSQL;
-    }
-
-    return null;
-  }
-
-  function isCompleteSQLQuery(sql: string): boolean {
-    if (!sql || typeof sql !== "string") return false;
-
-    // A complete SQL query should have SELECT, FROM, and a valid table reference
-    const hasSelect = /\bSELECT\b/i.test(sql);
-    const hasFrom = /\bFROM\b/i.test(sql);
-    const hasTable = /\bFROM\s+([a-zA-Z0-9_\.]+)/i.test(sql);
-
-    return hasSelect && hasFrom && hasTable;
-  }
-
-  function fixIncompleteSQLQuery(sql: string): string {
-    if (!sql || typeof sql !== "string") return sql;
-
-    // Already complete
-    if (isCompleteSQLQuery(sql)) return sql;
-
-    let fixedSQL = sql;
-
-    // Check if query ends with FROM without a table
-    if (/\bFROM\s*(?:;|\s*$)/i.test(sql)) {
-      // Extract column names to determine tables
-      const columnsMatch = sql.match(/\bSELECT\s+(.*?)\s+FROM\b/i);
-
-      if (columnsMatch) {
-        const columns = columnsMatch[1];
-
-        if (columns.includes("p.") && columns.includes("m.")) {
-          fixedSQL = sql.replace(
-            /FROM\s*(?:;|\s*$)/i,
-            "FROM patients p JOIN medications m ON p.id = m.patient_id"
-          );
-        } else if (columns.includes("p.")) {
-          fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM patients p");
-        } else if (columns.includes("m.")) {
-          fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM medications m");
-        } else if (columns.includes("d.") || columns.includes("doctor")) {
-          fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM doctors d");
-        } else if (columns.includes("v.") || columns.includes("visit")) {
-          fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM visits v");
+        // Extract from code block (```sql ... ```)
+        const codeBlockMatch = input.match(/```(?:sql)?\s*([\s\S]*?)```/i);
+        if (codeBlockMatch) {
+            sql = codeBlockMatch[1].trim();
         } else {
-          // Default to patients table if we can't determine
-          fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM patients");
+            // Extract from inline code (`...`)
+            const inlineCodeMatch = input.match(/`([\s\S]*?)`/);
+            if (inlineCodeMatch) {
+                sql = inlineCodeMatch[1].trim();
+            } else {
+                sql = input.trim();
+            }
         }
-      }
+
+        if (!sql) return "";
+
+        // Block INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE (case-insensitive, word-bound)
+        if (/\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE)\b/i.test(sql)) {
+            return "";
+        }
+
+        // Clean up markdown formatting (bold, italics, links, etc)
+        sql = sql
+            .replace(/\*\*(.*?)\*\*/g, "$1") // Bold
+            .replace(/\*(.*?)\*/g, "$1") // Italic
+            .replace(/__(.*?)__/g, "$1") // Bold
+            .replace(/~~(.*?)~~/g, "$1") // Strikethrough
+            .replace(/\[(.*?)\]\(.*?\)/g, "$1") // Links
+            .replace(/\[\[(.*?)\]\]/g, "$1") // Wiki links
+            .replace(/\{\{.*?\}\}/g, " ") // Template tags
+            .replace(/\{\%.*?\%\}/g, " "); // Template tags
+
+        // Remove SQL and JS comments, but NOT anything inside parentheses or strings
+        sql = sql
+            .replace(/^--.*$/gm, "") // SQL single line comments
+            .replace(/\/\/.*$/gm, "") // JS single line comments
+            .replace(/\/\*[\s\S]*?\*\//g, ""); // Multiline comments
+
+        // Replace all \n with a space
+        sql = sql.replace(/\n/g, " ");
+
+        // Normalize whitespace
+        sql = sql.replace(/[ \t]+/g, " ").trim();
+
+        // Add semicolon if not present
+        if (!sql.endsWith(";")) sql += ";";
+
+        return sql;
     }
 
-    // No SELECT statement found
-    if (!fixedSQL.toLowerCase().includes("select")) {
-      const possibleSelectMatch = fixedSQL.match(/^[^a-zA-Z]*(.*)/);
-      if (
-        possibleSelectMatch &&
-        possibleSelectMatch[1].toLowerCase().includes("from")
-      ) {
-        fixedSQL = "SELECT * " + possibleSelectMatch[1];
-      } else {
-        fixedSQL = "SELECT * FROM patients";
-      }
+    // Helper function to extract complete SQL queries with proper parentheses balance
+    function extractCompleteSQL(input: string): string | null {
+        // Find the start of a SELECT statement
+        const selectMatch = input.match(/SELECT/i);
+        if (!selectMatch) return null;
+
+        let startIndex = selectMatch.index!;
+        let currentPos = startIndex;
+        let parenthesesCount = 0;
+        let inSingleQuote = false;
+        let inDoubleQuote = false;
+        let inBacktick = false;
+        let sqlEnd = input.length;
+
+        // Track parentheses balance and find natural SQL ending
+        while (currentPos < input.length) {
+            const char = input[currentPos];
+            const nextChar =
+                currentPos + 1 < input.length ? input[currentPos + 1] : "";
+            const prevChar = currentPos > 0 ? input[currentPos - 1] : "";
+
+            // Handle string literals
+            if (char === "'" && !inDoubleQuote && !inBacktick && prevChar !== "\\") {
+                inSingleQuote = !inSingleQuote;
+            } else if (
+                char === '"' &&
+                !inSingleQuote &&
+                !inBacktick &&
+                prevChar !== "\\"
+            ) {
+                inDoubleQuote = !inDoubleQuote;
+            } else if (
+                char === "`" &&
+                !inSingleQuote &&
+                !inDoubleQuote &&
+                prevChar !== "\\"
+            ) {
+                inBacktick = !inBacktick;
+            }
+
+            // Only process non-string characters
+            if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
+                if (char === "(") {
+                    parenthesesCount++;
+                } else if (char === ")") {
+                    parenthesesCount--;
+                }
+
+                // Check for natural SQL endings when parentheses are balanced
+                if (parenthesesCount === 0) {
+                    // Look for semicolon
+                    if (char === ";") {
+                        sqlEnd = currentPos + 1;
+                        break;
+                    }
+
+                    // Look for natural text boundaries that indicate SQL end
+                    const remainingText = input.substring(currentPos);
+                    if (
+                        remainingText.match(
+                            /^\s*(?:Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s|\*\*|\#\#|```|\[\[|\]\])/i
+                        )
+                    ) {
+                        sqlEnd = currentPos;
+                        break;
+                    }
+
+                    // Look for line breaks followed by non-SQL content
+                    if (char === "\n" && nextChar && !nextChar.match(/\s/)) {
+                        const nextLine = input.substring(currentPos + 1).split("\n")[0];
+                        if (
+                            nextLine &&
+                            !nextLine.match(
+                                /^\s*(SELECT|FROM|WHERE|JOIN|GROUP|ORDER|HAVING|LIMIT|UNION|AND|OR)/i
+                            )
+                        ) {
+                            // Check if this looks like explanatory text, not SQL continuation
+                            if (
+                                nextLine.match(/^[A-Z].*[.!?]$/) ||
+                                nextLine.match(/^This|^The|^Note:|^Result|^Error/)
+                            ) {
+                                sqlEnd = currentPos;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            currentPos++;
+        }
+
+        // Extract the SQL from start to the determined end
+        let extractedSQL = input.substring(startIndex, sqlEnd).trim();
+
+        // Clean up any trailing non-SQL text
+        extractedSQL = extractedSQL.replace(
+            /\s+(Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s).*$/i,
+            ""
+        );
+
+        // Validate that we have a complete SQL statement
+        if (extractedSQL.match(/SELECT\s+[\s\S]*?\s+FROM\s+/i)) {
+            return extractedSQL;
+        }
+
+        return null;
     }
 
-    // No FROM clause found
-    if (!fixedSQL.toLowerCase().includes("from")) {
-      fixedSQL += " FROM patients";
+    function isCompleteSQLQuery(sql: string): boolean {
+        if (!sql || typeof sql !== "string") return false;
+
+        // A complete SQL query should have SELECT, FROM, and a valid table reference
+        const hasSelect = /\bSELECT\b/i.test(sql);
+        const hasFrom = /\bFROM\b/i.test(sql);
+        const hasTable = /\bFROM\s+([a-zA-Z0-9_\.]+)/i.test(sql);
+
+        return hasSelect && hasFrom && hasTable;
     }
 
-    // If the query doesn't have a semicolon at the end, add one
-    if (!fixedSQL.endsWith(";")) {
-      fixedSQL += ";";
+    function fixIncompleteSQLQuery(sql: string): string {
+        if (!sql || typeof sql !== "string") return sql;
+
+        // Already complete
+        if (isCompleteSQLQuery(sql)) return sql;
+
+        let fixedSQL = sql;
+
+        // Check if query ends with FROM without a table
+        if (/\bFROM\s*(?:;|\s*$)/i.test(sql)) {
+            // Extract column names to determine tables
+            const columnsMatch = sql.match(/\bSELECT\s+(.*?)\s+FROM\b/i);
+
+            if (columnsMatch) {
+                const columns = columnsMatch[1];
+
+                if (columns.includes("p.") && columns.includes("m.")) {
+                    fixedSQL = sql.replace(
+                        /FROM\s*(?:;|\s*$)/i,
+                        "FROM patients p JOIN medications m ON p.id = m.patient_id"
+                    );
+                } else if (columns.includes("p.")) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM patients p");
+                } else if (columns.includes("m.")) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM medications m");
+                } else if (columns.includes("d.") || columns.includes("doctor")) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM doctors d");
+                } else if (columns.includes("v.") || columns.includes("visit")) {
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM visits v");
+                } else {
+                    // Default to patients table if we can't determine
+                    fixedSQL = sql.replace(/FROM\s*(?:;|\s*$)/i, "FROM patients");
+                }
+            }
+        }
+
+        // No SELECT statement found
+        if (!fixedSQL.toLowerCase().includes("select")) {
+            const possibleSelectMatch = fixedSQL.match(/^[^a-zA-Z]*(.*)/);
+            if (
+                possibleSelectMatch &&
+                possibleSelectMatch[1].toLowerCase().includes("from")
+            ) {
+                fixedSQL = "SELECT * " + possibleSelectMatch[1];
+            } else {
+                fixedSQL = "SELECT * FROM patients";
+            }
+        }
+
+        // No FROM clause found
+        if (!fixedSQL.toLowerCase().includes("from")) {
+            fixedSQL += " FROM patients";
+        }
+
+        // If the query doesn't have a semicolon at the end, add one
+        if (!fixedSQL.endsWith(";")) {
+            fixedSQL += ";";
+        }
+
+        return fixedSQL;
     }
 
-    return fixedSQL;
-  }
+    /**
+     * Validates MySQL GROUP BY compliance for only_full_group_by mode
+     * @param sql SQL query to validate
+     * @returns Object with compliance status and suggested fixes
+     */
+    function validateMySQLGroupByCompliance(sql: string): {
+        isCompliant: boolean;
+        issues: string[];
+        suggestedFix?: string;
+    } {
+        if (!sql || typeof sql !== "string") {
+            return { isCompliant: true, issues: [] };
+        }
 
-  /**
-   * Validates MySQL GROUP BY compliance for only_full_group_by mode
-   * @param sql SQL query to validate
-   * @returns Object with compliance status and suggested fixes
-   */
-  function validateMySQLGroupByCompliance(sql: string): {
-    isCompliant: boolean;
-    issues: string[];
-    suggestedFix?: string;
-  } {
-    if (!sql || typeof sql !== "string") {
-      return { isCompliant: true, issues: [] };
-    }
+        const issues: string[] = [];
+        let suggestedFix = "";
 
-    const issues: string[] = [];
-    let suggestedFix = "";
+        // Parse the SQL to check for GROUP BY compliance
+        const sqlUpper = sql.toUpperCase();
+        const sqlLower = sql.toLowerCase();
 
-    // Parse the SQL to check for GROUP BY compliance
-    const sqlUpper = sql.toUpperCase();
-    const sqlLower = sql.toLowerCase();
+        // Check if the query has aggregation functions
+        const aggregationFunctions = [
+            "COUNT(",
+            "SUM(",
+            "AVG(",
+            "MAX(",
+            "MIN(",
+            "GROUP_CONCAT(",
+        ];
+        const hasAggregation = aggregationFunctions.some((func) =>
+            sqlUpper.includes(func.toUpperCase())
+        );
 
-    // Check if the query has aggregation functions
-    const aggregationFunctions = [
-      "COUNT(",
-      "SUM(",
-      "AVG(",
-      "MAX(",
-      "MIN(",
-      "GROUP_CONCAT(",
-    ];
-    const hasAggregation = aggregationFunctions.some((func) =>
-      sqlUpper.includes(func.toUpperCase())
-    );
+        // Check if the query has GROUP BY
+        const hasGroupBy = sqlUpper.includes("GROUP BY");
 
-    // Check if the query has GROUP BY
-    const hasGroupBy = sqlUpper.includes("GROUP BY");
+        if (!hasAggregation) {
+            // No aggregation functions, so GROUP BY compliance is not required
+            return { isCompliant: true, issues: [] };
+        }
 
-    if (!hasAggregation) {
-      // No aggregation functions, so GROUP BY compliance is not required
-      return { isCompliant: true, issues: [] };
-    }
+        if (!hasGroupBy) {
+            issues.push(
+                "Query uses aggregation functions but missing GROUP BY clause"
+            );
 
-    if (!hasGroupBy) {
-      issues.push(
-        "Query uses aggregation functions but missing GROUP BY clause"
-      );
+            // Try to suggest a fix by adding GROUP BY for non-aggregated columns
+            const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
+            if (selectMatch) {
+                const selectClause = selectMatch[1];
+                const columns = selectClause.split(",").map((col) => col.trim());
 
-      // Try to suggest a fix by adding GROUP BY for non-aggregated columns
-      const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
-      if (selectMatch) {
+                const nonAggregatedColumns: string[] = [];
+                columns.forEach((col) => {
+                    const isAggregated = aggregationFunctions.some((func) =>
+                        col.toUpperCase().includes(func.toUpperCase())
+                    );
+                    if (!isAggregated && !col.includes("*")) {
+                        // Extract just the column name, removing aliases
+                        const colName = col.replace(/\s+AS\s+\w+/i, "").trim();
+                        nonAggregatedColumns.push(colName);
+                    }
+                });
+
+                if (nonAggregatedColumns.length > 0) {
+                    const fromMatch = sql.match(
+                        /FROM[\s\S]*?(?=WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|$)/i
+                    );
+                    const whereMatch = sql.match(
+                        /(WHERE[\s\S]*?)(?=GROUP BY|HAVING|ORDER BY|LIMIT|$)/i
+                    );
+                    const havingMatch = sql.match(
+                        /(HAVING[\s\S]*?)(?=ORDER BY|LIMIT|$)/i
+                    );
+                    const orderByMatch = sql.match(/(ORDER BY[\s\S]*?)(?=LIMIT|$)/i);
+                    const limitMatch = sql.match(/(LIMIT[\s\S]*)$/i);
+
+                    suggestedFix = `SELECT ${selectClause} ${fromMatch ? fromMatch[0] : ""
+                        }`;
+                    if (whereMatch) suggestedFix += ` ${whereMatch[1]}`;
+                    suggestedFix += ` GROUP BY ${nonAggregatedColumns.join(", ")}`;
+                    if (havingMatch) suggestedFix += ` ${havingMatch[1]}`;
+                    if (orderByMatch) suggestedFix += ` ${orderByMatch[1]}`;
+                    if (limitMatch) suggestedFix += ` ${limitMatch[1]}`;
+
+                    if (!suggestedFix.endsWith(";")) suggestedFix += ";";
+                }
+            }
+
+            return { isCompliant: false, issues, suggestedFix };
+        }
+
+        // Parse SELECT clause to find all columns
+        const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
+        if (!selectMatch) {
+            return { isCompliant: true, issues: [] }; // Can't parse, assume compliant
+        }
+
         const selectClause = selectMatch[1];
         const columns = selectClause.split(",").map((col) => col.trim());
 
+        // Parse GROUP BY clause
+        const groupByMatch = sql.match(
+            /GROUP BY\s+(.*?)(?:\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$)/i
+        );
+        if (!groupByMatch) {
+            issues.push("GROUP BY clause could not be parsed");
+            return { isCompliant: false, issues };
+        }
+
+        const groupByClause = groupByMatch[1];
+        const groupByColumns = groupByClause.split(",").map((col) => col.trim());
+
+        // Check each SELECT column
         const nonAggregatedColumns: string[] = [];
+        const missingFromGroupBy: string[] = [];
+
         columns.forEach((col) => {
-          const isAggregated = aggregationFunctions.some((func) =>
-            col.toUpperCase().includes(func.toUpperCase())
-          );
-          if (!isAggregated && !col.includes("*")) {
-            // Extract just the column name, removing aliases
-            const colName = col.replace(/\s+AS\s+\w+/i, "").trim();
-            nonAggregatedColumns.push(colName);
-          }
+            const isAggregated = aggregationFunctions.some((func) =>
+                col.toUpperCase().includes(func.toUpperCase())
+            );
+
+            if (!isAggregated && !col.includes("*")) {
+                // Extract just the column name, removing aliases and table prefixes for comparison
+                let colName = col.replace(/\s+AS\s+\w+/i, "").trim();
+
+                // Check if this column is in GROUP BY
+                const isInGroupBy = groupByColumns.some((groupCol) => {
+                    // Normalize both for comparison (remove table prefixes, spaces)
+                    const normalizedGroupCol = groupCol.replace(/^\w+\./, "").trim();
+                    const normalizedColName = colName.replace(/^\w+\./, "").trim();
+                    return (
+                        normalizedGroupCol === normalizedColName ||
+                        groupCol.trim() === colName ||
+                        normalizedGroupCol.toLowerCase() === normalizedColName.toLowerCase()
+                    );
+                });
+
+                nonAggregatedColumns.push(colName);
+
+                if (!isInGroupBy) {
+                    missingFromGroupBy.push(colName);
+                }
+            }
         });
 
-        if (nonAggregatedColumns.length > 0) {
-          const fromMatch = sql.match(
-            /FROM[\s\S]*?(?=WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|$)/i
-          );
-          const whereMatch = sql.match(
-            /(WHERE[\s\S]*?)(?=GROUP BY|HAVING|ORDER BY|LIMIT|$)/i
-          );
-          const havingMatch = sql.match(
-            /(HAVING[\s\S]*?)(?=ORDER BY|LIMIT|$)/i
-          );
-          const orderByMatch = sql.match(/(ORDER BY[\s\S]*?)(?=LIMIT|$)/i);
-          const limitMatch = sql.match(/(LIMIT[\s\S]*)$/i);
+        if (missingFromGroupBy.length > 0) {
+            issues.push(
+                `Non-aggregated columns not in GROUP BY: ${missingFromGroupBy.join(
+                    ", "
+                )}`
+            );
 
-          suggestedFix = `SELECT ${selectClause} ${
-            fromMatch ? fromMatch[0] : ""
-          }`;
-          if (whereMatch) suggestedFix += ` ${whereMatch[1]}`;
-          suggestedFix += ` GROUP BY ${nonAggregatedColumns.join(", ")}`;
-          if (havingMatch) suggestedFix += ` ${havingMatch[1]}`;
-          if (orderByMatch) suggestedFix += ` ${orderByMatch[1]}`;
-          if (limitMatch) suggestedFix += ` ${limitMatch[1]}`;
+            // Suggest fix by adding missing columns to GROUP BY
+            const additionalGroupBy = missingFromGroupBy.filter(
+                (col) =>
+                    !groupByColumns.some(
+                        (groupCol) =>
+                            groupCol.toLowerCase().includes(col.toLowerCase()) ||
+                            col.toLowerCase().includes(groupCol.toLowerCase())
+                    )
+            );
 
-          if (!suggestedFix.endsWith(";")) suggestedFix += ";";
+            if (additionalGroupBy.length > 0) {
+                const newGroupBy = [...groupByColumns, ...additionalGroupBy].join(", ");
+                suggestedFix = sql.replace(
+                    /GROUP BY\s+.*?(?=\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$)/i,
+                    `GROUP BY ${newGroupBy}`
+                );
+            }
+
+            return { isCompliant: false, issues, suggestedFix };
         }
-      }
 
-      return { isCompliant: false, issues, suggestedFix };
+        return { isCompliant: true, issues: [] };
     }
 
-    // Parse SELECT clause to find all columns
-    const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
-    if (!selectMatch) {
-      return { isCompliant: true, issues: [] }; // Can't parse, assume compliant
-    }
+    function finalCleanSQL(sql: string): string {
+        if (!sql || typeof sql !== "string") return "";
 
-    const selectClause = selectMatch[1];
-    const columns = selectClause.split(",").map((col) => col.trim());
+        // First remove any non-ASCII characters that might cause problems
+        let cleanSQL = sql.replace(/[^\x00-\x7F]/g, "");
 
-    // Parse GROUP BY clause
-    const groupByMatch = sql.match(
-      /GROUP BY\s+(.*?)(?:\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$)/i
-    );
-    if (!groupByMatch) {
-      issues.push("GROUP BY clause could not be parsed");
-      return { isCompliant: false, issues };
-    }
+        // Remove any markdown artifacts or non-SQL content that might remain
+        cleanSQL = cleanSQL
+            .replace(/```/g, "")
+            .replace(/\*\*/g, "")
+            .replace(/--.*?(?:\n|$)/g, " ")
+            .replace(/\/\/.*?(?:\n|$)/g, " ")
+            .replace(/\/\*[\s\S]*?\*\//g, " ")
+            .replace(/\s*Review for common mistakes:[\s\S]*/i, "")
+            .replace(/\s*Notes:[\s\S]*/i, "");
 
-    const groupByClause = groupByMatch[1];
-    const groupByColumns = groupByClause.split(",").map((col) => col.trim());
-
-    // Check each SELECT column
-    const nonAggregatedColumns: string[] = [];
-    const missingFromGroupBy: string[] = [];
-
-    columns.forEach((col) => {
-      const isAggregated = aggregationFunctions.some((func) =>
-        col.toUpperCase().includes(func.toUpperCase())
-      );
-
-      if (!isAggregated && !col.includes("*")) {
-        // Extract just the column name, removing aliases and table prefixes for comparison
-        let colName = col.replace(/\s+AS\s+\w+/i, "").trim();
-
-        // Check if this column is in GROUP BY
-        const isInGroupBy = groupByColumns.some((groupCol) => {
-          // Normalize both for comparison (remove table prefixes, spaces)
-          const normalizedGroupCol = groupCol.replace(/^\w+\./, "").trim();
-          const normalizedColName = colName.replace(/^\w+\./, "").trim();
-          return (
-            normalizedGroupCol === normalizedColName ||
-            groupCol.trim() === colName ||
-            normalizedGroupCol.toLowerCase() === normalizedColName.toLowerCase()
-          );
-        });
-
-        nonAggregatedColumns.push(colName);
-
-        if (!isInGroupBy) {
-          missingFromGroupBy.push(colName);
+        // Remove any other non-SQL content that might follow a semicolon
+        const semicolonIndex = cleanSQL.indexOf(";");
+        if (semicolonIndex !== -1) {
+            cleanSQL = cleanSQL.substring(0, semicolonIndex + 1);
         }
-      }
-    });
 
-    if (missingFromGroupBy.length > 0) {
-      issues.push(
-        `Non-aggregated columns not in GROUP BY: ${missingFromGroupBy.join(
-          ", "
-        )}`
-      );
+        // Normalize whitespace
+        cleanSQL = cleanSQL.replace(/\s+/g, " ").trim();
 
-      // Suggest fix by adding missing columns to GROUP BY
-      const additionalGroupBy = missingFromGroupBy.filter(
-        (col) =>
-          !groupByColumns.some(
-            (groupCol) =>
-              groupCol.toLowerCase().includes(col.toLowerCase()) ||
-              col.toLowerCase().includes(groupCol.toLowerCase())
-          )
-      );
+        // Make sure it starts with SELECT
+        if (!cleanSQL.toUpperCase().startsWith("SELECT")) {
+            const selectMatch = cleanSQL.match(/(SELECT[\s\S]+)/i);
+            if (selectMatch) {
+                cleanSQL = selectMatch[1];
+            } else {
+                return ""; // Not a valid SQL query
+            }
+        }
 
-      if (additionalGroupBy.length > 0) {
-        const newGroupBy = [...groupByColumns, ...additionalGroupBy].join(", ");
-        suggestedFix = sql.replace(
-          /GROUP BY\s+.*?(?=\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$)/i,
-          `GROUP BY ${newGroupBy}`
+        // Make sure it includes FROM
+        if (!cleanSQL.toUpperCase().includes(" FROM ")) {
+            return ""; // Not a valid SQL query
+        }
+
+        // ENHANCED SQL SYNTAX VALIDATION AND FIXING
+
+        // Fix common syntax issues that cause MySQL errors
+
+        // 1. Fix orphaned closing parentheses at the beginning
+        cleanSQL = cleanSQL.replace(/^\s*\)\s*/, "");
+
+        // 2. Fix malformed WITH clauses that don't have proper structure
+        cleanSQL = cleanSQL.replace(/^\s*WITH\s*\)\s*/i, "");
+
+        // 3. Fix cases where there's a closing parenthesis before SELECT
+        cleanSQL = cleanSQL.replace(/^\s*\)\s*(SELECT)/i, "$1");
+
+        // 4. Fix complex query structure issues first
+        // Handle cases where we have ") SELECT" which indicates malformed CTE or subquery
+        if (/\)\s+SELECT/i.test(cleanSQL)) {
+            console.log(
+                "🔧 Detected malformed CTE/subquery structure, attempting to fix..."
+            );
+
+            // Pattern: "...GROUP BY field ) SELECT ..." - this is likely a malformed CTE
+            const ctePattern = /(SELECT.*?FROM.*?GROUP BY.*?)\s*\)\s*(SELECT.*)/i;
+            const cteMatch = cleanSQL.match(ctePattern);
+
+            if (cteMatch) {
+                console.log("🔧 Converting to proper CTE structure...");
+                const innerQuery = cteMatch[1];
+                const outerQuery = cteMatch[2];
+
+                // Create a proper CTE structure
+                cleanSQL = `WITH therapeutic_counts AS (${innerQuery}) ${outerQuery}`;
+                console.log("🔧 Fixed CTE structure:", cleanSQL);
+            } else {
+                // If we can't parse it as CTE, try to extract the most complete SELECT statement
+                console.log(
+                    "🔧 Could not parse as CTE, extracting most complete SELECT..."
+                );
+                const selectMatches = cleanSQL.match(/(SELECT[\s\S]*?(?:;|$))/gi);
+                if (selectMatches && selectMatches.length > 0) {
+                    // Take the longest SELECT statement (likely most complete)
+                    const longestSelect = selectMatches.reduce((longest, current) =>
+                        current.length > longest.length ? current : longest
+                    );
+                    cleanSQL = longestSelect;
+                    console.log("🔧 Using longest SELECT statement:", cleanSQL);
+                }
+            }
+        }
+
+        // 5. Fix mismatched parentheses - count and balance them
+        const openParens = (cleanSQL.match(/\(/g) || []).length;
+        const closeParens = (cleanSQL.match(/\)/g) || []).length;
+
+        if (closeParens > openParens) {
+            // Remove extra closing parentheses strategically
+            let extraClosing = closeParens - openParens;
+            console.log(`🔧 Removing ${extraClosing} extra closing parentheses...`);
+
+            // First, try to remove orphaned closing parentheses at the beginning
+            while (extraClosing > 0 && /^\s*\)/.test(cleanSQL)) {
+                cleanSQL = cleanSQL.replace(/^\s*\)/, "");
+                extraClosing--;
+            }
+
+            // If still have extra, remove them from other strategic positions
+            while (extraClosing > 0) {
+                // Remove closing parentheses that appear before keywords without matching opening
+                if (
+                    /\)\s+(SELECT|FROM|WHERE|GROUP|ORDER|HAVING|LIMIT)/i.test(cleanSQL)
+                ) {
+                    cleanSQL = cleanSQL.replace(
+                        /\)\s+(SELECT|FROM|WHERE|GROUP|ORDER|HAVING|LIMIT)/i,
+                        " $1"
+                    );
+                    extraClosing--;
+                } else {
+                    // Remove the last closing parenthesis
+                    const lastCloseIndex = cleanSQL.lastIndexOf(")");
+                    if (lastCloseIndex > -1) {
+                        cleanSQL =
+                            cleanSQL.substring(0, lastCloseIndex) +
+                            cleanSQL.substring(lastCloseIndex + 1);
+                        extraClosing--;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        } else if (openParens > closeParens) {
+            // Add missing closing parentheses at the end (before semicolon)
+            const missingClosing = openParens - closeParens;
+            console.log(`🔧 Adding ${missingClosing} missing closing parentheses...`);
+            if (cleanSQL.endsWith(";")) {
+                cleanSQL = cleanSQL.slice(0, -1) + ")".repeat(missingClosing) + ";";
+            } else {
+                cleanSQL += ")".repeat(missingClosing);
+            }
+        }
+
+        // 6. Fix cases where there are multiple SELECT statements incorrectly formatted
+        const selectMatches = cleanSQL.match(/SELECT/gi);
+        if (selectMatches && selectMatches.length > 1) {
+            // If there are multiple SELECTs, take only the first complete one
+            const firstSelectIndex = cleanSQL.toUpperCase().indexOf("SELECT");
+            let queryEnd = cleanSQL.length;
+
+            // Find the end of the first SELECT statement
+            const secondSelectIndex = cleanSQL
+                .toUpperCase()
+                .indexOf("SELECT", firstSelectIndex + 6);
+            if (secondSelectIndex > -1) {
+                queryEnd = secondSelectIndex;
+            }
+
+            cleanSQL = cleanSQL.substring(firstSelectIndex, queryEnd).trim();
+        }
+
+        // 7. Fix common MySQL syntax issues
+
+        // Fix incorrect LIMIT syntax
+        cleanSQL = cleanSQL.replace(
+            /LIMIT\s+(\d+)\s*,\s*(\d+)/gi,
+            "LIMIT $2 OFFSET $1"
         );
-      }
 
-      return { isCompliant: false, issues, suggestedFix };
-    }
-
-    return { isCompliant: true, issues: [] };
-  }
-
-  function finalCleanSQL(sql: string): string {
-    if (!sql || typeof sql !== "string") return "";
-
-    // First remove any non-ASCII characters that might cause problems
-    let cleanSQL = sql.replace(/[^\x00-\x7F]/g, "");
-
-    // Remove any markdown artifacts or non-SQL content that might remain
-    cleanSQL = cleanSQL
-      .replace(/```/g, "")
-      .replace(/\*\*/g, "")
-      .replace(/--.*?(?:\n|$)/g, " ")
-      .replace(/\/\/.*?(?:\n|$)/g, " ")
-      .replace(/\/\*[\s\S]*?\*\//g, " ")
-      .replace(/\s*Review for common mistakes:[\s\S]*/i, "")
-      .replace(/\s*Notes:[\s\S]*/i, "");
-
-    // Remove any other non-SQL content that might follow a semicolon
-    const semicolonIndex = cleanSQL.indexOf(";");
-    if (semicolonIndex !== -1) {
-      cleanSQL = cleanSQL.substring(0, semicolonIndex + 1);
-    }
-
-    // Normalize whitespace
-    cleanSQL = cleanSQL.replace(/\s+/g, " ").trim();
-
-    // Make sure it starts with SELECT
-    if (!cleanSQL.toUpperCase().startsWith("SELECT")) {
-      const selectMatch = cleanSQL.match(/(SELECT[\s\S]+)/i);
-      if (selectMatch) {
-        cleanSQL = selectMatch[1];
-      } else {
-        return ""; // Not a valid SQL query
-      }
-    }
-
-    // Make sure it includes FROM
-    if (!cleanSQL.toUpperCase().includes(" FROM ")) {
-      return ""; // Not a valid SQL query
-    }
-
-    // ENHANCED SQL SYNTAX VALIDATION AND FIXING
-
-    // Fix common syntax issues that cause MySQL errors
-
-    // 1. Fix orphaned closing parentheses at the beginning
-    cleanSQL = cleanSQL.replace(/^\s*\)\s*/, "");
-
-    // 2. Fix malformed WITH clauses that don't have proper structure
-    cleanSQL = cleanSQL.replace(/^\s*WITH\s*\)\s*/i, "");
-
-    // 3. Fix cases where there's a closing parenthesis before SELECT
-    cleanSQL = cleanSQL.replace(/^\s*\)\s*(SELECT)/i, "$1");
-
-    // 4. Fix complex query structure issues first
-    // Handle cases where we have ") SELECT" which indicates malformed CTE or subquery
-    if (/\)\s+SELECT/i.test(cleanSQL)) {
-      console.log(
-        "🔧 Detected malformed CTE/subquery structure, attempting to fix..."
-      );
-
-      // Pattern: "...GROUP BY field ) SELECT ..." - this is likely a malformed CTE
-      const ctePattern = /(SELECT.*?FROM.*?GROUP BY.*?)\s*\)\s*(SELECT.*)/i;
-      const cteMatch = cleanSQL.match(ctePattern);
-
-      if (cteMatch) {
-        console.log("🔧 Converting to proper CTE structure...");
-        const innerQuery = cteMatch[1];
-        const outerQuery = cteMatch[2];
-
-        // Create a proper CTE structure
-        cleanSQL = `WITH therapeutic_counts AS (${innerQuery}) ${outerQuery}`;
-        console.log("🔧 Fixed CTE structure:", cleanSQL);
-      } else {
-        // If we can't parse it as CTE, try to extract the most complete SELECT statement
-        console.log(
-          "🔧 Could not parse as CTE, extracting most complete SELECT..."
+        // Fix incorrect date formatting
+        cleanSQL = cleanSQL.replace(
+            /DATE\s*\(\s*['"]([^'"]+)['"]\s*\)/gi,
+            "DATE('$1')"
         );
-        const selectMatches = cleanSQL.match(/(SELECT[\s\S]*?(?:;|$))/gi);
-        if (selectMatches && selectMatches.length > 0) {
-          // Take the longest SELECT statement (likely most complete)
-          const longestSelect = selectMatches.reduce((longest, current) =>
-            current.length > longest.length ? current : longest
-          );
-          cleanSQL = longestSelect;
-          console.log("🔧 Using longest SELECT statement:", cleanSQL);
+
+        // Fix table alias issues (missing AS keyword or improper spacing)
+        cleanSQL = cleanSQL.replace(
+            /(\w+)\s+(\w+)\s+(ON|WHERE|JOIN|GROUP|ORDER|LIMIT|HAVING)/gi,
+            "$1 AS $2 $3"
+        );
+
+        // 8. NEW: Fix specific SELECT clause issues that cause syntax errors
+
+        // Fix missing comma after table.* in SELECT clauses
+        // Pattern: SELECT table.* function(...) should be SELECT table.*, function(...)
+        cleanSQL = cleanSQL.replace(
+            /SELECT\s+([\w.]+\.\*)\s+([A-Z_]+\s*\()/gi,
+            "SELECT $1, $2"
+        );
+
+        // Fix extra "AS" before table names in FROM clause
+        // Pattern: FROM AS table_name should be FROM table_name
+        cleanSQL = cleanSQL.replace(/FROM\s+AS\s+/gi, "FROM ");
+
+        // Fix missing comma between SELECT fields - IMPROVED PATTERN
+        // Only match field names followed by aggregate functions, not function parameters
+        cleanSQL = cleanSQL.replace(
+            /(\w+(?:\.\w+)?)\s+(GROUP_CONCAT|COUNT|SUM|AVG|MAX|MIN)\s*\(/gi,
+            "$1, $2("
+        );
+
+        // Fix orphaned commas before FROM
+        cleanSQL = cleanSQL.replace(/,\s*FROM/gi, " FROM");
+
+        // 9. Validate basic SQL structure
+        const upperSQL = cleanSQL.toUpperCase();
+
+        // Ensure proper SELECT structure
+        if (!upperSQL.includes("SELECT") || !upperSQL.includes("FROM")) {
+            return "";
         }
-      }
-    }
 
-    // 5. Fix mismatched parentheses - count and balance them
-    const openParens = (cleanSQL.match(/\(/g) || []).length;
-    const closeParens = (cleanSQL.match(/\)/g) || []).length;
+        // Check for basic syntax requirements
+        const hasValidStructure = /SELECT\s+.*\s+FROM\s+\w+/i.test(cleanSQL);
+        if (!hasValidStructure) {
+            return "";
+        }
 
-    if (closeParens > openParens) {
-      // Remove extra closing parentheses strategically
-      let extraClosing = closeParens - openParens;
-      console.log(`🔧 Removing ${extraClosing} extra closing parentheses...`);
+        // 10. Final cleanup
 
-      // First, try to remove orphaned closing parentheses at the beginning
-      while (extraClosing > 0 && /^\s*\)/.test(cleanSQL)) {
-        cleanSQL = cleanSQL.replace(/^\s*\)/, "");
-        extraClosing--;
-      }
-
-      // If still have extra, remove them from other strategic positions
-      while (extraClosing > 0) {
-        // Remove closing parentheses that appear before keywords without matching opening
-        if (
-          /\)\s+(SELECT|FROM|WHERE|GROUP|ORDER|HAVING|LIMIT)/i.test(cleanSQL)
-        ) {
-          cleanSQL = cleanSQL.replace(
-            /\)\s+(SELECT|FROM|WHERE|GROUP|ORDER|HAVING|LIMIT)/i,
+        // Remove any trailing commas before FROM, WHERE, etc.
+        cleanSQL = cleanSQL.replace(
+            /,\s+(FROM|WHERE|GROUP|ORDER|LIMIT|HAVING)/gi,
             " $1"
-          );
-          extraClosing--;
-        } else {
-          // Remove the last closing parenthesis
-          const lastCloseIndex = cleanSQL.lastIndexOf(")");
-          if (lastCloseIndex > -1) {
-            cleanSQL =
-              cleanSQL.substring(0, lastCloseIndex) +
-              cleanSQL.substring(lastCloseIndex + 1);
-            extraClosing--;
-          } else {
-            break;
-          }
+        );
+
+        // Remove any extra spaces
+        cleanSQL = cleanSQL.replace(/\s+/g, " ").trim();
+
+        // Ensure it ends with a semicolon
+        if (!cleanSQL.endsWith(";")) {
+            cleanSQL += ";";
         }
-      }
-    } else if (openParens > closeParens) {
-      // Add missing closing parentheses at the end (before semicolon)
-      const missingClosing = openParens - closeParens;
-      console.log(`🔧 Adding ${missingClosing} missing closing parentheses...`);
-      if (cleanSQL.endsWith(";")) {
-        cleanSQL = cleanSQL.slice(0, -1) + ")".repeat(missingClosing) + ";";
-      } else {
-        cleanSQL += ")".repeat(missingClosing);
-      }
-    }
 
-    // 6. Fix cases where there are multiple SELECT statements incorrectly formatted
-    const selectMatches = cleanSQL.match(/SELECT/gi);
-    if (selectMatches && selectMatches.length > 1) {
-      // If there are multiple SELECTs, take only the first complete one
-      const firstSelectIndex = cleanSQL.toUpperCase().indexOf("SELECT");
-      let queryEnd = cleanSQL.length;
+        return cleanSQL;
+    } // New function to validate SQL syntax before execution
 
-      // Find the end of the first SELECT statement
-      const secondSelectIndex = cleanSQL
-        .toUpperCase()
-        .indexOf("SELECT", firstSelectIndex + 6);
-      if (secondSelectIndex > -1) {
-        queryEnd = secondSelectIndex;
-      }
-
-      cleanSQL = cleanSQL.substring(firstSelectIndex, queryEnd).trim();
-    }
-
-    // 7. Fix common MySQL syntax issues
-
-    // Fix incorrect LIMIT syntax
-    cleanSQL = cleanSQL.replace(
-      /LIMIT\s+(\d+)\s*,\s*(\d+)/gi,
-      "LIMIT $2 OFFSET $1"
-    );
-
-    // Fix incorrect date formatting
-    cleanSQL = cleanSQL.replace(
-      /DATE\s*\(\s*['"]([^'"]+)['"]\s*\)/gi,
-      "DATE('$1')"
-    );
-
-    // Fix table alias issues (missing AS keyword or improper spacing)
-    cleanSQL = cleanSQL.replace(
-      /(\w+)\s+(\w+)\s+(ON|WHERE|JOIN|GROUP|ORDER|LIMIT|HAVING)/gi,
-      "$1 AS $2 $3"
-    );
-
-    // 8. NEW: Fix specific SELECT clause issues that cause syntax errors
-
-    // Fix missing comma after table.* in SELECT clauses
-    // Pattern: SELECT table.* function(...) should be SELECT table.*, function(...)
-    cleanSQL = cleanSQL.replace(
-      /SELECT\s+([\w.]+\.\*)\s+([A-Z_]+\s*\()/gi,
-      "SELECT $1, $2"
-    );
-
-    // Fix extra "AS" before table names in FROM clause
-    // Pattern: FROM AS table_name should be FROM table_name
-    cleanSQL = cleanSQL.replace(/FROM\s+AS\s+/gi, "FROM ");
-
-    // Fix missing comma between SELECT fields - IMPROVED PATTERN
-    // Only match field names followed by aggregate functions, not function parameters
-    cleanSQL = cleanSQL.replace(
-      /(\w+(?:\.\w+)?)\s+(GROUP_CONCAT|COUNT|SUM|AVG|MAX|MIN)\s*\(/gi,
-      "$1, $2("
-    );
-
-    // Fix orphaned commas before FROM
-    cleanSQL = cleanSQL.replace(/,\s*FROM/gi, " FROM");
-
-    // 9. Validate basic SQL structure
-    const upperSQL = cleanSQL.toUpperCase();
-
-    // Ensure proper SELECT structure
-    if (!upperSQL.includes("SELECT") || !upperSQL.includes("FROM")) {
-      return "";
-    }
-
-    // Check for basic syntax requirements
-    const hasValidStructure = /SELECT\s+.*\s+FROM\s+\w+/i.test(cleanSQL);
-    if (!hasValidStructure) {
-      return "";
-    }
-
-    // 10. Final cleanup
-
-    // Remove any trailing commas before FROM, WHERE, etc.
-    cleanSQL = cleanSQL.replace(
-      /,\s+(FROM|WHERE|GROUP|ORDER|LIMIT|HAVING)/gi,
-      " $1"
-    );
-
-    // Remove any extra spaces
-    cleanSQL = cleanSQL.replace(/\s+/g, " ").trim();
-
-    // Ensure it ends with a semicolon
-    if (!cleanSQL.endsWith(";")) {
-      cleanSQL += ";";
-    }
-
-    return cleanSQL;
-  } // New function to validate SQL syntax before execution
-
-  return router;
+    return router;
 }
