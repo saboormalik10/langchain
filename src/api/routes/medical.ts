@@ -2280,6 +2280,8 @@ export function medicalRoutes(): Router {
             let maxRetryAttempts = 2; // Total of 2 attempts (original + 1 retry)
             let currentAttempt = 1;
             let finalResult: any = null;
+            let previousAttemptError: string | null = null; // Track error from previous attempt
+            let responseSent = false; // Flag to prevent double responses
 
             while (currentAttempt <= maxRetryAttempts && !finalResult) {
                 console.log(`🔄 Starting API execution attempt ${currentAttempt} of ${maxRetryAttempts}...`);
@@ -2287,6 +2289,7 @@ export function medicalRoutes(): Router {
                 try {
                     const errors = validationResult(req);
                     if (!errors.isEmpty()) {
+                        responseSent = true;
                         return res.status(400).json({
                             error: 'Validation failed',
                             details: errors.array()
@@ -2838,7 +2841,7 @@ CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase(
                                     // Get schema for each table using single connection
                                     console.log(`🔄 Fetching schema for ${allTables.length} tables using single connection...`);
                                     let schemaConnection: any = null;
-                                    
+
                                     try {
                                         // Create one shared connection for all schema fetching
                                         if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
@@ -2896,7 +2899,7 @@ CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase(
 
                                     // Get sample data (first 3 records) for each table using Promise.all for parallel execution
                                     console.log(`🔄 Fetching sample data for ${allTables.length} tables in parallel...`);
-                                    
+
                                     // Create array of sample data fetch promises
                                     const sampleDataPromises = allTables.map(async (tableName) => {
                                         try {
@@ -2921,7 +2924,7 @@ CRITICAL: Use ONLY SQL features compatible with this ${databaseType.toUpperCase(
 
                                                 globalTableSampleData[tableName] = Array.isArray(sampleRecords) ? sampleRecords : [];
                                                 console.log(`✅ Got sample data for table ${tableName}: ${globalTableSampleData[tableName].length} records`);
-                                                
+
                                                 return { tableName, success: true };
                                             } finally {
                                                 // Clean up individual connection
@@ -3082,6 +3085,25 @@ ${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
 2. Any SQL features not supported by the detected version MUST be avoided
 3. Version-specific query patterns MUST be followed exactly, especially for GROUP BY clauses
 
+🚨 **CRITICAL JOIN REQUIREMENT - READ THIS FIRST:**
+**NEVER ADD NON-KEY COLUMN MATCHING IN JOIN CONDITIONS**
+- Use ONLY primary/foreign key relationships in JOIN conditions
+- FORBIDDEN: JOIN table2 ON table1.id = table2.table1_id AND table1.name = table2.name
+- CORRECT: JOIN table2 ON table1.id = table2.table1_id
+- Additional filtering belongs in WHERE clause, NOT JOIN conditions
+
+${currentAttempt > 1 && previousAttemptError ? `
+❌ **PREVIOUS ATTEMPT FAILED WITH ERROR:**
+${previousAttemptError}
+
+🚨 **CRITICAL: LEARN FROM THE ERROR ABOVE**
+- Analyze the specific error that occurred in the previous attempt
+- DO NOT repeat the same mistake that caused the failure
+- Focus on fixing the exact issue while maintaining all other requirements
+- Pay special attention to avoid syntax errors, column mismatches, or incorrect table references
+
+` : ''}
+
 **MANDATORY DATABASE VERSION ANALYSIS:**
 - Type: ${databaseType.toUpperCase()}
 - Version: ${databaseVersionString}
@@ -3131,11 +3153,38 @@ ${versionSpecificInstructions}
 - Use sample data to identify foreign key connections and table relationships
 - Always include necessary JOIN conditions to get complete information for the user's query
 
+# CRITICAL JOIN CONDITION RULES - MANDATORY COMPLIANCE
+
+🚨 **FORBIDDEN: DO NOT MATCH NON-KEY COLUMNS IN JOIN CONDITIONS** 🚨
+
+- **ONLY USE PRIMARY/FOREIGN KEY RELATIONSHIPS IN JOIN CONDITIONS**
+- **NEVER add column matching conditions beyond primary/foreign keys**
+
+## PROHIBITED EXAMPLES:
+❌ JOIN table_b tb ON ta.a_id = tb.a_id AND ta.some_column = tb.some_column  
+❌ JOIN table_x tx ON ty.y_id = tx.y_id AND ty.description = tx.description  
+❌ JOIN users u ON o.user_id = u.user_id AND o.username = u.username  
+
+## CORRECT EXAMPLES:
+✅ JOIN table_b tb ON ta.a_id = tb.a_id  
+✅ JOIN table_x tx ON ty.y_id = tx.y_id  
+✅ JOIN users u ON o.user_id = u.user_id  
+
+## RULE:
+**When JOINing tables, use ONLY the key relationships (e.g., table_a.a_id = table_b.a_id)**
+
+## PRINCIPLE:
+**Matching non-primary/foreign key columns in JOIN conditions makes no logical sense and creates incorrect results**
+
+## FILTERING:
+**Any additional filtering should be done in WHERE clause, NOT in JOIN conditions**
+
 **STEP 3: GENERATE VERSION-COMPATIBLE SQL**
 - Create a SQL query compatible with ${databaseType.toUpperCase()} ${databaseVersionString}
 - Use explicit column names (NO SELECT *)
 - Include columns mentioned in user query + minimal context columns
 - Include WHERE conditions if user specifies filters
+- **🚨 CRITICAL JOIN RULE: Use ONLY primary/foreign key relationships in JOIN conditions - NEVER add non-key column matching (e.g., avoid AND table1.name = table2.name)**
 - If using MySQL with only_full_group_by mode: Strictly ensure all non-aggregated columns in SELECT appear in GROUP BY
 - Avoid any syntax features not supported by this database version
 
@@ -3574,6 +3623,7 @@ Example 4: "Show recent lab tests from last 30 days"
 ✅ **CONDITION-BASED TABLE SELECTION: Primary table chosen based on WHERE clause columns**
 ✅ **MULTIPLE TABLE RULE: If tables have similar meaning, chose the one with condition columns**
 ✅ **🚨 CRITICAL JOIN REQUIREMENT: JOIN ALL tables marked with "Relevance to query: High" in AI analysis**
+✅ **🚨 JOIN CONDITIONS: Use ONLY primary/foreign key relationships - NEVER add non-key column matching (e.g., avoid AND table1.name = table2.name)**
 ✅ **AI-GUIDED JOINS: Use AI table descriptions to identify complementary High-relevance tables for JOINs**
 ✅ **SCHEMA INTELLIGENCE: All references validated against actual database schema**
 ${databaseType.toLowerCase() === 'mysql' && databaseVersionInfo && databaseVersionInfo.hasOnlyFullGroupBy ? `
@@ -5108,6 +5158,10 @@ Return only valid, semantic HTML.`;
 
                             // Mark this attempt as incomplete to trigger retry
                             debugInfo.sqlCorrections.push(`Attempt ${currentAttempt}: Zero records returned, triggering full API retry`);
+                            
+                            // Capture zero records issue for next attempt's enhanced query
+                            previousAttemptError = `Attempt ${currentAttempt} returned zero records. The query may have incorrect conditions, wrong table selection, or overly restrictive filters.`;
+                            
                             currentAttempt++;
                             continue; // Go to next iteration of retry loop
                         } else {
@@ -5540,9 +5594,11 @@ Avoid technical jargon and focus on helping the user get the information they ne
                             }
                         }
 
-                        res.status(500).json({
-                            error: 'SQL execution failed',
-                            message: sqlError.message,
+                        if (!responseSent) {
+                            responseSent = true;
+                            res.status(500).json({
+                                error: 'SQL execution failed',
+                                message: sqlError.message,
                             sql_code: sqlError.code,
                             sql_errno: sqlError.errno,
                             query_processed: query,
@@ -5573,6 +5629,7 @@ Avoid technical jargon and focus on helping the user get the information they ne
                             },
                             timestamp: new Date().toISOString()
                         });
+                        }
                     }
 
                 } catch (error) {
@@ -5583,6 +5640,10 @@ Avoid technical jargon and focus on helping the user get the information they ne
                     if (currentAttempt < maxRetryAttempts) {
                         console.log(`🔄 Error on attempt ${currentAttempt}. Trying again...`);
                         debugInfo.sqlCorrections.push(`Attempt ${currentAttempt}: Error occurred - ${(error as Error).message}. Retrying...`);
+                        
+                        // Capture error for next attempt's enhanced query
+                        previousAttemptError = `Attempt ${currentAttempt} failed with: ${(error as Error).message}`;
+                        
                         currentAttempt++;
                         continue; // Try again
                     }
@@ -5594,34 +5655,40 @@ Avoid technical jargon and focus on helping the user get the information they ne
                     // Cleanup: Log connection management for debugging
                     console.log(`🔌 API request failed with general error after ${currentAttempt} attempts`);
 
-                    // Ensure these variables are accessible in the error handler
-                    const conversational = req.body.conversational === true;
-                    const sessionId = req.body.sessionId || uuidv4();
-                    const chatHistory: any[] = [];
+                    // Only send error response if no response has been sent yet
+                    if (!responseSent) {
+                        responseSent = true;
+                        
+                        // Ensure these variables are accessible in the error handler
+                        const conversational = req.body.conversational === true;
+                        const sessionId = req.body.sessionId || uuidv4();
+                        const chatHistory: any[] = [];
 
-                    res.status(500).json({
-                        error: 'Manual SQL query processing failed',
-                        message: (error as Error).message,
-                        raw_agent_response: rawAgentResponse,
-                        // Add conversation information if in conversational mode
-                        ...(conversational ? {
-                            conversation: {
-                                sessionId: sessionId,
-                                historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
-                                mode: 'conversational'
-                            }
-                        } : {}),
-                        debug_info: debugInfo,
-                        processing_time: `${processingTime.toFixed(2)}ms`,
-                        timestamp: new Date().toISOString()
-                    });
+                        res.status(500).json({
+                            error: 'Manual SQL query processing failed',
+                            message: (error as Error).message,
+                            raw_agent_response: rawAgentResponse,
+                            // Add conversation information if in conversational mode
+                            ...(conversational ? {
+                                conversation: {
+                                    sessionId: sessionId,
+                                    historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
+                                    mode: 'conversational'
+                                }
+                            } : {}),
+                            debug_info: debugInfo,
+                            processing_time: `${processingTime.toFixed(2)}ms`,
+                            timestamp: new Date().toISOString()
+                        });
+                    }
                     break; // Exit retry loop after sending error response
                 }
             } // End of retry while loop
 
-            // Send final successful response (if we have one)
-            if (finalResult) {
+            // Send final successful response (if we have one and no response sent yet)
+            if (finalResult && !responseSent) {
                 console.log(`🎯 Sending final successful response after ${currentAttempt} attempt(s)`);
+                responseSent = true;
                 res.json(finalResult);
             }
         }
@@ -6076,7 +6143,7 @@ Avoid technical jargon and focus on helping the user get the information they ne
 
         // Split the SQL by UNION to get individual SELECT statements
         const unionParts = sql.split(/UNION\s+(?:ALL\s+)?/gim);
-        
+
         if (unionParts.length < 2) {
             return { isValid: true, issues: [] }; // No actual UNION found
         }
@@ -6090,10 +6157,10 @@ Avoid technical jargon and focus on helping the user get the information they ne
             if (selectMatch) {
                 const selectClause = selectMatch[1];
                 selectClauses.push(selectClause);
-                
+
                 // Count columns (simple approach - count commas + 1, accounting for parentheses)
                 const columnCount = countColumnsInSelect(selectClause);
-                
+
                 if (index === 0) {
                     referenceColumnCount = columnCount;
                 } else if (columnCount !== referenceColumnCount) {
@@ -6107,9 +6174,9 @@ Avoid technical jargon and focus on helping the user get the information they ne
                 if (selectAtStart) {
                     const selectClause = selectAtStart[1];
                     selectClauses.push(selectClause);
-                    
+
                     const columnCount = countColumnsInSelect(selectClause);
-                    
+
                     if (index === 0) {
                         referenceColumnCount = columnCount;
                     } else if (columnCount !== referenceColumnCount) {
@@ -6123,7 +6190,7 @@ Avoid technical jargon and focus on helping the user get the information they ne
 
         if (issues.length > 0) {
             suggestedFix = "Ensure all SELECT statements in the UNION have the same number of columns. Use CAST(NULL as DATA_TYPE) as column_name for missing columns in each SELECT statement.";
-            
+
             return { isValid: false, issues, suggestedFix };
         }
 
@@ -6144,11 +6211,11 @@ Avoid technical jargon and focus on helping the user get the information they ne
         let parenDepth = 0;
         let inQuotes = false;
         let quoteChar = '';
-        
+
         for (let i = 0; i < selectClause.length; i++) {
             const char = selectClause[i];
             const prevChar = i > 0 ? selectClause[i - 1] : '';
-            
+
             // Handle quotes
             if ((char === '"' || char === "'" || char === '`') && prevChar !== '\\') {
                 if (!inQuotes) {
@@ -6160,22 +6227,22 @@ Avoid technical jargon and focus on helping the user get the information they ne
                 }
                 continue;
             }
-            
+
             if (inQuotes) continue;
-            
+
             // Handle parentheses
             if (char === '(') {
                 parenDepth++;
             } else if (char === ')') {
                 parenDepth--;
             }
-            
+
             // Count commas at top level (outside parentheses and quotes)
             if (char === ',' && parenDepth === 0) {
                 columnCount++;
             }
         }
-        
+
         // Add 1 for the last column (no trailing comma)
         return columnCount + 1;
     }
