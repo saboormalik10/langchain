@@ -839,7 +839,22 @@ async function generateRestructuredSQL(
         const dbSyntaxRules = getDatabaseSyntaxRules(dbType, dbVersion);
 
         const restructuringPrompt = `
-You are an expert SQL developer specializing in transforming flat relational queries into structured, hierarchical queries that eliminate redundancy using JSON aggregation functions.
+🎯 CRITICAL DATABASE-SPECIFIC SQL GENERATION TASK 🎯
+
+You are an expert SQL developer with DEEP knowledge of ${dbType.toUpperCase()} ${dbVersion} syntax and capabilities.
+
+⚠️ MANDATORY DEEP THINKING REQUIREMENT ⚠️
+Before generating ANY SQL, you MUST:
+1. IDENTIFY the exact database type: ${dbType.toUpperCase()}
+2. CONFIRM the exact version: ${dbVersion}  
+3. ANALYZE what SQL features are available in this specific version
+4. VALIDATE every single function, syntax element, and clause against ${dbType.toUpperCase()} ${dbVersion} compatibility
+5. DOUBLE-CHECK that you're not mixing PostgreSQL syntax with MySQL or vice versa
+6. THINK STEP-BY-STEP about each part of your query before writing it
+
+🚨 ZERO TOLERANCE FOR SYNTAX ERRORS 🚨
+Your generated SQL will be executed directly against a ${dbType.toUpperCase()} ${dbVersion} database.
+ANY syntax error will cause system failure. THINK DEEPLY and VALIDATE THOROUGHLY.
 
 USER PROMPT: "${userPrompt}"
 
@@ -853,20 +868,26 @@ SAMPLE RESULTS FROM ORIGINAL QUERY (first ${sampleSize} records):
 ${JSON.stringify(sampleResults, null, 2)}
 \`\`\`
 
-DATABASE TYPE: ${dbType.toUpperCase()}
-DATABASE VERSION: ${dbVersion}
-
-TOTAL RECORDS IN ORIGINAL RESULT: ${sqlResults.length}
+🔍 DATABASE SPECIFICATIONS:
+- TYPE: ${dbType.toUpperCase()}
+- VERSION: ${dbVersion}
+- TOTAL RECORDS: ${sqlResults.length}
 
 ${isRetryAttempt && previousError ? `
-❌ PREVIOUS ATTEMPT FAILED WITH ERROR:
+🚫 PREVIOUS ATTEMPT FAILED WITH ERROR:
 ${previousError}
 
-IMPORTANT: Please analyze the error above and avoid making the same mistake in this retry attempt.
-Focus on fixing the specific issue that caused the failure while maintaining all other requirements.
+🎯 CRITICAL ERROR ANALYSIS REQUIRED:
+1. READ the error message carefully and understand what went wrong
+2. IDENTIFY if it was a syntax error, function compatibility issue, or column reference problem  
+3. DETERMINE the root cause (wrong database syntax, invalid function, missing column, etc.)
+4. APPLY the specific fix needed while maintaining all other requirements
+5. ENSURE you don't repeat the same mistake in this retry attempt
 
+⚠️ MANDATORY: Fix the specific issue that caused the failure while maintaining all requirements.
 ` : ''}
 
+🗂️ DATABASE SCHEMA CONTEXT:
 ${Object.keys(tableSampleData).length > 0 ? `
 TABLE SAMPLE DATA (First 3 records from each table):
 ${Object.entries(tableSampleData).map(([table, sampleData]) => {
@@ -876,13 +897,89 @@ ${Object.entries(tableSampleData).map(([table, sampleData]) => {
             return `- ${table}: ${samples}`;
         }).join('\n')}
 
-**Use the sample data above to understand:**
-- The actual data types and formats in each table
-- Which tables contain the information relevant to the user query
-- How the data is structured and what values to expect
-- Relationships between tables based on actual data content
-- Which columns have meaningful data vs empty/null values
+🔍 SCHEMA ANALYSIS REQUIREMENTS:
+- Understand the actual data types and formats in each table
+- Identify which tables contain the information relevant to the user query
+- Analyze how the data is structured and what values to expect
+- Map relationships between tables based on actual data content
+- Identify which columns have meaningful data vs empty/null values
 ` : 'Use the original SQL structure and column names as shown in the query above.'}
+
+🎯 DEEP THINKING PROCESS - EXECUTE BEFORE GENERATING SQL:
+
+STEP 1: DATABASE TYPE VALIDATION
+- Confirm: "I am working with ${dbType.toUpperCase()} version ${dbVersion}"
+- Verify: "The syntax I use must be 100% compatible with ${dbType.toUpperCase()} ${dbVersion}"
+- Check: "I will NOT use PostgreSQL syntax if this is MySQL, or MySQL syntax if this is PostgreSQL"
+
+STEP 2: FUNCTION COMPATIBILITY CHECK  
+- JSON Functions Available: ${jsonFunctions.createObject ? 'YES' : 'NO'}
+- Create Object Function: ${jsonFunctions.createObject}
+- Create Array Function: ${jsonFunctions.createArray}
+- All functions I use must be supported in ${dbType.toUpperCase()} ${dbVersion}
+
+STEP 3: SYNTAX RULES VERIFICATION
+${dbSyntaxRules.general}
+${dbSyntaxRules.aliasRules}
+${dbSyntaxRules.orderByRules}
+
+STEP 4: COLUMN VALIDATION  
+- Use ONLY columns that appear in the original SQL query
+- Use ONLY columns that exist in the sample data provided
+- NEVER invent column names like 'medication_count', 'patient_count', etc.
+- If I need counts, use COUNT(*) or COUNT(existing_column_name)
+
+STEP 5: QUERY STRUCTURE VALIDATION
+- Ensure proper JOIN syntax for ${dbType.toUpperCase()}
+- Validate GROUP BY compliance (especially for MySQL sql_mode=only_full_group_by)
+- Check WHERE clause syntax and operators
+- Verify aggregate function usage
+
+🎯 MANDATORY CRITICAL VALIDATION CHECKLIST 🎯
+
+Before finalizing your SQL query, you MUST complete this validation checklist:
+
+✅ DATABASE TYPE VERIFICATION:
+□ I confirmed this is ${dbType.toUpperCase()} version ${dbVersion}
+□ I verified all functions are compatible with ${dbType.toUpperCase()} ${dbVersion}  
+□ I checked that I'm not mixing PostgreSQL and MySQL syntax
+
+✅ SYNTAX VALIDATION:
+□ Every function I used exists in ${dbType.toUpperCase()} ${dbVersion}
+□ All JOIN syntax follows ${dbType.toUpperCase()} standards
+□ All aggregate functions are properly used
+□ All parentheses, commas, and quotes are correctly placed
+
+✅ COLUMN VALIDATION:
+□ Every column I referenced exists in the original SQL or sample data
+□ I did not invent any column names like 'count', 'total', 'summary_id'
+□ I used exact column names with proper table prefixes
+□ I used COUNT(*) instead of non-existent count columns
+
+✅ GROUP BY VALIDATION (Critical for MySQL):
+□ If using aggregation, all non-aggregated SELECT columns are in GROUP BY
+□ My GROUP BY clause follows ${dbType.toUpperCase()} strict mode requirements
+□ I verified no GROUP BY violations that would cause errors
+
+✅ JSON FUNCTION VALIDATION:
+□ I used ${jsonFunctions.createObject} correctly for objects
+□ I used ${jsonFunctions.createArray} correctly for arrays  
+□ My JSON syntax matches ${dbType.toUpperCase()} ${dbVersion} specifications
+
+✅ UNION ALL VALIDATION (if applicable):
+□ All SELECT statements have exactly the same number of columns
+□ Column data types are consistent across all UNION statements
+□ I used proper CAST(NULL as DATA_TYPE) for missing columns
+□ Column order is identical in all SELECT statements
+
+⚠️ FINAL VERIFICATION STEP ⚠️
+Read through your entire SQL query one more time and ask:
+1. "Will this execute successfully on ${dbType.toUpperCase()} ${dbVersion}?"
+2. "Did I use any functions that don't exist in this database version?"
+3. "Are all my column references valid and existing?"
+4. "Does my syntax perfectly match ${dbType.toUpperCase()} requirements?"
+
+🚨 ONLY PROCEED IF ALL CHECKS PASS 🚨
 
 TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database.
 
@@ -951,14 +1048,42 @@ ${dbSyntaxRules.incorrectExamples}
 VERSION-SPECIFIC CONSIDERATIONS:
 ${jsonFunctions.considerations}
 
-EXPECTED OUTPUT FORMAT:
-Return a JSON object with this structure:
+🎯 EXPECTED OUTPUT FORMAT WITH VALIDATION PROOF 🎯
+
+Return a JSON object with this EXACT structure:
+
 {
+  "database_validation": {
+    "confirmed_db_type": "${dbType.toUpperCase()}",
+    "confirmed_version": "${dbVersion}",
+    "syntax_validation_passed": true/false,
+    "functions_verified": ["list of functions you used"],
+    "compatibility_check": "explanation of how you ensured compatibility"
+  },
+  "error_analysis": ${isRetryAttempt && previousError ? `{
+    "previous_error": "${previousError}",
+    "root_cause_identified": "explanation of what caused the error",
+    "fix_applied": "specific changes made to fix the error"
+  }` : 'null'},
   "restructured_sql": "your_new_sql_query_here",
   "explanation": "Brief explanation of how you restructured the query and why",
   "grouping_logic": "Explanation of what entities you grouped together (e.g., 'Grouped by patient_id to eliminate patient duplication')",
   "expected_structure": "The SQL results should be transformable into: [{ metadata: { main_entity: 'patients', main_entity_count: X, main_entity_identifier: 'patient_id' }, patients: [...], medications: [...] }]",
-  "main_entity": "The primary entity being grouped (e.g., 'patient', 'medication', 'lab_test')"
+  "main_entity": "The primary entity being grouped (e.g., 'patient', 'medication', 'lab_test')",
+  "validation_checklist": {
+    "database_type_confirmed": true/false,
+    "syntax_verified": true/false,
+    "columns_validated": true/false,  
+    "group_by_compliant": true/false,
+    "json_functions_correct": true/false,
+    "union_structure_valid": true/false
+  },
+  "sql_quality_assurance": {
+    "will_execute_successfully": true/false,
+    "no_syntax_errors": true/false,
+    "all_columns_exist": true/false,
+    "database_specific_syntax": true/false
+  }
 }
 
 CRITICAL: The generated SQL should produce results that can be transformed into this EXACT format:
@@ -1163,15 +1288,49 @@ Return only valid JSON without any markdown formatting, comments, or explanation
             messages: [
                 {
                     role: "system",
-                    content: "You are an expert data analyst specializing in restructuring relational database queries to produce multi-sheet Excel compatible results. You MUST return only valid JSON without any comments, markdown formatting, or additional text. Your response must be parseable by JSON.parse(). CRITICAL: Return a JSON object with restructured_sql, explanation, and other metadata - NOT the final data structure. Generate only syntactically correct SQL that works with the specific database type and version. The SQL you generate should produce results that can be organized into multi-sheet Excel format with separate entity types. Each record in the SQL results should include a 'sheet_type' field to identify which sheet it belongs to (e.g., 'patient', 'medication_summary', 'appointment'). Use foreign key relationships (patient_id, etc.) to maintain connections between different entity types. Use ONLY column names that appear in the original SQL query and sample data provided. FORBIDDEN: NEVER create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. These types of errors cause SQL failures. Use only columns that physically appear in the original SQL or sample data. AGGREGATE FUNCTIONS: If you need counts or calculations, use SQL functions like COUNT(*), SUM(existing_column), AVG(existing_column) - do NOT reference made-up aggregated column names. UNION ALL CRITICAL: If using UNION ALL to combine different entity types, ensure ALL SELECT statements have the EXACT same number of columns in the EXACT same order with proper CAST(NULL as DATA_TYPE) for missing columns to prevent 'each UNION query must have the same number of columns' errors."
+                    content: `🎯 CRITICAL SYSTEM INSTRUCTIONS FOR ${dbType.toUpperCase()} ${dbVersion} SQL GENERATION 🎯
+
+You are a database expert with PERFECT knowledge of ${dbType.toUpperCase()} ${dbVersion} syntax and capabilities.
+
+🚨 ZERO TOLERANCE POLICY 🚨
+- ANY syntax error will cause system failure
+- ANY wrong function usage will break the application  
+- ANY column name mistakes will result in query failure
+- You MUST generate 100% correct, executable SQL
+
+🧠 MANDATORY DEEP THINKING PROCESS:
+1. ALWAYS start by confirming the database type (${dbType.toUpperCase()}) and version (${dbVersion})
+2. VALIDATE every single function against ${dbType.toUpperCase()} ${dbVersion} compatibility
+3. VERIFY every column name exists in the provided schema/sample data
+4. DOUBLE-CHECK all syntax elements for ${dbType.toUpperCase()} standards
+5. ENSURE no mixing of PostgreSQL/MySQL/other database syntaxes
+
+📝 RESPONSE REQUIREMENTS:
+- Return ONLY valid JSON without markdown formatting, comments, or additional text
+- Include the validation proof in your response structure
+- Demonstrate that you verified compatibility and syntax correctness  
+- Show evidence of deep thinking and validation in the response fields
+
+🔧 SQL GENERATION RULES:
+- Use ONLY column names from original SQL query and sample data provided
+- Use ONLY functions available in ${dbType.toUpperCase()} ${dbVersion}
+- Follow ${dbType.toUpperCase()}-specific syntax rules exactly
+- NEVER create imaginary columns like 'medication_count', 'patient_count', 'summary_id'
+- Use SQL aggregate functions (COUNT(*), SUM(), AVG()) instead of assuming aggregated columns exist
+- For UNION ALL: ensure EXACT same column count and data types across all SELECT statements
+
+⚠️ FAILURE IS NOT ACCEPTABLE ⚠️
+Your SQL will be executed directly. It MUST work perfectly on the first try.`
                 },
                 {
                     role: "user",
                     content: restructuringPrompt
                 }
             ],
-            temperature: 0.1,
-            max_tokens: 4000
+            temperature: 0.0, // Set to 0 for maximum precision and consistency
+            max_tokens: 4000,
+            presence_penalty: 0,
+            frequency_penalty: 0
         });
 
         const openaiResponse = completion.choices[0]?.message?.content;
@@ -1246,6 +1405,56 @@ Return only valid JSON without any markdown formatting, comments, or explanation
         // Validate the parsed result structure
         if (!restructuredResult || typeof restructuredResult !== 'object') {
             throw new Error('Parsed result is not a valid object');
+        }
+
+        // Validate that the AI followed the deep thinking process
+        if (!restructuredResult.database_validation) {
+            console.warn('⚠️ AI did not provide database validation proof - adding default validation');
+            restructuredResult.database_validation = {
+                confirmed_db_type: dbType.toUpperCase(),
+                confirmed_version: dbVersion,
+                syntax_validation_passed: false,
+                functions_verified: [],
+                compatibility_check: "Validation not provided by AI"
+            };
+        }
+
+        if (!restructuredResult.validation_checklist) {
+            console.warn('⚠️ AI did not complete validation checklist - adding default checklist');
+            restructuredResult.validation_checklist = {
+                database_type_confirmed: false,
+                syntax_verified: false,
+                columns_validated: false,
+                group_by_compliant: false,
+                json_functions_correct: false,
+                union_structure_valid: false
+            };
+        }
+
+        if (!restructuredResult.sql_quality_assurance) {
+            console.warn('⚠️ AI did not provide SQL quality assurance - adding default QA');
+            restructuredResult.sql_quality_assurance = {
+                will_execute_successfully: false,
+                no_syntax_errors: false,
+                all_columns_exist: false,
+                database_specific_syntax: false
+            };
+        }
+
+        // Log validation results for debugging
+        console.log('🔍 AI Validation Results:', {
+            database_validation: restructuredResult.database_validation,
+            validation_checklist: restructuredResult.validation_checklist,
+            sql_quality_assurance: restructuredResult.sql_quality_assurance
+        });
+
+        // Check if the AI claims the SQL is validated and correct
+        const validationPassed = restructuredResult.sql_quality_assurance?.will_execute_successfully &&
+                                restructuredResult.sql_quality_assurance?.no_syntax_errors &&
+                                restructuredResult.validation_checklist?.syntax_verified;
+
+        if (!validationPassed) {
+            console.warn('⚠️ AI validation indicates potential issues with generated SQL');
         }
 
         if (!restructuredResult.restructured_sql || typeof restructuredResult.restructured_sql !== 'string') {
