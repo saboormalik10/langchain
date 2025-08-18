@@ -5594,7 +5594,8 @@ Avoid technical jargon and focus on helping the user get the information they ne
                             }
                         }
 
-                        if (!responseSent) {
+                        // Only send error response if this is the final attempt
+                        if (currentAttempt >= maxRetryAttempts && !responseSent) {
                             responseSent = true;
                             res.status(500).json({
                                 error: 'SQL execution failed',
@@ -5629,6 +5630,10 @@ Avoid technical jargon and focus on helping the user get the information they ne
                             },
                             timestamp: new Date().toISOString()
                         });
+                        } else if (currentAttempt < maxRetryAttempts) {
+                            // If not the final attempt, capture error for next retry
+                            console.log(`🔄 SQL error on attempt ${currentAttempt}. Will retry...`);
+                            previousAttemptError = `SQL execution failed on attempt ${currentAttempt}: ${sqlError.message}`;
                         }
                     }
 
