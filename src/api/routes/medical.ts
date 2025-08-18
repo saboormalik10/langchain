@@ -5058,7 +5058,7 @@ Return only valid, semantic HTML.`;
 
                         let restructuredResults = null;
                         let restructuredRetryCount = 0;
-                        const maxRestructuredRetries = 7; // Increased to 7 attempts for better success rate
+                        const maxRestructuredRetries = 2; // Increased to 7 attempts for better success rate
 
                         while (restructuredRetryCount < maxRestructuredRetries) {
                             try {
