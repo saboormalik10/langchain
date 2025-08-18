@@ -44,10 +44,11 @@ class DatabaseService {
         }
 
         this.pgPool = new Pool({
-            connectionString: process.env.DATABASE_URL,
+            connectionString: process.env.DATABASE_URL, // your connection string here
             max: 20,
             idleTimeoutMillis: 30000,
-            connectionTimeoutMillis: 2000,
+            connectionTimeoutMillis: 60000,
+            ssl: { rejectUnauthorized: false }
         });
 
         this.encryptionKey = process.env.ENCRYPTION_KEY || 'vi0BJFHWT8yTlwokRILzAcwyp9gXBE0q';
@@ -186,7 +187,7 @@ class DatabaseService {
     async createOrganizationMySQLConnection(organizationId: string): Promise<mysql.Connection> {
         try {
             const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
-            
+
             console.log(`🔌 Creating MySQL connection for organization ${organizationId} to ${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`);
 
             const connection = await mysql.createConnection({
@@ -237,10 +238,10 @@ class DatabaseService {
             });
 
             await client.connect();
-            
+
             // Track the connection for cleanup
             this.trackConnection(organizationId, client);
-            
+
             console.log(`✅ PostgreSQL connection established for organization ${organizationId}`);
             return client;
         } catch (error) {
@@ -257,7 +258,7 @@ class DatabaseService {
             const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
             console.log('dbConfig', dbConfig);
             if (dbConfig.type.toLocaleLowerCase() === 'mysql' || dbConfig.type.toLocaleLowerCase() === 'mariadb') {
-                console.log('HI');       
+                console.log('HI');
                 const connection = await this.createOrganizationMySQLConnection(organizationId);
                 await connection.ping();
                 await connection.end();
@@ -284,7 +285,7 @@ class DatabaseService {
     async getOrganizationTables(organizationId: string): Promise<string[]> {
         try {
             const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
-            
+
             if (dbConfig.type.toLocaleLowerCase() === 'mysql' || dbConfig.type.toLocaleLowerCase() === 'mariadb') {
                 const connection = await this.createOrganizationMySQLConnection(organizationId);
                 const [tables] = await connection.execute(
@@ -292,7 +293,7 @@ class DatabaseService {
                     [dbConfig.database]
                 );
                 await connection.end();
-                
+
                 return (tables as any[]).map((table: any) => table.TABLE_NAME);
             } else if (dbConfig.type.toLocaleLowerCase() === 'postgresql') {
                 const client = await this.createOrganizationPostgreSQLConnection(organizationId);
@@ -300,7 +301,7 @@ class DatabaseService {
                     "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
                 );
                 await client.end();
-                
+
                 const rows = (result as any).rows || [];
                 return rows.map((row: any) => row.tablename);
             } else {
@@ -430,7 +431,7 @@ class DatabaseService {
     } | null> {
         try {
             const dbConfig = await this.getOrganizationDatabaseConnection(organizationId);
-            
+
             if (dbConfig.type.toLocaleLowerCase() === 'mysql' || dbConfig.type.toLocaleLowerCase() === 'mariadb') {
                 const mysqlVersion = await this.getOrganizationMySQLVersion(organizationId);
                 return mysqlVersion ? { ...mysqlVersion, databaseType: 'mysql' } : null;
