@@ -809,7 +809,8 @@ async function generateRestructuredSQL(
     sqlAgent: any,
     organizationId: string,
     tableSampleData: { [table: string]: any[] } = {},
-    isRetryAttempt: boolean = false
+    isRetryAttempt: boolean = false,
+    previousError?: string
 ): Promise<any> {
     try {
         // Log retry attempt status
@@ -856,6 +857,15 @@ DATABASE TYPE: ${dbType.toUpperCase()}
 DATABASE VERSION: ${dbVersion}
 
 TOTAL RECORDS IN ORIGINAL RESULT: ${sqlResults.length}
+
+${isRetryAttempt && previousError ? `
+❌ PREVIOUS ATTEMPT FAILED WITH ERROR:
+${previousError}
+
+IMPORTANT: Please analyze the error above and avoid making the same mistake in this retry attempt.
+Focus on fixing the specific issue that caused the failure while maintaining all other requirements.
+
+` : ''}
 
 ${Object.keys(tableSampleData).length > 0 ? `
 TABLE SAMPLE DATA (First 3 records from each table):
@@ -1313,7 +1323,8 @@ Return only valid JSON without any markdown formatting, comments, or explanation
                     sqlAgent,
                     organizationId,
                     tableSampleData, // Pass the existing table sample data
-                    true // Mark as retry attempt
+                    true, // Mark as retry attempt
+                    error.message // Pass the error message for the retry prompt
                 );
 
             } catch (retryError: any) {
