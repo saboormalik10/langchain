@@ -2505,6 +2505,42 @@ export function medicalRoutes(): Router {
                 console.log('🔄 Continuing with database processing due to analysis error...');
             }
 
+            // ========== SSE SETUP FOR DATABASE PROCESSING ==========
+            // Check if client wants streaming updates
+            const enableSSE = req.body.enableSSE === true || req.headers.accept === 'text/event-stream';
+            let sendMessage: (msg: string) => void;
+
+            if (enableSSE) {
+                // Setup SSE headers
+                res.setHeader("Content-Type", "text/event-stream");
+                res.setHeader("Cache-Control", "no-cache");
+                res.setHeader("Connection", "keep-alive");
+                res.setHeader("Access-Control-Allow-Origin", "*");
+                res.setHeader("Access-Control-Allow-Headers", "Cache-Control");
+
+                sendMessage = (msg: string) => {
+                    if (!res.headersSent) {
+                        try {
+                            res.write(`data: ${JSON.stringify({ 
+                                message: msg, 
+                                timestamp: new Date().toISOString(),
+                                processing_time: `${(performance.now() - startTime).toFixed(2)}ms`
+                            })}\n\n`);
+                        } catch (writeError) {
+                            console.error('❌ SSE write error:', writeError);
+                        }
+                    }
+                };
+
+                // Send initial processing message
+                sendMessage("Analyzing your query...");
+            } else {
+                // No-op function for non-SSE requests
+                sendMessage = (msg: string) => {
+                    console.log(`📡 Progress: ${msg}`);
+                };
+            }
+
             // ========== CONTINUE WITH EXISTING DATABASE PROCESSING ==========
             let rawAgentResponse = null;
 
@@ -2602,10 +2638,12 @@ export function medicalRoutes(): Router {
                     console.log(`🚀 Processing SQL manual query for organization ${organizationId}: "${query}" ${conversational ? 'with conversation' : ''}`);
 
                     // Test organization database connection first
+                    sendMessage("Analyzing available data...");
                     const connectionTestPassed = await testOrganizationDatabaseConnection(organizationId, res);
                     if (!connectionTestPassed) {
                         return; // Error response already sent by the service
                     }
+                    // sendMessage("✅ Connected to database");
 
                     // Initialize LangChain app and setup conversation session
                     const setupResult = await initializeLangChainAndConversation(organizationId, conversational, sessionId, res);
@@ -2645,6 +2683,7 @@ export function medicalRoutes(): Router {
                     useChains = chainResult.useChains; // Update useChains flag in case it was modified due to failure
 
                     // Step 1: Get the SQL query from the agent (or use chain-generated SQL)
+                    sendMessage("Processing your query...");
                     console.log('📊 Step 1: Extracting SQL query from agent...');
                     let agentResult;
                     let intermediateSteps: any[] = [];
@@ -2845,6 +2884,7 @@ export function medicalRoutes(): Router {
                     try {
 
                         // Execute the final SQL based on database type
+                        sendMessage("Searching records...");
                         const queryExecutionResult = await executeSqlQueryWithRecovery({
                             finalSQL,
                             connection,
@@ -2860,8 +2900,10 @@ export function medicalRoutes(): Router {
                         const { rows, fields, processingTime } = queryExecutionResult;
                         finalSQL = queryExecutionResult.finalSQL || finalSQL;
 
+                        sendMessage(`Found Available records`);
 
                         // Generate description/explanation of the query and results using service
+                        sendMessage("Preparing results and insights...");
                         const descriptionResult = await generateQueryDescriptionAndExplanation({
                             generateDescription,
                             finalSQL,
@@ -2876,6 +2918,9 @@ export function medicalRoutes(): Router {
                         // Note: Connection will be closed after all operations including restructured SQL
 
                         // Process graph data if requested using service
+                        if (generateGraph) {
+                            sendMessage("Creating visualization...");
+                        }
                         const graphProcessingResult = await processGraphData({
                             generateGraph,
                             graphType,
@@ -2885,6 +2930,9 @@ export function medicalRoutes(): Router {
                             langchainApp,
                             GraphProcessor
                         });
+                        if (generateGraph && graphProcessingResult.graphData) {
+                            sendMessage("Visualization ready");
+                        }
 
                         const graphData = graphProcessingResult.graphData;
                         const detectedGraphType = graphProcessingResult.detectedGraphType;
