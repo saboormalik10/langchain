@@ -1,5 +1,5 @@
 import databaseService from "../../services/databaseService";
-import { generateBarChartAnalysis } from "../prompts/queryPropmt";
+// import { generateBarChartAnalysis } from "../prompts/queryPropmt";
 
 /**
  * SQL Restructuring and Analysis Service
@@ -284,38 +284,6 @@ export async function handleSqlRestructuringAndAnalysis(
     // ========== BAR CHART ANALYSIS LAYER ==========
     console.log('📊 Step 5: Adding bar chart analysis layer...');
 
-    try {
-        const dataForAnalysis = rows;
-
-        if (dataForAnalysis && Array.isArray(dataForAnalysis) && dataForAnalysis.length > 0) {
-            console.log('🤖 Calling Azure OpenAI for bar chart analysis...');
-
-            const barChartAnalysis = await generateBarChartAnalysis(
-                finalSQL,
-                query,
-                dataForAnalysis,
-                organizationId
-            );
-
-            (response as any).bar_chart_analysis = barChartAnalysis;
-            console.log('✅ Bar chart analysis completed and added to response');
-        } else {
-            console.log('⚠️ No data available for bar chart analysis');
-            (response as any).bar_chart_analysis = {
-                bar_chart_success: false,
-                message: "No data available for bar chart analysis",
-                timestamp: new Date().toISOString()
-            };
-        }
-    } catch (barChartError: any) {
-        console.error('❌ Error during bar chart analysis:', barChartError.message);
-        (response as any).bar_chart_analysis = {
-            bar_chart_success: false,
-            message: `Bar chart analysis failed: ${barChartError.message}`,
-            error_details: barChartError.message,
-            timestamp: new Date().toISOString()
-        };
-    }
 
     return {
         success: true,

@@ -8,26 +8,15 @@ import databaseService from "../../services/databaseService";
 import multiTenantLangChainService from "../../services/multiTenantLangChainService";
 import { AzureOpenAI } from "openai";
 import {
-    generateBarChartAnalysis,
-    generateComprehensiveQuery,
-    generateCorrectionPrompt,
-    generateErrorDescriptionPrompt,
-    generateQueryDescriptionPrompt,
-    generateRestructuringPrompt,
-    generateResultExplanationPrompt,
     getDatabaseSyntaxRules,
     getJsonFunctionsForDatabase,
 } from "../prompts/queryPropmt";
 import {
-    generateEnhancedQueryPrompt,
-    generateTableRelevancePrompt,
     generateVersionSpecificInstructions,
     generateComprehensiveDatabaseAnalystPrompt,
 } from "../prompts/enhanceQueryPrompt";
-import { AIGraphAnalyzer } from "../prompts/graphAnalyzerClass";
 import { testOrganizationDatabaseConnection } from "../services/connectionTestService";
 import { initializeLangChainAndConversation, conversationSessions } from "../services/conversationService";
-import { getMinimalDatabaseSchema } from "../services/databaseSchemaService";
 import { detectDatabaseVersion } from "../services/databaseVersionService";
 import { executeChainLogic } from "../services/chainExecutionService";
 import { processChainSql } from "../services/chainSqlProcessingService";
@@ -53,7 +42,7 @@ type DataItem = {
 };
 
 /**
- * Groups data by sheet_type and removes null fields
+ * Groups data by sheet_type, removes null fields, and prevents duplicates
  * @param data Array of data items to process
  * @returns Object with keys as sheet_types and values as arrays of cleaned items
  */
@@ -76,11 +65,22 @@ function groupAndCleanData(data: DataItem[]): { [sheetType: string]: object[] } 
             }
         }
 
-        groupedData[sheet_type].push(cleanedItem);
+        // Convert cleaned item to JSON string for easy comparison
+        const cleanedString = JSON.stringify(cleanedItem);
+
+        // Check if this item already exists in the group
+        const exists = groupedData[sheet_type].some(
+            (existing) => JSON.stringify(existing) === cleanedString
+        );
+
+        if (!exists) {
+            groupedData[sheet_type].push(cleanedItem);
+        }
     }
 
     return groupedData;
 }
+
 
 // Example usage:
 // const result = groupAndCleanData(yourData);
@@ -963,6 +963,8 @@ Before finalizing your SQL query, you MUST complete this validation checklist:
 □ Column data types are consistent across all UNION statements
 □ I used proper CAST(NULL as DATA_TYPE) for missing columns
 □ Column order is identical in all SELECT statements
+□ 🚨 CRITICAL: I included ALL columns from ALL tables involved in the query
+□ Every table is fully represented with ALL its columns + NULL placeholders for missing ones
 
 ⚠️ FINAL VERIFICATION STEP ⚠️
 Read through your entire SQL query one more time and ask:
@@ -970,31 +972,34 @@ Read through your entire SQL query one more time and ask:
 2. "Did I use any functions that don't exist in this database version?"
 3. "Are all my column references valid and existing?"
 4. "Does my syntax perfectly match ${dbType.toUpperCase()} requirements?"
+5. "🚨 CRITICAL: Have I included ALL columns from ALL tables in my UNION ALL structure?"
+6. "Did I use UNION ALL instead of traditional JOINs to ensure complete column representation?"
 
 🚨 ONLY PROCEED IF ALL CHECKS PASS 🚨
 
-TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database.
+TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database with ALL columns from ALL tables represented.
 
 RESTRUCTURING REQUIREMENTS:
-1. **ELIMINATE REDUNDANCY**: Use GROUP BY to group related entities (e.g., patients, medications, lab tests)
-2. **CREATE JSON HIERARCHY**: Use ${jsonFunctions.createObject} and ${jsonFunctions.createArray} functions to create nested structures
-3. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original query
-4. **BE LOGICAL**: Structure should make business sense for the data domain
-5. **USE APPROPRIATE GROUPING**: Identify the main entity and group related data under it
-6. **PREVENT DUPLICATE DATA**: Ensure no duplicate records appear in any field of the response - each record should be unique
-7. **AVOID IDENTICAL/REPETITIVE DATA**: Do NOT generate queries that return identical values across multiple rows or columns. Use DISTINCT, proper GROUP BY, and JSON aggregation to eliminate repetitive data patterns. Avoid queries that produce the same data values repeated multiple times in the response.
-8. **RETURN PARSED JSON OBJECTS**: Generate SQL that returns properly structured JSON objects, NOT stringified JSON. The JSON functions should produce actual JSON objects that can be directly used without additional parsing. Avoid queries that return JSON data as strings that require further parsing.
-9. **MYSQL GROUP BY STRICT COMPLIANCE**: For MySQL, ensure every non-aggregated column in SELECT appears in GROUP BY clause (sql_mode=only_full_group_by)
-10. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
-11. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
-12. **EXACT COLUMN NAMES**: Do NOT assume, guess, or make up column names. Use ONLY the exact column names provided in the validated schema. If a column name is not in the validated list, DO NOT use it. Never use variations like 'patient_id' when the actual column is 'id', or vice versa.
-13. **STRICT COLUMN VALIDATION**: Before using any column in SELECT, FROM, JOIN, WHERE, or GROUP BY clauses, verify it exists in the validated columns list for that table. Reject any query that references non-existent columns.
-14. **SAMPLE DATA VERIFICATION**: Use the provided sample data to VERIFY that columns actually exist and contain the expected data types. Do NOT reference any column that is not visible in the sample data provided.
-15. **COLUMN CROSS-REFERENCE**: Cross-check every single column reference against both the validated schema AND the sample data. If a column is not present in either the schema or sample data, DO NOT use it under any circumstances.
-16. **NO COLUMN ASSUMPTIONS**: Never assume standard column names like 'summary_id', 'patient_id', 'medication_id' etc. Use ONLY the exact column names shown in the sample data and schema.
-17. **SAMPLE DATA ANALYSIS**: Leverage the provided sample data to understand the actual data content, formats, and relationships. Use sample data to verify which tables contain relevant information for the user query and to understand data patterns that should influence your restructuring approach.
-18. **DATA-DRIVEN TABLE SELECTION**: Prioritize tables that contain relevant data based on the sample data analysis. If sample data shows certain tables have meaningful information for the user query while others are empty or irrelevant, focus on the tables with relevant sample data.
-19. **NEVER INVENT COLUMN NAMES**: CRITICAL - Do NOT create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. If you need to count something, use COUNT(*) or COUNT(existing_column_name) but do NOT reference non-existent counting columns.
+1. **🚨 MANDATORY UNION ALL WITH ALL COLUMNS 🚨**: Use UNION ALL structure to include ALL columns from ALL tables involved in the query. Each SELECT statement must include every column from every table, using CAST(NULL AS data_type) for missing columns.
+2. **ELIMINATE REDUNDANCY**: Use GROUP BY to group related entities (e.g., patients, medications, lab tests)
+3. **CREATE JSON HIERARCHY**: Use ${jsonFunctions.createObject} and ${jsonFunctions.createArray} functions to create nested structures
+4. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original query
+5. **BE LOGICAL**: Structure should make business sense for the data domain
+6. **USE APPROPRIATE GROUPING**: Identify the main entity and group related data under it
+7. **PREVENT DUPLICATE DATA**: Ensure no duplicate records appear in any field of the response - each record should be unique
+8. **AVOID IDENTICAL/REPETITIVE DATA**: Do NOT generate queries that return identical values across multiple rows or columns. Use DISTINCT, proper GROUP BY, and JSON aggregation to eliminate repetitive data patterns. Avoid queries that produce the same data values repeated multiple times in the response.
+9. **RETURN PARSED JSON OBJECTS**: Generate SQL that returns properly structured JSON objects, NOT stringified JSON. The JSON functions should produce actual JSON objects that can be directly used without additional parsing. Avoid queries that return JSON data as strings that require further parsing.
+10. **MYSQL GROUP BY STRICT COMPLIANCE**: For MySQL, ensure every non-aggregated column in SELECT appears in GROUP BY clause (sql_mode=only_full_group_by)
+11. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${dbType.toUpperCase()} ${dbVersion}
+12. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema above
+13. **EXACT COLUMN NAMES**: Do NOT assume, guess, or make up column names. Use ONLY the exact column names provided in the validated schema. If a column name is not in the validated list, DO NOT use it. Never use variations like 'patient_id' when the actual column is 'id', or vice versa.
+14. **STRICT COLUMN VALIDATION**: Before using any column in SELECT, FROM, JOIN, WHERE, or GROUP BY clauses, verify it exists in the validated columns list for that table. Reject any query that references non-existent columns.
+15. **SAMPLE DATA VERIFICATION**: Use the provided sample data to VERIFY that columns actually exist and contain the expected data types. Do NOT reference any column that is not visible in the sample data provided.
+16. **COLUMN CROSS-REFERENCE**: Cross-check every single column reference against both the validated schema AND the sample data. If a column is not present in either the schema or sample data, DO NOT use it under any circumstances.
+17. **NO COLUMN ASSUMPTIONS**: Never assume standard column names like 'summary_id', 'patient_id', 'medication_id' etc. Use ONLY the exact column names shown in the sample data and schema.
+18. **SAMPLE DATA ANALYSIS**: Leverage the provided sample data to understand the actual data content, formats, and relationships. Use sample data to verify which tables contain relevant information for the user query and to understand data patterns that should influence your restructuring approach.
+19. **DATA-DRIVEN TABLE SELECTION**: Prioritize tables that contain relevant data based on the sample data analysis. If sample data shows certain tables have meaningful information for the user query while others are empty or irrelevant, focus on the tables with relevant sample data.
+20. **NEVER INVENT COLUMN NAMES**: CRITICAL - Do NOT create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. If you need to count something, use COUNT(*) or COUNT(existing_column_name) but do NOT reference non-existent counting columns.
 20. **FORBIDDEN COLUMN PATTERNS**: NEVER use columns ending in '_count', '_total', '_sum', '_avg' unless they physically exist in the sample data. Do NOT generate queries with aggregated column names that don't exist in the actual database schema.
 21. **SAMPLE DATA IS GROUND TRUTH**: The sample data shows you EXACTLY which columns exist. If a column is not in the sample data, it does NOT exist. Period. No exceptions. No assumptions. No guessing.
 22. **AGGREGATE FUNCTIONS ONLY**: If you need counts, sums, or calculations, use SQL aggregate functions like COUNT(*), SUM(existing_column), AVG(existing_column). Do NOT reference made-up column names to get these values.
@@ -1005,10 +1010,27 @@ RESTRUCTURING REQUIREMENTS:
 - "main_entity_count": The total count of unique main entities using COUNT(*) or COUNT(DISTINCT main_entity_id)
 - "main_entity_identifier": The primary key field name used to identify the main entity (e.g., "patient_id", "medication_id", "appointment_id")
 
+25. **🚨 CRITICAL: ALL COLUMNS FROM ALL TABLES REQUIREMENT 🚨**
+- **MANDATORY**: Include ALL columns from ALL tables involved in the query - this is non-negotiable
+- **UNION ALL STRUCTURE**: Use UNION ALL to create separate result sets for each table instead of traditional JOINs
+- **COMPLETE COLUMN SET**: The final result must contain ALL columns from ALL queried tables
+- **NULL PLACEHOLDERS**: Use CAST(NULL AS appropriate_data_type) AS column_name for columns that don't exist in specific tables
+- **EXACT COLUMN COUNT**: All SELECT statements in UNION ALL must have the EXACT same number of columns in the EXACT same order
+- **ALL TABLE REPRESENTATION**: Every table that contains relevant data must be represented with ALL its columns
+
+**UNION ALL EXAMPLE FOR COMPLETE COLUMN COVERAGE:**
+Example structure for including ALL columns from patients and medications tables:
+- First SELECT: Get ALL patient columns + NULL placeholders for medication columns
+- Second SELECT: Get ALL medication columns + NULL placeholders for patient columns
+- Both SELECT statements must have identical column count and order
+- Use proper CAST(NULL AS data_type) for missing columns in each table
+- Add source_table column to identify which table each record came from
+
 **CRITICAL STRUCTURING REQUIREMENTS FOR MULTI-SHEET EXCEL:**
 - MANDATORY ARRAY WRAPPER: The response MUST ALWAYS be wrapped in an array with a single object: [{ metadata: {...}, patients: [...], medications: [...] }]
 - Organize results by entity type: patients, medications, appointments, diagnoses, etc. into separate logical sheets within the single array object.
 - Return EXACTLY this structure: [{"metadata": {"main_entity": "patients", "main_entity_count": 25, "main_entity_identifier": "patient_id"}, "patients": [patient_records], "medications": [medication_records], "appointments": [appointment_records]}]
+- **🚨 CRITICAL**: Each sheet must contain ALL columns from the respective table plus NULL placeholders for columns from other tables
 - Each sheet (array) should contain flat, denormalized records with consistent column structures.
 - Within each sheet, ensure all rows have the same column structure for proper Excel formatting.
 - Use descriptive sheet names that clearly identify the record type (e.g., "patients", "medications", "appointments", "lab_results").
@@ -2521,8 +2543,8 @@ export function medicalRoutes(): Router {
                 sendMessage = (msg: string) => {
                     if (!res.headersSent) {
                         try {
-                            res.write(`data: ${JSON.stringify({ 
-                                message: msg, 
+                            res.write(`data: ${JSON.stringify({
+                                message: msg,
                                 timestamp: new Date().toISOString(),
                                 processing_time: `${(performance.now() - startTime).toFixed(2)}ms`
                             })}\n\n`);
@@ -2654,8 +2676,8 @@ export function medicalRoutes(): Router {
                     const { langchainApp, sessionData, chatHistory, sqlAgent, dbConfig } = setupResult;
 
                     // Get minimal database information to guide the agent
-                    const schemaResult = await getMinimalDatabaseSchema(organizationId, dbConfig, debugInfo);
-                    const tables = schemaResult.tables;
+                    // const schemaResult = await getMinimalDatabaseSchema(organizationId, dbConfig, debugInfo);
+                    // const tables = schemaResult.tables;
 
                     // ========== DATABASE VERSION DETECTION ==========
                     const versionResult = await detectDatabaseVersion(organizationId, dbConfig);
@@ -2921,24 +2943,24 @@ export function medicalRoutes(): Router {
                         if (generateGraph) {
                             sendMessage("Creating visualization...");
                         }
-                        const graphProcessingResult = await processGraphData({
-                            generateGraph,
-                            graphType,
-                            graphCategory,
-                            graphConfig,
-                            rows: rows || [],
-                            langchainApp,
-                            GraphProcessor
-                        });
-                        if (generateGraph && graphProcessingResult.graphData) {
-                            sendMessage("Visualization ready");
-                        }
+                        // const graphProcessingResult = await processGraphData({
+                        //     generateGraph,
+                        //     graphType,
+                        //     graphCategory,
+                        //     graphConfig,
+                        //     rows: rows || [],
+                        //     langchainApp,
+                        //     GraphProcessor
+                        // });
+                        // if (generateGraph && graphProcessingResult.graphData) {
+                        //     sendMessage("Visualization ready");
+                        // }
 
-                        const graphData = graphProcessingResult.graphData;
-                        const detectedGraphType = graphProcessingResult.detectedGraphType;
-                        const detectedCategory = graphProcessingResult.detectedCategory;
-                        const hasExplicitGraphConfig = graphProcessingResult.hasExplicitGraphConfig;
-                        const shouldGenerateGraph = graphProcessingResult.shouldGenerateGraph;
+                        // const graphData = graphProcessingResult.graphData;
+                        // const detectedGraphType = graphProcessingResult.detectedGraphType;
+                        // const detectedCategory = graphProcessingResult.detectedCategory;
+                        // const hasExplicitGraphConfig = graphProcessingResult.hasExplicitGraphConfig;
+                        // const shouldGenerateGraph = graphProcessingResult.shouldGenerateGraph;
 
                         // Return the raw SQL results with descriptions
                         const response = {
@@ -2951,7 +2973,7 @@ export function medicalRoutes(): Router {
                                 sql_final: groupAndCleanData(parseRows(rows)),
                                 processing_time: `${(processingTime || 0).toFixed(2)}ms`,
                                 // Add graph data to sql_results if available
-                                ...(graphData ? { graph_data: graphData } : {})
+                                // ...(graphData ? { graph_data: graphData } : {})
                             }, // Raw SQL results with optional graph data
                             result_count: Array.isArray(rows) ? rows.length : 0,
                             field_info: fields ? fields.map((field: any) => ({
@@ -2995,23 +3017,23 @@ export function medicalRoutes(): Router {
                                 query_adapted_to_version: !!mysqlVersionInfo
                             },
                             // Add graph processing info if graphs were requested
-                            ...(shouldGenerateGraph ? {
-                                graph_processing: {
-                                    requested: shouldGenerateGraph,
-                                    type: detectedGraphType || graphType,
-                                    category: detectedCategory || graphCategory,
-                                    success: !!graphData && graphData.data.length > 0,
-                                    data_points: graphData ? graphData.data.length : 0,
-                                    explicit_generate_graph: generateGraph,
-                                    auto_detected: !hasExplicitGraphConfig,
-                                    auto_analyzed: !hasExplicitGraphConfig,
-                                    debug_info: {
-                                        should_generate: shouldGenerateGraph,
-                                        has_explicit_config: hasExplicitGraphConfig,
-                                        rows_count: Array.isArray(rows) ? rows.length : 0,
-                                        analysis_method: hasExplicitGraphConfig ? 'explicit_config' : 'auto_analysis'
-                                    }
-                                }
+                            ...(false ? {
+                                // graph_processing: {
+                                //     requested: shouldGenerateGraph,
+                                //     type: detectedGraphType || graphType,
+                                //     category: detectedCategory || graphCategory,
+                                //     success: !!graphData && graphData.data.length > 0,
+                                //     data_points: graphData ? graphData.data.length : 0,
+                                //     explicit_generate_graph: generateGraph,
+                                //     auto_detected: !hasExplicitGraphConfig,
+                                //     auto_analyzed: !hasExplicitGraphConfig,
+                                //     debug_info: {
+                                //         should_generate: shouldGenerateGraph,
+                                //         has_explicit_config: hasExplicitGraphConfig,
+                                //         rows_count: Array.isArray(rows) ? rows.length : 0,
+                                //         analysis_method: hasExplicitGraphConfig ? 'explicit_config' : 'auto_analysis'
+                                //     }
+                                // }
                             } : {}),
                             timestamp: new Date().toISOString()
                         };
@@ -3206,114 +3228,6 @@ export function medicalRoutes(): Router {
         return sql;
     }
 
-    // Helper function to extract complete SQL queries with proper parentheses balance
-    function extractCompleteSQL(input: string): string | null {
-        // Find the start of a SELECT statement
-        const selectMatch = input.match(/SELECT/i);
-        if (!selectMatch) return null;
-
-        let startIndex = selectMatch.index!;
-        let currentPos = startIndex;
-        let parenthesesCount = 0;
-        let inSingleQuote = false;
-        let inDoubleQuote = false;
-        let inBacktick = false;
-        let sqlEnd = input.length;
-
-        // Track parentheses balance and find natural SQL ending
-        while (currentPos < input.length) {
-            const char = input[currentPos];
-            const nextChar =
-                currentPos + 1 < input.length ? input[currentPos + 1] : "";
-            const prevChar = currentPos > 0 ? input[currentPos - 1] : "";
-
-            // Handle string literals
-            if (char === "'" && !inDoubleQuote && !inBacktick && prevChar !== "\\") {
-                inSingleQuote = !inSingleQuote;
-            } else if (
-                char === '"' &&
-                !inSingleQuote &&
-                !inBacktick &&
-                prevChar !== "\\"
-            ) {
-                inDoubleQuote = !inDoubleQuote;
-            } else if (
-                char === "`" &&
-                !inSingleQuote &&
-                !inDoubleQuote &&
-                prevChar !== "\\"
-            ) {
-                inBacktick = !inBacktick;
-            }
-
-            // Only process non-string characters
-            if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
-                if (char === "(") {
-                    parenthesesCount++;
-                } else if (char === ")") {
-                    parenthesesCount--;
-                }
-
-                // Check for natural SQL endings when parentheses are balanced
-                if (parenthesesCount === 0) {
-                    // Look for semicolon
-                    if (char === ";") {
-                        sqlEnd = currentPos + 1;
-                        break;
-                    }
-
-                    // Look for natural text boundaries that indicate SQL end
-                    const remainingText = input.substring(currentPos);
-                    if (
-                        remainingText.match(
-                            /^\s*(?:Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s|\*\*|\#\#|```|\[\[|\]\])/i
-                        )
-                    ) {
-                        sqlEnd = currentPos;
-                        break;
-                    }
-
-                    // Look for line breaks followed by non-SQL content
-                    if (char === "\n" && nextChar && !nextChar.match(/\s/)) {
-                        const nextLine = input.substring(currentPos + 1).split("\n")[0];
-                        if (
-                            nextLine &&
-                            !nextLine.match(
-                                /^\s*(SELECT|FROM|WHERE|JOIN|GROUP|ORDER|HAVING|LIMIT|UNION|AND|OR)/i
-                            )
-                        ) {
-                            // Check if this looks like explanatory text, not SQL continuation
-                            if (
-                                nextLine.match(/^[A-Z].*[.!?]$/) ||
-                                nextLine.match(/^This|^The|^Note:|^Result|^Error/)
-                            ) {
-                                sqlEnd = currentPos;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            currentPos++;
-        }
-
-        // Extract the SQL from start to the determined end
-        let extractedSQL = input.substring(startIndex, sqlEnd).trim();
-
-        // Clean up any trailing non-SQL text
-        extractedSQL = extractedSQL.replace(
-            /\s+(Query executed|Result:|Error:|Final answer|Step \d+|\d+\.\s).*$/i,
-            ""
-        );
-
-        // Validate that we have a complete SQL statement
-        if (extractedSQL.match(/SELECT\s+[\s\S]*?\s+FROM\s+/i)) {
-            return extractedSQL;
-        }
-
-        return null;
-    }
 
     function isCompleteSQLQuery(sql: string): boolean {
         if (!sql || typeof sql !== "string") return false;
@@ -3387,546 +3301,6 @@ export function medicalRoutes(): Router {
 
         return fixedSQL;
     }
-
-    /**
-     * Validates MySQL GROUP BY compliance for only_full_group_by mode
-     * @param sql SQL query to validate
-     * @returns Object with compliance status and suggested fixes
-     */
-    function validateMySQLGroupByCompliance(sql: string): {
-        isCompliant: boolean;
-        issues: string[];
-        suggestedFix?: string;
-    } {
-        if (!sql || typeof sql !== "string") {
-            return { isCompliant: true, issues: [] };
-        }
-
-        const issues: string[] = [];
-        let suggestedFix = "";
-
-        // Parse the SQL to check for GROUP BY compliance
-        const sqlUpper = sql.toUpperCase();
-        const sqlLower = sql.toLowerCase();
-
-        // Check if the query has aggregation functions
-        const aggregationFunctions = [
-            "COUNT(",
-            "SUM(",
-            "AVG(",
-            "MAX(",
-            "MIN(",
-            "GROUP_CONCAT(",
-        ];
-        const hasAggregation = aggregationFunctions.some((func) =>
-            sqlUpper.includes(func.toUpperCase())
-        );
-
-        // Check if the query has GROUP BY
-        const hasGroupBy = sqlUpper.includes("GROUP BY");
-
-        if (!hasAggregation) {
-            // No aggregation functions, so GROUP BY compliance is not required
-            return { isCompliant: true, issues: [] };
-        }
-
-        if (!hasGroupBy) {
-            issues.push(
-                "Query uses aggregation functions but missing GROUP BY clause"
-            );
-
-            // Try to suggest a fix by adding GROUP BY for non-aggregated columns
-            const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
-            if (selectMatch) {
-                const selectClause = selectMatch[1];
-                const columns = selectClause.split(",").map((col) => col.trim());
-
-                const nonAggregatedColumns: string[] = [];
-                columns.forEach((col) => {
-                    const isAggregated = aggregationFunctions.some((func) =>
-                        col.toUpperCase().includes(func.toUpperCase())
-                    );
-                    if (!isAggregated && !col.includes("*")) {
-                        // Extract just the column name, removing aliases
-                        const colName = col.replace(/\s+AS\s+\w+/i, "").trim();
-                        nonAggregatedColumns.push(colName);
-                    }
-                });
-
-                if (nonAggregatedColumns.length > 0) {
-                    const fromMatch = sql.match(
-                        /FROM[\s\S]*?(?=WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|$)/i
-                    );
-                    const whereMatch = sql.match(
-                        /(WHERE[\s\S]*?)(?=GROUP BY|HAVING|ORDER BY|LIMIT|$)/i
-                    );
-                    const havingMatch = sql.match(
-                        /(HAVING[\s\S]*?)(?=ORDER BY|LIMIT|$)/i
-                    );
-                    const orderByMatch = sql.match(/(ORDER BY[\s\S]*?)(?=LIMIT|$)/i);
-                    const limitMatch = sql.match(/(LIMIT[\s\S]*)$/i);
-
-                    suggestedFix = `SELECT ${selectClause} ${fromMatch ? fromMatch[0] : ""
-                        }`;
-                    if (whereMatch) suggestedFix += ` ${whereMatch[1]}`;
-                    suggestedFix += ` GROUP BY ${nonAggregatedColumns.join(", ")}`;
-                    if (havingMatch) suggestedFix += ` ${havingMatch[1]}`;
-                    if (orderByMatch) suggestedFix += ` ${orderByMatch[1]}`;
-                    if (limitMatch) suggestedFix += ` ${limitMatch[1]}`;
-
-                    if (!suggestedFix.endsWith(";")) suggestedFix += ";";
-                }
-            }
-
-            return { isCompliant: false, issues, suggestedFix };
-        }
-
-        // Parse SELECT clause to find all columns
-        const selectMatch = sql.match(/SELECT\s+(.*?)\s+FROM/i);
-        if (!selectMatch) {
-            return { isCompliant: true, issues: [] }; // Can't parse, assume compliant
-        }
-
-        const selectClause = selectMatch[1];
-        const columns = selectClause.split(",").map((col) => col.trim());
-
-        // Parse GROUP BY clause
-        const groupByMatch = sql.match(
-            /GROUP BY\s+(.*?)(?:\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$)/i
-        );
-        if (!groupByMatch) {
-            issues.push("GROUP BY clause could not be parsed");
-            return { isCompliant: false, issues };
-        }
-
-        const groupByClause = groupByMatch[1];
-        const groupByColumns = groupByClause.split(",").map((col) => col.trim());
-
-        // Check each SELECT column
-        const nonAggregatedColumns: string[] = [];
-        const missingFromGroupBy: string[] = [];
-
-        columns.forEach((col) => {
-            const isAggregated = aggregationFunctions.some((func) =>
-                col.toUpperCase().includes(func.toUpperCase())
-            );
-
-            if (!isAggregated && !col.includes("*")) {
-                // Extract just the column name, removing aliases and table prefixes for comparison
-                let colName = col.replace(/\s+AS\s+\w+/i, "").trim();
-
-                // Check if this column is in GROUP BY
-                const isInGroupBy = groupByColumns.some((groupCol) => {
-                    // Normalize both for comparison (remove table prefixes, spaces)
-                    const normalizedGroupCol = groupCol.replace(/^\w+\./, "").trim();
-                    const normalizedColName = colName.replace(/^\w+\./, "").trim();
-                    return (
-                        normalizedGroupCol === normalizedColName ||
-                        groupCol.trim() === colName ||
-                        normalizedGroupCol.toLowerCase() === normalizedColName.toLowerCase()
-                    );
-                });
-
-                nonAggregatedColumns.push(colName);
-
-                if (!isInGroupBy) {
-                    missingFromGroupBy.push(colName);
-                }
-            }
-        });
-
-        if (missingFromGroupBy.length > 0) {
-            issues.push(
-                `Non-aggregated columns not in GROUP BY: ${missingFromGroupBy.join(
-                    ", "
-                )}`
-            );
-
-            // Suggest fix by adding missing columns to GROUP BY
-            const additionalGroupBy = missingFromGroupBy.filter(
-                (col) =>
-                    !groupByColumns.some(
-                        (groupCol) =>
-                            groupCol.toLowerCase().includes(col.toLowerCase()) ||
-                            col.toLowerCase().includes(groupCol.toLowerCase())
-                    )
-            );
-
-            if (additionalGroupBy.length > 0) {
-                const newGroupBy = [...groupByColumns, ...additionalGroupBy].join(", ");
-                suggestedFix = sql.replace(
-                    /GROUP BY\s+.*?(?=\s+HAVING|\s+ORDER BY|\s+LIMIT|;|$)/i,
-                    `GROUP BY ${newGroupBy}`
-                );
-            }
-
-            return { isCompliant: false, issues, suggestedFix };
-        }
-
-        return { isCompliant: true, issues: [] };
-    }
-
-    /**
-     * Validates UNION ALL statements to ensure all SELECT statements have matching column counts and types
-     * @param sql SQL query to validate
-     * @returns Object with validation status and issues found
-     */
-    function validateUnionColumnMatching(sql: string): {
-        isValid: boolean;
-        issues: string[];
-        suggestedFix?: string;
-    } {
-        if (!sql || typeof sql !== "string") {
-            return { isValid: true, issues: [] };
-        }
-
-        const issues: string[] = [];
-        let suggestedFix = "";
-
-        // Check if the query contains UNION
-        const hasUnion = /UNION\s+(?:ALL\s+)?/gim.test(sql);
-        if (!hasUnion) {
-            return { isValid: true, issues: [] }; // No UNION, validation passes
-        }
-
-        // Split the SQL by UNION to get individual SELECT statements
-        const unionParts = sql.split(/UNION\s+(?:ALL\s+)?/gim);
-
-        if (unionParts.length < 2) {
-            return { isValid: true, issues: [] }; // No actual UNION found
-        }
-
-        let referenceColumnCount = 0;
-        const selectClauses: string[] = [];
-
-        unionParts.forEach((part, index) => {
-            // Extract SELECT clause from each part
-            const selectMatch = part.match(/SELECT\s+(.*?)\s+FROM/im);
-            if (selectMatch) {
-                const selectClause = selectMatch[1];
-                selectClauses.push(selectClause);
-
-                // Count columns (simple approach - count commas + 1, accounting for parentheses)
-                const columnCount = countColumnsInSelect(selectClause);
-
-                if (index === 0) {
-                    referenceColumnCount = columnCount;
-                } else if (columnCount !== referenceColumnCount) {
-                    issues.push(
-                        `UNION statement ${index + 1} has ${columnCount} columns, but the first statement has ${referenceColumnCount} columns. All UNION statements must have the same number of columns.`
-                    );
-                }
-            } else {
-                // Try to find SELECT at the beginning of the part (first UNION part might not have FROM)
-                const selectAtStart = part.match(/^\s*SELECT\s+(.*?)(?:\s+FROM|\s+UNION|\s*$)/im);
-                if (selectAtStart) {
-                    const selectClause = selectAtStart[1];
-                    selectClauses.push(selectClause);
-
-                    const columnCount = countColumnsInSelect(selectClause);
-
-                    if (index === 0) {
-                        referenceColumnCount = columnCount;
-                    } else if (columnCount !== referenceColumnCount) {
-                        issues.push(
-                            `UNION statement ${index + 1} has ${columnCount} columns, but the first statement has ${referenceColumnCount} columns. All UNION statements must have the same number of columns.`
-                        );
-                    }
-                }
-            }
-        });
-
-        if (issues.length > 0) {
-            suggestedFix = "Ensure all SELECT statements in the UNION have the same number of columns. Use CAST(NULL as DATA_TYPE) as column_name for missing columns in each SELECT statement.";
-
-            return { isValid: false, issues, suggestedFix };
-        }
-
-        return { isValid: true, issues: [] };
-    }
-
-    /**
-     * Helper function to count columns in a SELECT clause
-     * @param selectClause The SELECT clause string
-     * @returns Number of columns
-     */
-    function countColumnsInSelect(selectClause: string): number {
-        if (!selectClause || typeof selectClause !== "string") {
-            return 0;
-        }
-
-        let columnCount = 0;
-        let parenDepth = 0;
-        let inQuotes = false;
-        let quoteChar = '';
-
-        for (let i = 0; i < selectClause.length; i++) {
-            const char = selectClause[i];
-            const prevChar = i > 0 ? selectClause[i - 1] : '';
-
-            // Handle quotes
-            if ((char === '"' || char === "'" || char === '`') && prevChar !== '\\') {
-                if (!inQuotes) {
-                    inQuotes = true;
-                    quoteChar = char;
-                } else if (char === quoteChar) {
-                    inQuotes = false;
-                    quoteChar = '';
-                }
-                continue;
-            }
-
-            if (inQuotes) continue;
-
-            // Handle parentheses
-            if (char === '(') {
-                parenDepth++;
-            } else if (char === ')') {
-                parenDepth--;
-            }
-
-            // Count commas at top level (outside parentheses and quotes)
-            if (char === ',' && parenDepth === 0) {
-                columnCount++;
-            }
-        }
-
-        // Add 1 for the last column (no trailing comma)
-        return columnCount + 1;
-    }
-
-    function finalCleanSQL(sql: string): string {
-        if (!sql || typeof sql !== "string") return "";
-
-        // First remove any non-ASCII characters that might cause problems
-        let cleanSQL = sql.replace(/[^\x00-\x7F]/g, "");
-
-        // Remove any markdown artifacts or non-SQL content that might remain
-        cleanSQL = cleanSQL
-            .replace(/```/g, "")
-            .replace(/\*\*/g, "")
-            .replace(/--.*?(?:\n|$)/g, " ")
-            .replace(/\/\/.*?(?:\n|$)/g, " ")
-            .replace(/\/\*[\s\S]*?\*\//g, " ")
-            .replace(/\s*Review for common mistakes:[\s\S]*/i, "")
-            .replace(/\s*Notes:[\s\S]*/i, "");
-
-        // Remove any other non-SQL content that might follow a semicolon
-        const semicolonIndex = cleanSQL.indexOf(";");
-        if (semicolonIndex !== -1) {
-            cleanSQL = cleanSQL.substring(0, semicolonIndex + 1);
-        }
-
-        // Normalize whitespace
-        cleanSQL = cleanSQL.replace(/\s+/g, " ").trim();
-
-        // Make sure it starts with SELECT
-        if (!cleanSQL.toUpperCase().startsWith("SELECT")) {
-            const selectMatch = cleanSQL.match(/(SELECT[\s\S]+)/i);
-            if (selectMatch) {
-                cleanSQL = selectMatch[1];
-            } else {
-                return ""; // Not a valid SQL query
-            }
-        }
-
-        // Make sure it includes FROM
-        if (!cleanSQL.toUpperCase().includes(" FROM ")) {
-            return ""; // Not a valid SQL query
-        }
-
-        // ENHANCED SQL SYNTAX VALIDATION AND FIXING
-
-        // Fix common syntax issues that cause MySQL errors
-
-        // 1. Fix orphaned closing parentheses at the beginning
-        cleanSQL = cleanSQL.replace(/^\s*\)\s*/, "");
-
-        // 2. Fix malformed WITH clauses that don't have proper structure
-        cleanSQL = cleanSQL.replace(/^\s*WITH\s*\)\s*/i, "");
-
-        // 3. Fix cases where there's a closing parenthesis before SELECT
-        cleanSQL = cleanSQL.replace(/^\s*\)\s*(SELECT)/i, "$1");
-
-        // 4. Fix complex query structure issues first
-        // Handle cases where we have ") SELECT" which indicates malformed CTE or subquery
-        if (/\)\s+SELECT/i.test(cleanSQL)) {
-            console.log(
-                "🔧 Detected malformed CTE/subquery structure, attempting to fix..."
-            );
-
-            // Pattern: "...GROUP BY field ) SELECT ..." - this is likely a malformed CTE
-            const ctePattern = /(SELECT.*?FROM.*?GROUP BY.*?)\s*\)\s*(SELECT.*)/i;
-            const cteMatch = cleanSQL.match(ctePattern);
-
-            if (cteMatch) {
-                console.log("🔧 Converting to proper CTE structure...");
-                const innerQuery = cteMatch[1];
-                const outerQuery = cteMatch[2];
-
-                // Create a proper CTE structure
-                cleanSQL = `WITH therapeutic_counts AS (${innerQuery}) ${outerQuery}`;
-                console.log("🔧 Fixed CTE structure:", cleanSQL);
-            } else {
-                // If we can't parse it as CTE, try to extract the most complete SELECT statement
-                console.log(
-                    "🔧 Could not parse as CTE, extracting most complete SELECT..."
-                );
-                const selectMatches = cleanSQL.match(/(SELECT[\s\S]*?(?:;|$))/gi);
-                if (selectMatches && selectMatches.length > 0) {
-                    // Take the longest SELECT statement (likely most complete)
-                    const longestSelect = selectMatches.reduce((longest, current) =>
-                        current.length > longest.length ? current : longest
-                    );
-                    cleanSQL = longestSelect;
-                    console.log("🔧 Using longest SELECT statement:", cleanSQL);
-                }
-            }
-        }
-
-        // 5. Fix mismatched parentheses - count and balance them
-        const openParens = (cleanSQL.match(/\(/g) || []).length;
-        const closeParens = (cleanSQL.match(/\)/g) || []).length;
-
-        if (closeParens > openParens) {
-            // Remove extra closing parentheses strategically
-            let extraClosing = closeParens - openParens;
-            console.log(`🔧 Removing ${extraClosing} extra closing parentheses...`);
-
-            // First, try to remove orphaned closing parentheses at the beginning
-            while (extraClosing > 0 && /^\s*\)/.test(cleanSQL)) {
-                cleanSQL = cleanSQL.replace(/^\s*\)/, "");
-                extraClosing--;
-            }
-
-            // If still have extra, remove them from other strategic positions
-            while (extraClosing > 0) {
-                // Remove closing parentheses that appear before keywords without matching opening
-                if (
-                    /\)\s+(SELECT|FROM|WHERE|GROUP|ORDER|HAVING|LIMIT)/i.test(cleanSQL)
-                ) {
-                    cleanSQL = cleanSQL.replace(
-                        /\)\s+(SELECT|FROM|WHERE|GROUP|ORDER|HAVING|LIMIT)/i,
-                        " $1"
-                    );
-                    extraClosing--;
-                } else {
-                    // Remove the last closing parenthesis
-                    const lastCloseIndex = cleanSQL.lastIndexOf(")");
-                    if (lastCloseIndex > -1) {
-                        cleanSQL =
-                            cleanSQL.substring(0, lastCloseIndex) +
-                            cleanSQL.substring(lastCloseIndex + 1);
-                        extraClosing--;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        } else if (openParens > closeParens) {
-            // Add missing closing parentheses at the end (before semicolon)
-            const missingClosing = openParens - closeParens;
-            console.log(`🔧 Adding ${missingClosing} missing closing parentheses...`);
-            if (cleanSQL.endsWith(";")) {
-                cleanSQL = cleanSQL.slice(0, -1) + ")".repeat(missingClosing) + ";";
-            } else {
-                cleanSQL += ")".repeat(missingClosing);
-            }
-        }
-
-        // 6. Fix cases where there are multiple SELECT statements incorrectly formatted
-        const selectMatches = cleanSQL.match(/SELECT/gi);
-        if (selectMatches && selectMatches.length > 1) {
-            // If there are multiple SELECTs, take only the first complete one
-            const firstSelectIndex = cleanSQL.toUpperCase().indexOf("SELECT");
-            let queryEnd = cleanSQL.length;
-
-            // Find the end of the first SELECT statement
-            const secondSelectIndex = cleanSQL
-                .toUpperCase()
-                .indexOf("SELECT", firstSelectIndex + 6);
-            if (secondSelectIndex > -1) {
-                queryEnd = secondSelectIndex;
-            }
-
-            cleanSQL = cleanSQL.substring(firstSelectIndex, queryEnd).trim();
-        }
-
-        // 7. Fix common MySQL syntax issues
-
-        // Fix incorrect LIMIT syntax
-        cleanSQL = cleanSQL.replace(
-            /LIMIT\s+(\d+)\s*,\s*(\d+)/gi,
-            "LIMIT $2 OFFSET $1"
-        );
-
-        // Fix incorrect date formatting
-        cleanSQL = cleanSQL.replace(
-            /DATE\s*\(\s*['"]([^'"]+)['"]\s*\)/gi,
-            "DATE('$1')"
-        );
-
-        // Fix table alias issues (missing AS keyword or improper spacing)
-        cleanSQL = cleanSQL.replace(
-            /(\w+)\s+(\w+)\s+(ON|WHERE|JOIN|GROUP|ORDER|LIMIT|HAVING)/gi,
-            "$1 AS $2 $3"
-        );
-
-        // 8. NEW: Fix specific SELECT clause issues that cause syntax errors
-
-        // Fix missing comma after table.* in SELECT clauses
-        // Pattern: SELECT table.* function(...) should be SELECT table.*, function(...)
-        cleanSQL = cleanSQL.replace(
-            /SELECT\s+([\w.]+\.\*)\s+([A-Z_]+\s*\()/gi,
-            "SELECT $1, $2"
-        );
-
-        // Fix extra "AS" before table names in FROM clause
-        // Pattern: FROM AS table_name should be FROM table_name
-        cleanSQL = cleanSQL.replace(/FROM\s+AS\s+/gi, "FROM ");
-
-        // Fix missing comma between SELECT fields - IMPROVED PATTERN
-        // Only match field names followed by aggregate functions, not function parameters
-        cleanSQL = cleanSQL.replace(
-            /(\w+(?:\.\w+)?)\s+(GROUP_CONCAT|COUNT|SUM|AVG|MAX|MIN)\s*\(/gi,
-            "$1, $2("
-        );
-
-        // Fix orphaned commas before FROM
-        cleanSQL = cleanSQL.replace(/,\s*FROM/gi, " FROM");
-
-        // 9. Validate basic SQL structure
-        const upperSQL = cleanSQL.toUpperCase();
-
-        // Ensure proper SELECT structure
-        if (!upperSQL.includes("SELECT") || !upperSQL.includes("FROM")) {
-            return "";
-        }
-
-        // Check for basic syntax requirements
-        const hasValidStructure = /SELECT\s+.*\s+FROM\s+\w+/i.test(cleanSQL);
-        if (!hasValidStructure) {
-            return "";
-        }
-
-        // 10. Final cleanup
-
-        // Remove any trailing commas before FROM, WHERE, etc.
-        cleanSQL = cleanSQL.replace(
-            /,\s+(FROM|WHERE|GROUP|ORDER|LIMIT|HAVING)/gi,
-            " $1"
-        );
-
-        // Remove any extra spaces
-        cleanSQL = cleanSQL.replace(/\s+/g, " ").trim();
-
-        // Ensure it ends with a semicolon
-        if (!cleanSQL.endsWith(";")) {
-            cleanSQL += ";";
-        }
-
-        return cleanSQL;
-    } // New function to validate SQL syntax before execution
 
     return router;
 }

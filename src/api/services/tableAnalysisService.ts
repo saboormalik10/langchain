@@ -34,116 +34,51 @@ export async function getTableDescriptionsWithAI(
         // Reset global sample data for fresh collection
         globalTableSampleData = {};
 
-        // Get all tables for this organization
-        const allTables = await databaseService.getOrganizationTables(organizationId);
-        console.log(`📊 Found ${allTables.length} tables:`, allTables);
+        // Use cached schema instead of direct database calls - PERFORMANCE IMPROVEMENT
+        console.log('🚀 Using cached database schema for faster performance...');
+        const schemaCache = await databaseService.getOrganizationSchema(organizationId);
+        const allTables = schemaCache.tables;
+        console.log(`📊 Found ${allTables.length} tables from cache:`, allTables);
 
         if (allTables.length > 0) {
             const tableSchemaData: any = {};
-            // Use the global tableSampleData instead of local declaration
+            
+            // Use cached schema information - MAJOR PERFORMANCE IMPROVEMENT
+            console.log(`� Using cached schema for ${allTables.length} tables - no database connections needed!`);
+            
+            for (const tableName of allTables) {
+                try {
+                    // Get column information from cache instead of database
+                    const columns = schemaCache.tableColumns[tableName] || [];
+                    
+                    // Convert cached column names to expected format for AI processing
+                    const columnInfo = columns.map(columnName => ({
+                        COLUMN_NAME: columnName,
+                        DATA_TYPE: 'cached', // Type info could be enhanced in future
+                        IS_NULLABLE: 'YES',
+                        COLUMN_DEFAULT: null,
+                        COLUMN_COMMENT: ''
+                    }));
 
-            // Get schema for each table using single connection
-            console.log(`🔄 Fetching schema for ${allTables.length} tables using single connection...`);
-            let schemaConnection: any = null;
-
-            try {
-                // Create one shared connection for all schema fetching
-                if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
-                    schemaConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                } else if (databaseType.toLowerCase() === 'postgresql') {
-                    schemaConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                }
-
-                for (const tableName of allTables) {
-                    try {
-                        let columnInfo: any[] = [];
-
-                        if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
-                            const [rows] = await schemaConnection.execute(
-                                `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT 
-                             FROM INFORMATION_SCHEMA.COLUMNS 
-                             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? 
-                             ORDER BY ORDINAL_POSITION`,
-                                [tableName]
-                            );
-                            columnInfo = rows as any[];
-                        } else if (databaseType.toLowerCase() === 'postgresql') {
-                            const result = await schemaConnection.query(
-                                `SELECT column_name as "COLUMN_NAME", data_type as "DATA_TYPE", is_nullable as "IS_NULLABLE", column_default as "COLUMN_DEFAULT", '' as "COLUMN_COMMENT"
-                             FROM information_schema.columns 
-                             WHERE table_schema = 'public' AND table_name = $1 
-                             ORDER BY ordinal_position`,
-                                [tableName]
-                            );
-                            columnInfo = result.rows;
-                        }
-
-                        tableSchemaData[tableName] = Array.isArray(columnInfo) ? columnInfo : [];
-                        console.log(`✅ Got schema for table ${tableName}: ${tableSchemaData[tableName].length} columns`);
-                    } catch (schemaError) {
-                        console.warn(`⚠️ Could not get schema for table ${tableName}:`, schemaError);
-                        tableSchemaData[tableName] = [];
-                    }
-                }
-            } finally {
-                // Close the shared schema connection
-                if (schemaConnection) {
-                    try {
-                        if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
-                            await schemaConnection.end();
-                        } else if (databaseType.toLowerCase() === 'postgresql') {
-                            await schemaConnection.end();
-                        }
-                        console.log('🔌 Closed shared schema connection');
-                    } catch (closeError) {
-                        console.warn('⚠️ Error closing shared schema connection:', closeError);
-                    }
+                    tableSchemaData[tableName] = columnInfo;
+                    console.log(`✅ Used cached schema for table ${tableName}: ${columnInfo.length} columns`);
+                } catch (schemaError) {
+                    console.warn(`⚠️ Could not get cached schema for table ${tableName}:`, schemaError);
+                    tableSchemaData[tableName] = [];
                 }
             }
 
-            // Get sample data (first 3 records) for each table using Promise.all for parallel execution
-            console.log(`🔄 Fetching sample data for ${allTables.length} tables in parallel...`);
+            // Get sample data using cache where possible - PERFORMANCE OPTIMIZATION
+            console.log(`� Fetching sample data for ${allTables.length} tables using cache optimization...`);
 
-            // Create array of sample data fetch promises
+            // Create array of sample data fetch promises with cache fallback
             const sampleDataPromises = allTables.map(async (tableName) => {
                 try {
-                    let sampleRecords: any[] = [];
-                    let tableConnection: any = null;
-
-                    try {
-                        // Create individual connection for this table (for parallel execution)
-                        if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
-                            tableConnection = await databaseService.createOrganizationMySQLConnection(organizationId);
-                            const [rows] = await tableConnection.execute(
-                                `SELECT * FROM \`${tableName}\` LIMIT 3`
-                            );
-                            sampleRecords = rows as any[];
-                        } else if (databaseType.toLowerCase() === 'postgresql') {
-                            tableConnection = await databaseService.createOrganizationPostgreSQLConnection(organizationId);
-                            const result = await tableConnection.query(
-                                `SELECT * FROM "${tableName}" LIMIT 3`
-                            );
-                            sampleRecords = result.rows;
-                        }
-
-                        globalTableSampleData[tableName] = Array.isArray(sampleRecords) ? sampleRecords : [];
-                        console.log(`✅ Got sample data for table ${tableName}: ${globalTableSampleData[tableName].length} records`);
-
-                        return { tableName, success: true };
-                    } finally {
-                        // Clean up individual connection
-                        if (tableConnection) {
-                            try {
-                                if (databaseType.toLowerCase() === 'mysql' || databaseType.toLowerCase() === 'mariadb') {
-                                    await tableConnection.end();
-                                } else if (databaseType.toLowerCase() === 'postgresql') {
-                                    await tableConnection.end();
-                                }
-                            } catch (closeError) {
-                                console.warn(`⚠️ Error closing connection for table ${tableName}:`, closeError);
-                            }
-                        }
-                    }
+                    // Try to get cached sample data first
+                    const cachedSamples = await databaseService.getTableSampleData(organizationId, tableName);
+                    globalTableSampleData[tableName] = Array.isArray(cachedSamples) ? cachedSamples.slice(0, 3) : [];
+                    console.log(`✅ Got sample data for table ${tableName}: ${globalTableSampleData[tableName].length} records (cached: ${cachedSamples.length > 0})`);
+                    return { tableName, success: true };
                 } catch (sampleError) {
                     console.warn(`⚠️ Could not get sample data for table ${tableName}:`, sampleError);
                     globalTableSampleData[tableName] = [];

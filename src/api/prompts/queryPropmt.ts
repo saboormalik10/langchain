@@ -366,6 +366,14 @@ MySQL ${dbVersion} Syntax Rules:
 - String values must be quoted with single quotes ('string value')
 - NULL values should be handled with IFNULL() or COALESCE() functions
 - Date and time values are formatted as 'YYYY-MM-DD HH:MM:SS'
+
+CRITICAL MYSQL CAST FUNCTION RULES:
+- MySQL CAST syntax: CAST(expression AS datatype) - NO length specifiers for VARCHAR/CHAR in SELECT
+- AVOID: CAST(NULL AS VARCHAR(50)) - This will cause syntax errors
+- CORRECT: Use literal NULL or IFNULL(column, 'default_value') instead
+- For NULL placeholder values in SELECT, use: NULL AS column_name (without CAST)
+- MySQL supports: CAST(value AS CHAR), CAST(value AS SIGNED), CAST(value AS DECIMAL), CAST(value AS DATE)
+- For string length control, use: LEFT(string, length) or SUBSTRING(string, 1, length)
 `,
       aliasRules: `
 MySQL ALIAS USAGE RULES (CRITICAL):
@@ -434,10 +442,18 @@ FROM customers
 JOIN orders ON customers.id = orders.customer_id
 GROUP BY customer_id, customer_name
 ORDER BY COUNT(order_id) DESC
+
+-- Example 4: CORRECT NULL handling in MySQL (AVOID CAST with VARCHAR lengths)
+SELECT 
+    IFNULL(patient_id, 'unknown') AS patient_id,  -- CORRECT
+    IFNULL(gender, 'not specified') AS gender,     -- CORRECT  
+    COALESCE(birth_date, '1900-01-01') AS birth_date -- CORRECT
+FROM patients
+GROUP BY patient_id, gender, birth_date
 \`\`\`
 `,
       incorrectExamples: `
-INCORRECT ORDER BY EXAMPLES FOR MYSQL ${dbVersion} (WILL CAUSE ERRORS):
+INCORRECT SYNTAX EXAMPLES FOR MYSQL ${dbVersion} (WILL CAUSE ERRORS):
 \`\`\`sql
 -- ERROR: Using column alias in ORDER BY (MySQL < 8.0)
 SELECT 
@@ -459,13 +475,38 @@ FROM customers
 JOIN orders ON customers.id = orders.customer_id
 GROUP BY customer_id
 ORDER BY total_orders DESC  -- ERROR! This field doesn't exist outside the JSON
+
+-- CRITICAL ERROR: CAST with VARCHAR length specifications (PostgreSQL-style)
+SELECT 
+    CAST(NULL AS VARCHAR(50)) AS patient_id,  -- ERROR! MySQL doesn't support VARCHAR(n) in CAST
+    CAST(NULL AS VARCHAR(10)) AS gender,      -- ERROR! This will cause syntax error
+    CAST(NULL AS DATE) AS birth_date          -- ERROR! Use NULL AS birth_date instead
+FROM patients;
+
+-- CRITICAL ERROR: Using PostgreSQL CAST syntax in MySQL
+SELECT 
+    patient_id,
+    CAST(NULL AS VARCHAR(255)) AS notes,     -- ERROR! Will fail in MySQL
+    CAST('2023-01-01' AS DATE) AS created    -- ERROR! Use '2023-01-01' AS created instead
+FROM patients
+GROUP BY patient_id;
 \`\`\`
 `,
       criticalRequirements: `
+CRITICAL MYSQL SYNTAX REQUIREMENTS:
 - REPEAT AGGREGATES IN ORDER BY: If using COUNT() or other aggregates in ORDER BY, repeat the entire expression
-- AVOID ALIAS REFERENCES: Don't use column aliases in ORDER BY (for MySQL < 8.0)
+- AVOID ALIAS REFERENCES: Don't use column aliases in ORDER BY (for MySQL < 8.0)  
 - USE POSITIONAL REFERENCES: Consider using position numbers in ORDER BY (e.g., ORDER BY 3 DESC)
 - TEST ORDER BY CLAUSES: Ensure ORDER BY references valid columns or expressions
+
+⚠️  CRITICAL CAST FUNCTION REQUIREMENTS FOR MYSQL:
+- NEVER use CAST(NULL AS VARCHAR(n)) or CAST(value AS VARCHAR(n)) - This causes syntax errors
+- NEVER use CAST(NULL AS CHAR(n)) with length specifications
+- INSTEAD use: NULL AS column_name for null placeholder columns
+- INSTEAD use: IFNULL(column, 'default') or COALESCE(column, 'default') for null handling
+- INSTEAD use: LEFT(string, n) or SUBSTRING(string, 1, n) for string truncation
+- MySQL CAST only supports basic types: CAST(value AS CHAR), CAST(value AS SIGNED), CAST(value AS DECIMAL)
+- When you need placeholder NULL columns, use: NULL AS column_name (no CAST needed)
 `,
       finalReminder: `
 FINAL MYSQL SYNTAX REMINDERS:
@@ -473,6 +514,14 @@ FINAL MYSQL SYNTAX REMINDERS:
 - When ordering by an aggregate expression, either repeat the full expression or use a position number
 - Never use column aliases in WHERE, HAVING, or GROUP BY clauses
 - Always include all non-aggregated columns from SELECT in the GROUP BY clause
+
+🚨 ABSOLUTELY CRITICAL FOR MYSQL ${dbVersion}:
+- NEVER EVER use CAST(NULL AS VARCHAR(n)) or CAST(value AS VARCHAR(n)) - This will cause immediate syntax errors
+- NEVER use PostgreSQL-style CAST syntax with length specifiers  
+- For NULL columns, use: NULL AS column_name (simple and works)
+- For string manipulation, use MySQL functions: LEFT(), RIGHT(), SUBSTRING(), CONCAT()
+- Test every CAST function call - MySQL CAST syntax is very limited compared to PostgreSQL
+- When in doubt about CAST, use IFNULL() or COALESCE() instead
 `,
     };
   } else if (lowerType === "postgresql") {
@@ -713,6 +762,23 @@ ${JSON.stringify(sampleResults, null, 2)}
 DATABASE TYPE: ${dbType.toUpperCase()}
 DATABASE VERSION: ${dbVersion}
 
+${dbType.toUpperCase() === 'MYSQL' ? `
+🚨 CRITICAL MYSQL CAST FUNCTION WARNING 🚨
+NEVER use CAST with length specifications in MySQL:
+❌ CAST(NULL AS VARCHAR(50)) - WILL CAUSE SYNTAX ERROR
+❌ CAST(NULL AS VARCHAR(10)) - WILL CAUSE SYNTAX ERROR  
+❌ CAST(value AS CHAR(100)) - WILL CAUSE SYNTAX ERROR
+✅ Use: NULL AS column_name (for null placeholder columns)
+✅ Use: IFNULL(column, 'default') or COALESCE(column, 'default') 
+✅ Use: LEFT(string, 50) or SUBSTRING(string, 1, 50) for string truncation
+
+MySQL CAST only supports basic types WITHOUT length:
+✅ CAST(value AS CHAR) - OK
+✅ CAST(value AS SIGNED) - OK  
+✅ CAST(value AS DECIMAL) - OK
+✅ CAST(value AS DATE) - OK
+` : ''}
+
 TOTAL RECORDS IN ORIGINAL RESULT: ${sqlResults.length}
 
 ${
@@ -806,6 +872,8 @@ Return only valid JSON without any markdown formatting, comments, or explanation
 `;
 }
 
+/*
+// COMMENTED OUT: Bar chart analysis function temporarily disabled
 export async function generateBarChartAnalysis(
   structuredQuery: string,
   userPrompt: string,
@@ -1040,6 +1108,7 @@ Return ONLY the JSON object, no additional text or formatting.`;
     };
   }
 }
+*/
 
 
 

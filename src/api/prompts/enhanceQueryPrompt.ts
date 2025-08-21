@@ -120,6 +120,152 @@ ${versionSpecificInstructions}
 
 **USER QUERY:** "${query}"
 
+**🚨 ABSOLUTE REQUIREMENT - MUST BE ENFORCED 🚨**
+**CRITICAL RULE: MEDIUM + HIGH RELEVANCE TABLES MUST BE JOINED**
+- When AI table analysis shows tables with "Relevance to query: **High**" AND "Relevance to query: **Medium**", you MUST JOIN ALL OF THEM
+- This is NOT optional - it is MANDATORY
+- Medium relevance tables contain essential supplementary data that completes the answer
+- Ignoring Medium relevance tables results in incomplete data and poor user experience
+- **NEVER choose just High relevance tables - ALWAYS include Medium relevance tables in your joins**
+- **RULE ENFORCEMENT: Before writing your SQL, verify you have included ALL High AND Medium relevance tables**
+
+**🚨 ABSOLUTE MUST-DO: SELECT CLAUSE FOR ALL JOINED TABLES 🚨**
+**CRITICAL SELECT REQUIREMENT FOR MULTIPLE TABLE JOINS:**
+- When you JOIN multiple tables (especially High + Medium relevance tables), you MUST include relevant information from ALL joined tables in the SELECT clause
+- This is MANDATORY - never join tables without selecting useful data from them
+- If you join a table for filtering/conditions, you MUST also include at least one meaningful column from that table in SELECT
+- **RULE: Every joined table MUST contribute data to the SELECT clause, not just to WHERE/JOIN conditions**
+- **ENFORCEMENT: Before finalizing your SQL, verify that EVERY table in your FROM/JOIN clauses has at least one column represented in the SELECT clause**
+
+**🚨 CRITICAL MATCHING RECORDS ONLY REQUIREMENT 🚨**
+**MANDATORY RULE: RETURN ONLY MATCHING RECORDS FROM JOINED TABLES**
+- **CRITICAL**: When joining multiple tables, the query MUST return ONLY records where there are ACTUAL MATCHES from ALL joined tables
+- **FORBIDDEN**: No NULL values or empty results from tables where nothing matches
+- **ENFORCEMENT**: Use INNER JOINs by default instead of LEFT JOINs to ensure only matching records are returned
+- **RULE**: If Table1 joins with Table2 and results only match from Table1 but NOT from Table2, return ONLY the matching records from Table1 with actual data from Table2
+- **PRINCIPLE**: Only return records where there is meaningful, non-NULL data from ALL joined tables
+- **EXAMPLE**: If joining patients with medications and only some patients have medications, return ONLY patients who HAVE medications (not patients with NULL medication data)
+- **AVOID LEFT JOINs**: Unless user specifically asks to see records with no matches, use INNER JOINs to get only actual matching data
+- **QUALITY CONTROL**: The result set should contain complete, meaningful data from all joined tables - no incomplete or NULL-heavy records
+
+**MATCHING RECORDS EXAMPLES:**
+✅ **CORRECT**: INNER JOIN medications ON patients.id = medications.patient_id (returns only patients who HAVE medications with actual medication data)
+❌ **WRONG**: LEFT JOIN medications ON patients.id = medications.patient_id (includes patients WITHOUT medications showing NULL values)
+
+✅ **CORRECT**: INNER JOIN appointments ON patients.id = appointments.patient_id (returns only patients who HAVE appointments with actual appointment data)  
+❌ **WRONG**: LEFT JOIN appointments ON patients.id = appointments.patient_id (includes patients WITHOUT appointments showing NULL appointment data)
+
+**CRITICAL PRINCIPLE**: The user wants to see meaningful relationships and actual data connections, not records padded with NULL values from tables where no matches exist.
+
+**🚨 CRITICAL OR CONDITION RULE FOR MULTI-TABLE QUERIES 🚨**
+**MANDATORY: APPLY USER QUERY CONDITIONS ACROSS ALL JOINED TABLES WITH OR OPERATOR**
+- **CRITICAL**: When joining multiple tables, analyze the user query to identify search conditions that could apply to similar columns in different tables
+- **RULE**: If the user query contains search criteria (names, values, keywords), apply those conditions to ALL relevant tables using OR operators
+- **PRINCIPLE**: Search across ALL joined tables where the user's criteria could match, not just the primary table
+- **ENFORCEMENT**: Combine conditions from multiple tables with OR to cast a wider search net and find matches in any of the joined tables
+
+**OR CONDITION EXAMPLES:**
+✅ **CORRECT**: User asks "find John" with patients and doctors joined:
+   WHERE patients.name LIKE '%John%' OR doctors.name LIKE '%John%'
+
+✅ **CORRECT**: User asks "show records for diabetes" with patients and conditions tables:
+   WHERE patients.diagnosis LIKE '%diabetes%' OR conditions.condition_name LIKE '%diabetes%'
+
+✅ **CORRECT**: User asks "find high risk" with risk_details and assessments tables:
+   WHERE risk_details.risk_category = 'High' OR assessments.risk_level = 'High'
+
+✅ **CORRECT**: User asks "medications containing aspirin" with medications and prescriptions:
+   WHERE medications.medication_name LIKE '%aspirin%' OR prescriptions.drug_name LIKE '%aspirin%'
+
+**OR CONDITION ANALYSIS PROCESS:**
+1. **IDENTIFY USER SEARCH CRITERIA**: Extract key search terms, values, or conditions from the user query
+2. **SCAN ALL JOINED TABLES**: Look for columns in ALL joined tables that could contain the search criteria
+3. **MAP CRITERIA TO COLUMNS**: Identify similar columns across tables (name fields, description fields, category fields, etc.)
+4. **COMBINE WITH OR**: Use OR operators to search across all relevant columns in all joined tables
+5. **VALIDATE LOGIC**: Ensure the OR conditions make logical sense and expand the search appropriately
+
+**🚨 CRITICAL HIGH/MEDIUM RELEVANCE TABLE OR CONDITION RULE 🚨**
+**MANDATORY: SPECIAL OR CONDITION LOGIC FOR HIGH/MEDIUM RELEVANCE TABLES**
+- **CRITICAL RULE**: When joining tables based on High or Medium relevance from table descriptions, check if the user's query condition column exists in multiple joined tables
+- **ANALYSIS REQUIREMENT**: For each user query condition (search terms, filters, criteria), scan ALL High and Medium relevance joined tables to see if similar columns exist
+- **OR ENFORCEMENT**: If the same type of column exists in multiple High/Medium relevance joined tables, add ALL table conditions in WHERE clause with OR (not AND)
+- **COLUMN MAPPING**: Map user search criteria to similar column names across all joined High/Medium relevance tables (e.g., name fields, status fields, category fields, description fields)
+- **COMPREHENSIVE SEARCH**: Ensure search criteria are applied across ALL relevant columns in ALL High/Medium relevance tables using OR operators
+
+**HIGH/MEDIUM RELEVANCE OR CONDITION EXAMPLES:**
+✅ **CORRECT**: User asks "find diabetes records" with patients (High) and medical_history (Medium) tables joined:
+   WHERE patients.diagnosis LIKE '%diabetes%' OR medical_history.condition_name LIKE '%diabetes%' OR medical_history.notes LIKE '%diabetes%'
+
+✅ **CORRECT**: User asks "show John's records" with patients (High) and doctors (Medium) tables joined:
+   WHERE patients.patient_name LIKE '%John%' OR patients.first_name LIKE '%John%' OR doctors.doctor_name LIKE '%John%'
+
+✅ **CORRECT**: User asks "high priority cases" with cases (High) and priorities (Medium) tables joined:
+   WHERE cases.priority = 'High' OR priorities.priority_level = 'High' OR priorities.urgency = 'High'
+
+**HIGH/MEDIUM RELEVANCE ANALYSIS STEPS:**
+1. **IDENTIFY JOINED TABLES**: List all tables marked as High or Medium relevance that are being joined
+2. **EXTRACT USER CRITERIA**: Identify the search conditions, filters, or criteria from the user query
+3. **COLUMN SCAN**: For each High/Medium relevance table, scan ALL columns to find potential matches for user criteria
+4. **CROSS-TABLE MAPPING**: Map similar column types across all High/Medium relevance tables (names, statuses, categories, descriptions, etc.)
+5. **OR CONDITION CONSTRUCTION**: Build WHERE clause with OR operators connecting similar conditions across ALL relevant tables
+6. **VALIDATION**: Ensure the OR logic captures the user's intent across all relevant High/Medium tables
+
+**MANDATORY OR CONDITION RULE**: When user provides search criteria that could match data in multiple joined tables, ALWAYS use OR conditions to search across ALL relevant tables - never limit the search to just one table.
+
+**🚨 CRITICAL UNION ALL STRATEGY FOR MULTI-TABLE QUERIES 🚨**
+**MANDATORY: USE UNION ALL FOR SEPARATED RESULT SETS FROM MULTIPLE TABLES**
+- **CRITICAL RULE**: When joining multiple tables, use UNION ALL to create separate result sets for matches from each table instead of traditional JOINs
+- **PRINCIPLE**: This allows for better organization and clearer separation of results from different tables
+- **STRUCTURE**: Create separate SELECT statements for each table, using UNION ALL to combine them
+- **NULL PLACEHOLDERS**: Use NULL AS column_name for columns that don't exist in each specific table to maintain consistent column structure
+- **EXACT COLUMN COUNT**: Ensure ALL SELECT statements in UNION ALL have the EXACT same number of columns in the EXACT same order
+
+**UNION ALL STRATEGY EXAMPLES:**
+
+✅ **CORRECT PATTERN**: User asks "find records with category X" across table1 and table2:
+
+-- Case 1: Match in table1
+SELECT 
+    table1.id,
+    table1.name,
+    table1.category,
+    table1.status,
+    NULL AS table2_description,
+    NULL AS table2_type,
+    'table1' AS source_table
+FROM table1
+WHERE table1.category = 'X'
+
+UNION ALL
+
+-- Case 2: Match in table2  
+SELECT 
+    table2.id,
+    table2.title AS name,
+    table2.classification AS category,
+    NULL AS status,
+    table2.description AS table2_description,
+    table2.type AS table2_type,
+    'table2' AS source_table
+FROM table2
+WHERE table2.classification = 'X';
+
+**UNION ALL CONSTRUCTION RULES:**
+1. **SEPARATE SELECT STATEMENTS**: Create individual SELECT statements for each table
+2. **CONSISTENT COLUMN COUNT**: All SELECT statements must have identical number of columns
+3. **CONSISTENT COLUMN ORDER**: All columns must appear in the same order across all SELECT statements
+4. **NULL PLACEHOLDERS**: Use CAST(NULL AS data_type) AS column_name for missing columns
+5. **SOURCE IDENTIFICATION**: Add a source_table column to identify which table each record came from
+6. **COLUMN ALIASES**: Use aliases to standardize column names across different tables
+7. **SAME DATA TYPES**: Ensure corresponding columns have compatible data types across all SELECT statements
+
+**UNION ALL BENEFITS:**
+- **CLEAR SEPARATION**: Results from each table are clearly identified
+- **BETTER ORGANIZATION**: Different types of matches are separated into logical groups
+- **FLEXIBLE STRUCTURE**: Each table can contribute its unique columns without forcing unnecessary JOINs
+- **PERFORMANCE**: Can be more efficient than complex JOIN operations
+- **MAINTAINABILITY**: Easier to understand and modify individual table queries
+
 **VERSION-AWARE STEP-BY-STEP PROCESS:**
 
 **STEP 1: DISCOVER TABLES**
@@ -216,18 +362,47 @@ ${
 
 **ABSOLUTE PROHIBITION: NEVER USE ASTERISK (*) IN SELECT CLAUSES**
 
+**🚨 MANDATORY MULTI-TABLE JOIN SELECT RULES 🚨**
+**CRITICAL: When joining multiple tables (High + Medium relevance), you MUST include relevant information from ALL joined tables in the SELECT clause. This is non-negotiable.**
+
+**🚨 CRITICAL MATCHING RECORDS ONLY ENFORCEMENT 🚨**
+**MANDATORY: RETURN ONLY ACTUAL MATCHING RECORDS**
+- **ABSOLUTE RULE**: When joining multiple tables, return ONLY records where there are ACTUAL MATCHES from ALL joined tables
+- **USE INNER JOINS**: Use INNER JOINs by default to ensure only matching records are returned - avoid LEFT JOINs unless specifically requested
+- **NO NULL PADDING**: Do NOT return records with NULL values from tables where no matches exist
+- **QUALITY ASSURANCE**: Every returned record should have meaningful, non-NULL data from ALL joined tables
+- **EXAMPLE**: If joining patients with medications, return ONLY patients who HAVE medications with actual medication data
+- **FORBIDDEN**: Including patients WITHOUT medications showing NULL medication values
+
+**🚨 CRITICAL OR CONDITION ENFORCEMENT FOR MULTI-TABLE SEARCHES 🚨**
+**MANDATORY: APPLY USER SEARCH CRITERIA ACROSS ALL JOINED TABLES**
+- **CRITICAL RULE**: When joining multiple tables, analyze user query for search conditions that could apply to similar columns in different joined tables
+- **USE OR OPERATORS**: Combine search conditions across tables with OR to search comprehensively across all joined tables
+- **SEARCH STRATEGY**: If user asks for "John", search ALL name-related columns: WHERE patients.name LIKE '%John%' OR doctors.name LIKE '%John%'
+- **CONDITION MAPPING**: Map user search terms to similar columns across ALL joined tables (names, descriptions, categories, statuses, etc.)
+- **COMPREHENSIVE SEARCH**: Never limit search conditions to just one table - extend search criteria to ALL relevant joined tables using OR operators
+
+**🚨 CRITICAL UNION ALL STRATEGY ENFORCEMENT 🚨**
+**MANDATORY: USE UNION ALL FOR MULTI-TABLE RESULT ORGANIZATION**
+- **CRITICAL RULE**: When querying multiple tables, use UNION ALL to create separate result sets for each table instead of traditional JOINs
+- **STRUCTURE REQUIREMENT**: Create individual SELECT statements for each table and combine with UNION ALL
+- **COLUMN CONSISTENCY**: All SELECT statements must have identical number of columns in the same order
+- **NULL PLACEHOLDERS**: Use CAST(NULL AS data_type) AS column_name for columns that don't exist in specific tables
+- **SOURCE IDENTIFICATION**: Add a 'source_table' column to identify which table each record originated from
+- **SEPARATION BENEFIT**: This provides clearer organization and separation of results from different tables
+
 **MANDATORY SELECT CLAUSE RULES:**
 1. **EXPLICITLY LIST ALL COLUMN NAMES** - Never use table.* or * in any SELECT statement
-2. **BE SELECTIVE AND QUERY-FOCUSED** - Only include columns that are:
+2. **🚨 INCLUDE DATA FROM ALL JOINED TABLES 🚨** - When you JOIN multiple tables, you MUST include relevant columns from ALL joined tables in the SELECT clause
+3. **JUSTIFY EVERY JOIN WITH SELECT COLUMNS** - If you join a table, you MUST select meaningful data from that table - no orphaned joins allowed
+4. **BE SELECTIVE AND QUERY-FOCUSED** - Only include columns that are:
    - Directly mentioned in the user query
    - Used in WHERE, HAVING, JOIN conditions (to show filtering criteria)
-   - Essential for understanding the query results
+   - Essential for understanding the query results from ALL joined tables
    - Provide context for WHY records were selected
-3. **INCLUDE CONDITION COLUMNS** - Add any column referenced in WHERE, HAVING, JOIN conditions to SELECT
-4. **INCLUDE CONTEXT COLUMNS** - Add minimal relevant columns that explain the business logic
-5. **EXCLUDE ID COLUMNS** - Do NOT include any columns with names ending in '_id', 'id', or primary key columns unless specifically requested
-6. **EXCLUDE UNNECESSARY COLUMNS** - Do NOT include all columns from primary table - be selective based on query intent
-7. **CRITICAL: NO DEPENDENT TABLE COLUMNS UNLESS EXPLICITLY REQUESTED** - Do NOT include ANY columns from joined/dependent tables UNLESS they are:
+5. **INCLUDE CONDITION COLUMNS** - Add any column referenced in WHERE, HAVING, JOIN conditions to SELECT
+6. **INCLUDE CONTEXT COLUMNS FROM ALL TABLES** - Add minimal relevant columns from EACH joined table that explain the business logic
+7. **EXCLUDE UNNECESSARY ID COLUMNS** - Do NOT include columns ending in '_id', 'id', or primary key columns unless specifically requested
    - Explicitly mentioned by name in the user query
    - Used in WHERE/HAVING conditions (filtering criteria only)
    - Absolutely essential to understand the primary entity's data
@@ -633,8 +808,13 @@ Example 4: "Show patients with moderate risk categories and their therapeutic cl
 ✅ SELECT clause focused and answers the user's specific question
 ✅ No unnecessary columns that don't contribute to query intent
 ✅ **CONDITION-BASED TABLE SELECTION: Primary table chosen based on WHERE clause columns**
+✅ **🚨 HIGH/MEDIUM RELEVANCE OR CONDITION CHECK: If joining High/Medium relevance tables and user query column exists in multiple tables, used OR conditions (not AND) in WHERE clause**
 ✅ **MULTIPLE TABLE RULE: If tables have similar meaning, chose the one with condition columns**
 ✅ **SCHEMA INTELLIGENCE: All references validated against actual database schema**
+✅ **🚨 MATCHING RECORDS ONLY: Using INNER JOINs to return only records with actual matches from ALL joined tables**
+✅ **🚨 NO NULL RESULTS: Query returns only matching records, no NULL values from unmatched table joins**
+✅ **🚨 OR CONDITIONS: User search criteria applied across ALL joined tables using OR operators for comprehensive search**
+✅ **🚨 UNION ALL STRUCTURE: Using UNION ALL to create separated result sets from multiple tables with consistent column structures**
 ${
   databaseType?.toLowerCase() === "mysql" &&
   databaseVersionInfo &&
@@ -770,12 +950,16 @@ ${versionSpecificInstructions}
 **STEP 2.3: JOIN MULTIPLE RELATED TABLES WHEN NEEDED**
 - When the user query requires data from multiple related tables, DON'T choose just one table - JOIN all relevant tables
 - Look for foreign key relationships (columns ending in _id) to identify how tables connect
-- **CRITICAL: Use AI table descriptions to guide JOIN decisions**
-  - **JOIN ALL tables marked with "Relevance to query: High" in the AI analysis**
-  - When multiple tables have "High" relevance, they should be JOINed together to provide complete information
+- **🚨🚨🚨 CRITICAL: Use AI table descriptions to guide JOIN decisions 🚨🚨🚨**
+  - **🚨 MANDATORY RULE: JOIN ALL tables marked with "Relevance to query: High" and "Relevance to query: Medium" in the AI analysis**
+  - **🚨 ZERO TOLERANCE: DO NOT IGNORE MEDIUM RELEVANCE TABLES** - They often contain crucial supplementary data
+  - **🚨 ENFORCEMENT: When multiple tables have "High" and "Medium" relevance, they MUST ALL be JOINed together to provide complete information**
+  - **🚨 COMPLIANCE CHECK: Before writing SQL, verify ALL High AND Medium relevance tables are included**
   - Review the AI-generated table descriptions to understand which tables contain complementary data for the query
 - Use sample data to identify foreign key connections and table relationships
 - Always include necessary JOIN conditions to get complete information for the user's query
+- **🚨 CRITICAL REMINDER: Medium relevance tables are REQUIRED, not optional - they provide essential context and completeness**
+- **🚨 FINAL VERIFICATION: Double-check that your SQL includes EVERY High AND Medium relevance table identified by AI analysis**
 
 # CRITICAL JOIN CONDITION RULES - MANDATORY COMPLIANCE
 
@@ -802,6 +986,14 @@ ${versionSpecificInstructions}
 
 ## FILTERING:
 **Any additional filtering should be done in WHERE clause, NOT in JOIN conditions**
+
+## 🚨 MANDATORY MATCHING RECORDS RULE:
+**ONLY return records where there are ACTUAL MATCHES from ALL joined tables**
+- Use INNER JOINs by default to ensure only matching records are returned
+- NO NULL values or empty results from tables where nothing matches
+- If Table 1 joins with Table 2 and results only match from Table 1, return ONLY matching records from Table 1
+- Example: If joining patients with medications and only some patients have medications, return ONLY patients who HAVE medications (not patients with NULL medication data)
+- **CRITICAL: Avoid LEFT JOINs unless user specifically wants to see records with no matches**
 
 **STEP 3: GENERATE VERSION-COMPATIBLE SQL**
 - Create a SQL query compatible with ${databaseType.toUpperCase()} ${databaseVersionString}
@@ -1177,8 +1369,10 @@ CRITICAL CONSISTENCY RULES:
 - **ABSOLUTE RULE: Be selective - don't include all available columns, focus on what answers the user's question**
 - **ABSOLUTE RULE: NEVER use SQL features not supported by ${databaseType.toUpperCase()} ${databaseVersionString}**
 - **ABSOLUTE RULE: Strictly adhere to the version-specific GROUP BY rules**
-- **🚨 ABSOLUTE RULE: JOIN ALL tables marked with "Relevance to query: High" in AI analysis - DO NOT choose just one table when multiple have High relevance**
-- **🚨 ABSOLUTE RULE: Use AI table descriptions to identify which tables should be JOINed together for complete answers**
+- **🚨🚨🚨 ABSOLUTE RULE #1 PRIORITY: JOIN ALL tables marked with "Relevance to query: High" and "Relevance to query: Medium" in AI analysis 🚨🚨🚨**
+- **🚨🚨🚨 ABSOLUTE RULE: DO NOT choose just one table when multiple have High relevance and Medium relevance - JOIN ALL OF THEM 🚨🚨🚨**
+- **🚨🚨🚨 MEDIUM RELEVANCE IS REQUIRED: Tables marked with "Medium" relevance are NOT optional - they MUST be included in the query 🚨🚨🚨**
+- **🚨🚨🚨 ABSOLUTE RULE: Use AI table descriptions to identify which tables MUST be JOINed together for complete answers 🚨🚨🚨**
 - NEVER skip any of the 6 steps above
 - ALWAYS document your findings at each step
 - ALWAYS include ALL conditions from the user query
@@ -1246,9 +1440,16 @@ Example 4: "Show recent lab tests from last 30 days"
 ✅ No unnecessary columns that don't contribute to query intent
 ✅ **CONDITION-BASED TABLE SELECTION: Primary table chosen based on WHERE clause columns**
 ✅ **MULTIPLE TABLE RULE: If tables have similar meaning, chose the one with condition columns**
-✅ **🚨 CRITICAL JOIN REQUIREMENT: JOIN ALL tables marked with "Relevance to query: High" in AI analysis**
+✅ **🚨🚨🚨 CRITICAL JOIN REQUIREMENT #1 PRIORITY: JOIN ALL tables marked with "Relevance to query: High" and "Relevance to query: Medium" in AI analysis 🚨🚨🚨**
+✅ **🚨🚨🚨 MEDIUM RELEVANCE MANDATORY: Tables with "Medium" relevance are REQUIRED and MUST be JOINed - they are NOT optional 🚨🚨🚨**
+✅ **🚨🚨🚨 ENFORCEMENT CHECK: Verify ALL High AND Medium relevance tables are included before writing SQL 🚨🚨🚨**
 ✅ **🚨 JOIN CONDITIONS: Use ONLY primary/foreign key relationships - NEVER add non-key column matching (e.g., avoid AND table1.name = table2.name)**
-✅ **AI-GUIDED JOINS: Use AI table descriptions to identify complementary High-relevance tables for JOINs**
+✅ **🚨 MATCHING RECORDS ONLY: Using INNER JOINs to return only records with actual matches from ALL joined tables**
+✅ **🚨 NO NULL RESULTS: Query returns only matching records, no NULL values from unmatched table joins**
+✅ **🚨 OR CONDITIONS: User search criteria applied across ALL joined tables using OR operators for comprehensive search**
+✅ **🚨 HIGH/MEDIUM RELEVANCE OR RULE: If joining High/Medium relevance tables and user query column exists in multiple joined tables, used OR conditions (not AND) in WHERE clause for comprehensive search**
+✅ **🚨 UNION ALL STRUCTURE: Using UNION ALL to create separated result sets from multiple tables with consistent column structures**
+✅ **AI-GUIDED JOINS: Use AI table descriptions to identify complementary High-relevance and Medium-relevance tables for JOINs**
 ✅ **SCHEMA INTELLIGENCE: All references validated against actual database schema**
 ${databaseType.toLowerCase() === 'mysql' && databaseVersionInfo && databaseVersionInfo.hasOnlyFullGroupBy ? `
 ✅ **GROUP BY COMPLIANCE: All non-aggregated columns in SELECT are included in GROUP BY**
@@ -1280,6 +1481,25 @@ Remember: You are an EXPERT SQL Agent with INTELLIGENT SCHEMA EXPLORATION capabi
 **CRITICAL VERSION-SPECIFIC PRINCIPLE: Always validate that every SQL feature, function, and pattern you use is fully supported by ${databaseType.toUpperCase()} ${databaseVersionString}. When in doubt about a feature's compatibility, use simpler alternative syntax that is guaranteed to work.**
 
 **CRITICAL TABLE SELECTION PRINCIPLE: When multiple tables seem similar, ALWAYS choose the table that contains the columns needed for your WHERE/HAVING conditions. This avoids unnecessary complex joins and focuses on the data that directly satisfies the user's criteria.**
+
+**🚨 FINAL COMPLIANCE VERIFICATION 🚨**
+Before writing your SQL query, MUST perform this verification:
+
+**TABLE JOIN VERIFICATION:**
+1. ✅ Did I identify ALL tables with "Relevance to query: High"?
+2. ✅ Did I identify ALL tables with "Relevance to query: Medium"?
+3. ✅ Did I include EVERY High AND Medium relevance table in my JOINs?
+4. ✅ Did I verify proper JOIN conditions between High and Medium relevance tables?
+5. ✅ Am I providing COMPLETE data by including ALL relevant tables?
+
+**SELECT CLAUSE VERIFICATION:**
+6. ✅ Did I include relevant columns from ALL joined tables in my SELECT clause?
+7. ✅ Does every table I joined contribute at least one meaningful column to SELECT?
+8. ✅ Am I avoiding orphaned joins (tables joined but no columns selected from them)?
+9. ✅ Did I verify that my SELECT clause provides useful information from ALL joined tables?
+10. ✅ Am I maximizing the value of each join by including relevant data from each table?
+
+**🚨 RULE ENFORCEMENT: If you cannot answer YES to all 10 verification questions, REVISE your query to include relevant information from ALL joined tables in the SELECT clause.**
 
 USER QUERY: ${query}
 `;
