@@ -43,12 +43,18 @@ class DatabaseService {
             throw new Error('DATABASE_URL environment variable is not set');
         }
 
+        // this.pgPool = new Pool({
+        //     connectionString: process.env.DATABASE_URL, // your connection string here
+        //     max: 20,
+        //     idleTimeoutMillis: 30000,
+        //     connectionTimeoutMillis: 60000,
+        //     ssl: { rejectUnauthorized: false }
+        // });
         this.pgPool = new Pool({
-            connectionString: process.env.DATABASE_URL, // your connection string here
+            connectionString: process.env.DATABASE_URL,
             max: 20,
             idleTimeoutMillis: 30000,
-            connectionTimeoutMillis: 60000,
-            ssl: { rejectUnauthorized: false }
+            connectionTimeoutMillis: 2000,
         });
 
         this.encryptionKey = process.env.ENCRYPTION_KEY || 'vi0BJFHWT8yTlwokRILzAcwyp9gXBE0q';
