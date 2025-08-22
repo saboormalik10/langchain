@@ -16,7 +16,7 @@ import {
     generateComprehensiveDatabaseAnalystPrompt,
 } from "../prompts/enhanceQueryPrompt";
 import { testOrganizationDatabaseConnection } from "../services/connectionTestService";
-import { initializeLangChainAndConversation, conversationSessions } from "../services/conversationService";
+import { initializeLangChainAndConversation, conversationSessions, saveConversationToMemory } from "../services/conversationService";
 import { detectDatabaseVersion } from "../services/databaseVersionService";
 import { executeChainLogic } from "../services/chainExecutionService";
 import { processChainSql } from "../services/chainSqlProcessingService";
@@ -32,6 +32,49 @@ import { handleSqlRestructuringAndAnalysis } from "../services/sqlRestructuringS
 import { RetryAndErrorHandlingService } from "../services/retryAndErrorHandlingService";
 import { PromptAnalysisService } from "../services/promptAnalysisService";
 
+// Simple in-memory conversation history storage
+interface ConversationHistory {
+    sessionId: string;
+    queries: string[];
+    timestamp: Date;
+}
+
+// Store conversation history by sessionId
+const simpleConversationHistory = new Map<string, ConversationHistory>();
+
+/**
+ * Add user query to conversation history
+ * @param sessionId Session identifier
+ * @param query User query to store
+ */
+function addQueryToHistory(sessionId: string, query: string): void {
+    let history = simpleConversationHistory.get(sessionId);
+    
+    if (!history) {
+        history = {
+            sessionId,
+            queries: [],
+            timestamp: new Date()
+        };
+    }
+    
+    history.queries.push(query);
+    history.timestamp = new Date();
+    simpleConversationHistory.set(sessionId, history);
+    
+    console.log(`📝 Added query to history for session ${sessionId}: "${query}"`);
+    console.log(`📊 Total queries in history: ${history.queries.length}`);
+}
+
+/**
+ * Get conversation history for a session
+ * @param sessionId Session identifier
+ * @returns Array of previous queries
+ */
+function getQueryHistory(sessionId: string): string[] {
+    const history = simpleConversationHistory.get(sessionId);
+    return history ? history.queries : [];
+}
 
 /**
  * Type definition for data items with sheet_type
@@ -833,7 +876,66 @@ async function generateRestructuredSQL(
         const restructuringPrompt = `
 🎯 CRITICAL DATABASE-SPECIFIC SQL GENERATION TASK 🎯
 
+🚨🚨🚨 EMERGENCY STOP - READ THIS FIRST OR YOUR QUERY WILL FAIL 🚨🚨🚨
+🛑 THE #1 CAUSE OF "syntax error at or near UNION" IS IMPROPER LIMIT PLACEMENT
+🛑 EXAMPLE OF WHAT NOT TO DO (THIS BREAKS):
+   ❌ FROM patients p LIMIT 1 UNION ALL SELECT ...
+   ❌ FROM table ORDER BY col UNION ALL SELECT ...
+
+✅ ONLY THESE PATTERNS WORK:
+   ✅ FROM patients p UNION ALL SELECT ... LIMIT 1  (LIMIT at very end)
+   ✅ SELECT * FROM (SELECT ... FROM patients p LIMIT 1) AS sub1 UNION ALL SELECT ... (wrapped in parentheses)
+
+🚨 IF YOU WRITE "LIMIT" OR "ORDER BY" BEFORE "UNION", THE QUERY FAILS 🚨
+🚨 CHECK YOUR OUTPUT BEFORE RESPONDING - NO EXCEPTIONS! 🚨
+
 You are an expert SQL developer with DEEP knowledge of ${dbType.toUpperCase()} ${dbVersion} syntax and capabilities.
+
+🚨 CRITICAL TABLE CONSTRAINT REQUIREMENT 🚨
+${(() => {
+    // Extract tables from original SQL to enforce constraints
+    const extractTablesFromSQL = (sql: string): string[] => {
+        const tables: Set<string> = new Set();
+        
+        // Remove comments and normalize whitespace
+        const cleanSQL = sql.replace(/--.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, ' ');
+        
+        // Match FROM clauses
+        const fromMatches = cleanSQL.match(/\bFROM\s+([^\s,;]+(?:\s+[^\s,;]+)*)/gi);
+        if (fromMatches) {
+            fromMatches.forEach(match => {
+                const tablePart = match.replace(/\bFROM\s+/i, '').trim();
+                const tableMatch = tablePart.match(/^([^\s]+)/);
+                if (tableMatch) {
+                    tables.add(tableMatch[1].toLowerCase());
+                }
+            });
+        }
+        
+        // Match JOIN clauses
+        const joinMatches = cleanSQL.match(/\b(?:INNER\s+|LEFT\s+|RIGHT\s+|FULL\s+|CROSS\s+)?JOIN\s+([^\s,;]+)/gi);
+        if (joinMatches) {
+            joinMatches.forEach(match => {
+                const tablePart = match.replace(/\b(?:INNER\s+|LEFT\s+|RIGHT\s+|FULL\s+|CROSS\s+)?JOIN\s+/i, '').trim();
+                const tableMatch = tablePart.match(/^([^\s]+)/);
+                if (tableMatch) {
+                    tables.add(tableMatch[1].toLowerCase());
+                }
+            });
+        }
+        
+        return Array.from(tables);
+    };
+
+    const originalTables = extractTablesFromSQL(originalSQL);
+    const originalTablesStr = originalTables.length > 0 ? originalTables.join(', ') : 'No tables detected';
+    
+    return `MANDATORY RESTRICTION: You MUST ONLY use tables that were present in the original SQL query.
+DO NOT introduce ANY new tables or additional tables not found in the original query.
+
+ORIGINAL QUERY TABLES DETECTED: ${originalTablesStr}
+⚠️  You are STRICTLY LIMITED to using ONLY these tables: ${originalTablesStr}`;
+})()}
 
 ⚠️ MANDATORY DEEP THINKING REQUIREMENT ⚠️
 Before generating ANY SQL, you MUST:
@@ -847,6 +949,18 @@ Before generating ANY SQL, you MUST:
 🚨 ZERO TOLERANCE FOR SYNTAX ERRORS 🚨
 Your generated SQL will be executed directly against a ${dbType.toUpperCase()} ${dbVersion} database.
 ANY syntax error will cause system failure. THINK DEEPLY and VALIDATE THOROUGHLY.
+
+🚨🚨🚨 CRITICAL UNION SYNTAX WARNING - READ THIS FIRST 🚨🚨🚨
+❌ THE #1 ERROR THAT BREAKS QUERIES: LIMIT/ORDER BY IN MIDDLE OF UNION
+❌ NEVER WRITE: "FROM table LIMIT 1 UNION ALL" - THIS CAUSES "syntax error at or near UNION"
+❌ NEVER WRITE: "FROM table ORDER BY col UNION ALL" - THIS CAUSES SYNTAX ERRORS
+❌ REAL FAILING EXAMPLE: "FROM patients p INNER JOIN clinical_history ch ON p.patient_id = ch.patient_id LIMIT 1 UNION ALL" ← THIS BREAKS!
+
+✅ ONLY VALID UNION PATTERNS:
+✅ Pattern 1: "FROM table1 UNION ALL FROM table2 LIMIT 1" (LIMIT at very end)
+✅ Pattern 2: "SELECT * FROM (SELECT ... FROM table1 LIMIT 1) AS sub1 UNION ALL SELECT * FROM (SELECT ... FROM table2 LIMIT 1) AS sub2" (derived tables)
+
+🚨 IF YOU USE UNION ALL, YOU MUST FOLLOW THESE RULES OR THE QUERY WILL FAIL 🚨
 
 USER PROMPT: "${userPrompt}"
 
@@ -942,6 +1056,29 @@ Before finalizing your SQL query, you MUST complete this validation checklist:
 □ All aggregate functions are properly used
 □ All parentheses, commas, and quotes are correctly placed
 
+✅ 🚨 CRITICAL UNION SYNTAX VALIDATION (PREVENTS "syntax error at or near UNION"):
+□ I verified NO LIMIT clauses appear between SELECT and UNION keywords
+□ I verified NO ORDER BY clauses appear in individual SELECT statements
+□ If I used LIMIT, I placed it ONLY at the very end OR wrapped SELECT statements in parentheses
+□ If I used ORDER BY, I placed it ONLY at the very end of the entire UNION query
+□ I double-checked that my UNION query follows valid syntax patterns
+
+✅ 🚨 CRITICAL LIMIT WITH UNION HANDLING:
+**WRONG (CAUSES SYNTAX ERROR):**
+SELECT col FROM table1 LIMIT 1 UNION ALL SELECT col FROM table2 LIMIT 1
+
+**CORRECT METHOD 1 (Wrap subqueries with LIMIT in derived tables):**
+SELECT * FROM (SELECT col FROM table1 LIMIT 1) AS sub1 
+UNION ALL 
+SELECT * FROM (SELECT col FROM table2 LIMIT 1) AS sub2
+
+**CORRECT METHOD 2 (LIMIT at end only):**
+SELECT col FROM table1 UNION ALL SELECT col FROM table2 LIMIT 10
+
+□ I wrapped each subquery that needs LIMIT inside a derived table (SELECT * FROM (SELECT ... LIMIT n) AS sub)
+□ I used proper alias names for each derived table (AS sub1, AS sub2, etc.)
+□ I verified NO direct LIMIT appears between SELECT and UNION keywords
+
 ✅ COLUMN VALIDATION:
 □ Every column I referenced exists in the original SQL or sample data
 □ I did not invent any column names like 'count', 'total', 'summary_id'
@@ -980,6 +1117,7 @@ Read through your entire SQL query one more time and ask:
 TASK: Generate a new SQL query that produces structured, non-redundant results directly from the database with ALL columns from ALL tables represented.
 
 RESTRUCTURING REQUIREMENTS:
+0. **🚨 MANDATORY TABLE CONSTRAINT 🚨**: Use ONLY the tables from the original query detected above. DO NOT add any new tables not present in the original SQL. DO NOT use tables beyond those detected in the original query. STRICTLY limit your restructured query to the original table set.
 1. **🚨 MANDATORY UNION ALL WITH ALL COLUMNS 🚨**: Use UNION ALL structure to include ALL columns from ALL tables involved in the query. Each SELECT statement must include every column from every table, using CAST(NULL AS data_type) for missing columns.
 2. **ELIMINATE REDUNDANCY**: Use GROUP BY to group related entities (e.g., patients, medications, lab tests)
 3. **CREATE JSON HIERARCHY**: Use ${jsonFunctions.createObject} and ${jsonFunctions.createArray} functions to create nested structures
@@ -1093,13 +1231,17 @@ Return a JSON object with this EXACT structure:
     "columns_validated": true/false,  
     "group_by_compliant": true/false,
     "json_functions_correct": true/false,
-    "union_structure_valid": true/false
+    "union_structure_valid": true/false,
+    "union_data_types_consistent": true/false,
+    "union_syntax_correct": true/false
   },
   "sql_quality_assurance": {
     "will_execute_successfully": true/false,
     "no_syntax_errors": true/false,
     "all_columns_exist": true/false,
-    "database_specific_syntax": true/false
+    "database_specific_syntax": true/false,
+    "union_type_compatibility": true/false,
+    "union_limit_order_placement": true/false
   }
 }
 
@@ -1222,7 +1364,7 @@ This produces a single result set that can be separated by sheet_type into the r
 - FOLLOW EXACT VERSION CONSTRAINTS: Only use functions available in ${dbType.toUpperCase()} ${dbVersion}
 
 ## CRITICAL UNION ALL REQUIREMENTS - MANDATORY FOR MULTI-SHEET FORMAT
-**UNION COLUMN MATCHING (PREVENTS "each UNION query must have the same number of columns" ERROR):**
+**UNION COLUMN MATCHING (PREVENTS "UNION types cannot be matched" ERROR):**
 - **EXACT COLUMN COUNT**: Every SELECT statement in UNION ALL must have the EXACT SAME number of columns
 - **EXACT COLUMN ORDER**: All columns must appear in the EXACT SAME order in every SELECT statement
 - **CONSISTENT DATA TYPES**: Use CAST() or CONVERT() functions to ensure matching data types for each column position
@@ -1231,33 +1373,141 @@ This produces a single result set that can be separated by sheet_type into the r
 - **NO MISSING COLUMNS**: Never omit columns in any SELECT statement - use NULL placeholders instead
 - **DATA TYPE CASTING**: Always cast NULL values to the appropriate data type (VARCHAR, INTEGER, DATE, etc.) to match other UNION statements
 
+🚨 **CRITICAL DATA TYPE COMPATIBILITY FOR UNION ALL** 🚨
+**MANDATORY TYPE CASTING RULES:**
+- **STRING COLUMNS**: Use CAST(NULL AS VARCHAR(255)) or CAST(value AS VARCHAR(255)) for text data
+- **INTEGER COLUMNS**: Use CAST(NULL AS INTEGER) or CAST(value AS INTEGER) for numeric data  
+- **DATE COLUMNS**: Use CAST(NULL AS DATE) or CAST(value AS DATE) for date data
+- **DATETIME COLUMNS**: Use CAST(NULL AS TIMESTAMP) or CAST(value AS TIMESTAMP) for datetime data
+- **DECIMAL COLUMNS**: Use CAST(NULL AS DECIMAL(10,2)) or CAST(value AS DECIMAL(10,2)) for decimal data
+- **BOOLEAN COLUMNS**: Use CAST(NULL AS BOOLEAN) or CAST(value AS BOOLEAN) for boolean data
+
+**COMMON TYPE MISMATCH ERRORS TO AVOID:**
+❌ "UNION types character varying and date cannot be matched" - Mix of string and date without casting
+❌ "UNION types integer and character varying cannot be matched" - Mix of number and string without casting
+❌ "UNION types timestamp and character varying cannot be matched" - Mix of datetime and string without casting
+
+**CORRECT TYPE CASTING EXAMPLES:**
+✅ CAST(patient_id AS VARCHAR(255)) - Convert ID to string
+✅ CAST(NULL AS DATE) - Null placeholder for date column
+✅ CAST(appointment_date AS VARCHAR(255)) - Convert date to string for consistent type
+✅ CAST(age AS VARCHAR(255)) - Convert number to string for consistent type
+
+**UNIVERSAL TYPE CASTING STRATEGY:**
+When in doubt, cast ALL columns to VARCHAR(255) to ensure compatibility:
+- CAST(column_name AS VARCHAR(255)) for existing columns
+- CAST(NULL AS VARCHAR(255)) for missing columns
+- This prevents ALL type mismatch errors in UNION operations
+
 **EXAMPLE OF CORRECT UNION COLUMN MATCHING:**
 \`\`\`
-SELECT 'metadata' as sheet_type, 'patients' as entity, COUNT(*) as count, CAST(NULL as VARCHAR(50)) as patient_id, CAST(NULL as VARCHAR(100)) as name
+SELECT 
+  'metadata' as sheet_type, 
+  'patients' as entity, 
+  CAST(COUNT(*) AS VARCHAR(255)) as count, 
+  CAST(NULL AS VARCHAR(255)) as patient_id, 
+  CAST(NULL AS VARCHAR(255)) as name,
+  CAST(NULL AS VARCHAR(255)) as appointment_date
 UNION ALL
-SELECT 'patient' as sheet_type, CAST(NULL as VARCHAR(50)) as entity, CAST(NULL as INTEGER) as count, patient_id, patient_name as name
+SELECT 
+  'patient' as sheet_type, 
+  CAST(NULL AS VARCHAR(255)) as entity, 
+  CAST(NULL AS VARCHAR(255)) as count, 
+  CAST(patient_id AS VARCHAR(255)) as patient_id, 
+  CAST(patient_name AS VARCHAR(255)) as name,
+  CAST(NULL AS VARCHAR(255)) as appointment_date
+UNION ALL
+SELECT 
+  'appointment' as sheet_type, 
+  CAST(NULL AS VARCHAR(255)) as entity, 
+  CAST(NULL AS VARCHAR(255)) as count, 
+  CAST(patient_id AS VARCHAR(255)) as patient_id, 
+  CAST(NULL AS VARCHAR(255)) as name,
+  CAST(appointment_date AS VARCHAR(255)) as appointment_date
 \`\`\`
 
 **COMMON UNION ERRORS TO AVOID:**
 - Different number of columns in SELECT statements
 - Missing columns in some UNION statements  
-- Inconsistent data types (mixing VARCHAR with INTEGER without casting)
-- Using plain NULL instead of CAST(NULL as DATA_TYPE)
+- Inconsistent data types (mixing VARCHAR with INTEGER, DATE, etc. without casting)
+- Using plain NULL instead of CAST(NULL AS DATA_TYPE)
 - Changing column order between UNION statements
+- Mixing different data types without explicit CAST() functions
+
+🚨 **CRITICAL UNION SYNTAX RULES - PREVENT "syntax error at or near UNION" ERRORS** 🚨
+
+**LIMIT CLAUSE PLACEMENT RULES:**
+❌ **NEVER place LIMIT in the middle of UNION statements:**
+\`\`\`sql
+SELECT * FROM table1 LIMIT 1 UNION ALL  -- WRONG! Causes syntax error
+SELECT * FROM table2
+\`\`\`
+
+✅ **CORRECT LIMIT placement options:**
+
+**Option 1: LIMIT at the very end (applies to entire UNION result)**
+\`\`\`sql
+SELECT * FROM table1 
+UNION ALL 
+SELECT * FROM table2 
+LIMIT 1
+\`\`\`
+
+**Option 2: Wrap individual SELECT statements in parentheses**
+\`\`\`sql
+(SELECT * FROM table1 LIMIT 1) 
+UNION ALL 
+(SELECT * FROM table2 LIMIT 1)
+\`\`\`
+
+**Option 3: Use subqueries for individual limits**
+\`\`\`sql
+SELECT * FROM (SELECT * FROM table1 LIMIT 1) t1
+UNION ALL
+SELECT * FROM (SELECT * FROM table2 LIMIT 1) t2
+\`\`\`
+
+**ORDER BY CLAUSE RULES:**
+❌ **NEVER place ORDER BY in individual SELECT statements:**
+\`\`\`sql
+SELECT * FROM table1 ORDER BY col1 UNION ALL  -- WRONG!
+SELECT * FROM table2
+\`\`\`
+
+✅ **CORRECT ORDER BY placement:**
+\`\`\`sql
+SELECT * FROM table1 
+UNION ALL 
+SELECT * FROM table2 
+ORDER BY col1  -- Only at the very end
+\`\`\`
+
+**MANDATORY UNION SYNTAX VALIDATION:**
+- ✅ Verify no LIMIT clauses appear between SELECT and UNION keywords
+- ✅ Verify no ORDER BY clauses appear in individual SELECT statements  
+- ✅ Ensure proper parentheses if using individual limits
+- ✅ Place final LIMIT and ORDER BY clauses only at the very end
+- ✅ Test that each SELECT statement can run independently before combining
+- ✅ **CRITICAL: If using LIMIT on individual parts of UNION, wrap each subquery in derived table:** 
+  SELECT * FROM (SELECT col FROM table1 LIMIT 1) AS sub1 UNION ALL SELECT * FROM (SELECT col FROM table2 LIMIT 1) AS sub2
 ${dbSyntaxRules.criticalRequirements}
 
 BEFORE FINALIZING THE QUERY:
-1. Review the entire query line by line for syntax errors
-2. Use only column names from the original SQL and sample data
-3. **VALIDATE EVERY COLUMN**: Use only columns that appear in the original SQL query and sample data
-4. **CHECK TABLE.COLUMN REFERENCES**: Ensure all column references use the correct table prefix from the original SQL
-5. **USE SAMPLE DATA COLUMNS**: If sample data is available, use only columns that appear in the sample data
-6. **NO INVENTED COLUMNS**: Never create or assume column names. Use ONLY columns from the original SQL and available sample data
+0. **🚨 TABLE CONSTRAINT VALIDATION**: Verify that EVERY table used in your restructured query exists in the original SQL tables detected above. DO NOT use any tables beyond the original table set.
+1. **🚨 UNION DATA TYPE VALIDATION**: If using UNION ALL, verify that each column position has the EXACT same data type across all SELECT statements. Use CAST() to ensure compatibility.
+2. Review the entire query line by line for syntax errors
+3. Use only column names from the original SQL and sample data
+4. **VALIDATE EVERY COLUMN**: Use only columns that appear in the original SQL query and sample data
+5. **CHECK TABLE.COLUMN REFERENCES**: Ensure all column references use the correct table prefix from the original SQL
+6. **USE SAMPLE DATA COLUMNS**: If sample data is available, use only columns that appear in the sample data
+7. **NO INVENTED COLUMNS**: Never create or assume column names. Use ONLY columns from the original SQL and available sample data
 7. **NO AGGREGATED COLUMN ASSUMPTIONS**: NEVER use columns like 'medication_count', 'patient_count', 'total_*', '*_sum', '*_avg' unless they physically exist. If you need counts, use COUNT(*) or COUNT(existing_column)
 8. **🚨 PATIENT TABLE COLUMN RESTRICTION**: When querying patient table, ONLY include the 'gender' column unless other specific patient columns are explicitly requested in the user prompt. Do NOT include patient_id, patient_name, dob, city, state, or any other patient columns unless explicitly mentioned by the user.
 9. **VALIDATE HAVING CLAUSE**: If using HAVING clause, ensure all referenced columns either appear in GROUP BY or are aggregate functions
 10. **UNION ALL VALIDATION**: If using UNION ALL for multi-sheet format, ensure ALL SELECT statements have the EXACT same number of columns in the EXACT same order with proper CAST(NULL as DATA_TYPE) for missing columns
-11. **UNION COLUMN CONSISTENCY**: Verify all UNION statements use consistent data types and column names to prevent "each UNION query must have the same number of columns" errors
+11. **🚨 UNION SYNTAX VALIDATION**: If using UNION ALL, verify that NO LIMIT or ORDER BY clauses appear in the middle of UNION statements. Place LIMIT and ORDER BY only at the very end or wrap individual SELECT statements in parentheses.
+12. **🚨 LIMIT WITH UNION HANDLING**: If you need LIMIT on individual parts of a UNION query, you MUST wrap each subquery in a derived table: SELECT * FROM (SELECT ... LIMIT n) AS sub1 UNION ALL SELECT * FROM (SELECT ... LIMIT n) AS sub2. NEVER write: SELECT ... LIMIT n UNION ALL (this causes syntax error).
+12. **UNION COLUMN CONSISTENCY**: Verify all UNION statements use consistent data types and column names to prevent "each UNION query must have the same number of columns" errors
 12. **SQL STRUCTURE VALIDATION**: Ensure the generated SQL will produce results that include sheet_type fields for organizing into different Excel sheets
 13. **METADATA SECTION VALIDATION**: Ensure the response includes a metadata section with main_entity, main_entity_count (calculated using COUNT(*) or COUNT(DISTINCT)), and main_entity_identifier fields
 14. **SHEET_TYPE FIELD VALIDATION**: Verify that the generated SQL includes a "sheet_type" field in the SELECT clause to identify record categories
@@ -1275,6 +1525,38 @@ BEFORE FINALIZING THE QUERY:
 26. **MULTI-SHEET EXPORT READY**: Confirm the result structure is suitable for creating multiple Excel sheets with consistent, flat data in each sheet
 
 DO NOT INCLUDE ANY EXPERIMENTAL OR UNTESTED SYNTAX. Only use proven, standard SQL constructs that are guaranteed to work with ${dbType.toUpperCase()} ${dbVersion}.
+
+🛑🛑🛑 FINAL CRITICAL CHECK BEFORE GENERATING SQL 🛑🛑🛑
+
+STOP! Before you write the SQL in your JSON response, ask yourself:
+
+1. "Does my UNION query have any LIMIT clauses between SELECT and UNION keywords?" 
+   - If YES: REWRITE IT. Move LIMIT to the end or use parentheses.
+
+2. "Does my UNION query have any ORDER BY clauses in individual SELECT statements?"
+   - If YES: REWRITE IT. Move ORDER BY to the very end.
+
+3. "Can I point to the exact line where I placed LIMIT and ORDER BY clauses?"
+   - They must be at the very end OR each SELECT must be in parentheses.
+
+4. "If I need LIMIT on individual parts of UNION, did I wrap each subquery in a derived table?"
+   - WRONG: SELECT col FROM table1 LIMIT 1 UNION ALL SELECT col FROM table2 LIMIT 1
+   - CORRECT: SELECT * FROM (SELECT col FROM table1 LIMIT 1) AS sub1 UNION ALL SELECT * FROM (SELECT col FROM table2 LIMIT 1) AS sub2
+
+🚨 REMEMBER: "FROM table LIMIT 1 UNION ALL" = SYNTAX ERROR
+🚨 CORRECT: "FROM table UNION ALL FROM table2 LIMIT 1"
+🚨 CORRECT WITH INDIVIDUAL LIMITS: "FROM (SELECT ... LIMIT 1) AS sub1 UNION ALL FROM (SELECT ... LIMIT 1) AS sub2"
+
+If you're not 100% sure about UNION syntax, use simple SELECT without UNION instead.
+
+🛑🛑🛑 FINAL MANDATORY UNION CHECK - DO NOT SKIP THIS 🛑🛑🛑
+BEFORE YOU WRITE YOUR JSON RESPONSE, READ YOUR SQL OUT LOUD:
+✅ If you see "UNION ALL" anywhere in your query, check the words immediately before it
+✅ The words before "UNION ALL" should NEVER be "LIMIT 1", "LIMIT 5", "ORDER BY", etc.
+✅ Valid pattern: "FROM table1 UNION ALL SELECT..." 
+❌ Invalid pattern: "FROM table1 LIMIT 1 UNION ALL SELECT..." ← THIS WILL FAIL
+
+SCAN YOUR ENTIRE SQL FOR THIS EXACT PATTERN AND FIX IT NOW!
 
 ${jsonFunctions.finalReminder}
 
@@ -1325,6 +1607,7 @@ You are a database expert with PERFECT knowledge of ${dbType.toUpperCase()} ${db
 - NEVER create imaginary columns like 'medication_count', 'patient_count', 'summary_id'
 - Use SQL aggregate functions (COUNT(*), SUM(), AVG()) instead of assuming aggregated columns exist
 - For UNION ALL: ensure EXACT same column count and data types across all SELECT statements
+- 🚨 MANDATORY TABLE CONSTRAINT: Use ONLY tables from the original query - NO additional tables allowed
 
 ⚠️ FAILURE IS NOT ACCEPTABLE ⚠️
 Your SQL will be executed directly. It MUST work perfectly on the first try.`
@@ -1434,7 +1717,9 @@ Your SQL will be executed directly. It MUST work perfectly on the first try.`
                 columns_validated: false,
                 group_by_compliant: false,
                 json_functions_correct: false,
-                union_structure_valid: false
+                union_structure_valid: false,
+                union_data_types_consistent: false,
+                union_syntax_correct: false
             };
         }
 
@@ -1444,7 +1729,9 @@ Your SQL will be executed directly. It MUST work perfectly on the first try.`
                 will_execute_successfully: false,
                 no_syntax_errors: false,
                 all_columns_exist: false,
-                database_specific_syntax: false
+                database_specific_syntax: false,
+                union_type_compatibility: false,
+                union_limit_order_placement: false
             };
         }
 
@@ -2479,115 +2766,139 @@ export function medicalRoutes(): Router {
             const startTime = performance.now();
 
             try {
-                // ========== STEP 0: PROMPT ANALYSIS LAYER ==========
-                console.log('🔍 Step 0: Analyzing user prompt intent...');
+                // ========== STEP 1: EXTRACT REQUEST PARAMETERS ==========
+                const { query: userPrompt, organizationId, conversational = false, sessionId = uuidv4() } = req.body;
 
-                const { query: userPrompt, organizationId } = req.body;
-
-                // Analyze if the prompt is database-related or casual conversation
-                const promptAnalysis = await PromptAnalysisService.analyzePrompt(userPrompt, organizationId);
-
-                console.log(`📊 Prompt Analysis Result: ${promptAnalysis.isDatabaseRelated ? 'DATABASE_QUERY' : 'CASUAL_CONVERSATION'} (confidence: ${promptAnalysis.confidence.toFixed(2)})`);
-
-                // If not database-related, return casual response immediately
-                if (!promptAnalysis.isDatabaseRelated && promptAnalysis.casualResponse) {
-                    console.log('💬 Handling as casual conversation - returning direct response');
-
-                    return res.json({
-                        success: true,
-                        type: 'casual_conversation',
-                        response: promptAnalysis.casualResponse,
-                        category: promptAnalysis.category,
-                        confidence: promptAnalysis.confidence,
-                        reasoning: promptAnalysis.reasoning,
-                        processing_time: `${(performance.now() - startTime).toFixed(2)}ms`,
-                        timestamp: new Date().toISOString(),
-                        // Include analysis debug info
-                        analysis_debug: {
-                            original_prompt: userPrompt,
-                            classified_as: promptAnalysis.category,
-                            ai_analysis: promptAnalysis.success ? 'used' : 'fallback',
-                            error: promptAnalysis.error || null
-                        }
-                    });
+                // ========== STEP 2: STORE CONVERSATION HISTORY ==========
+                // Add user query to simple conversation history storage
+                if (conversational && sessionId && userPrompt) {
+                    addQueryToHistory(sessionId, userPrompt);
                 }
 
-                console.log('🔄 Prompt classified as database-related - proceeding with database processing...');
+                // ========== SSE SETUP FOR DATABASE PROCESSING ==========
+                // Check if client wants streaming updates
+                const enableSSE = req.body.enableSSE === true || req.headers.accept === 'text/event-stream';
+                let sendMessage: (msg: string) => void;
 
-            } catch (promptAnalysisError: any) {
-                console.error('❌ Error in prompt analysis layer:', promptAnalysisError.message);
-                // Continue with database processing if analysis fails
-                console.log('🔄 Continuing with database processing due to analysis error...');
-            }
+                if (enableSSE) {
+                    // Setup SSE headers
+                    res.setHeader("Content-Type", "text/event-stream");
+                    res.setHeader("Cache-Control", "no-cache");
+                    res.setHeader("Connection", "keep-alive");
+                    res.setHeader("Access-Control-Allow-Origin", "*");
+                    res.setHeader("Access-Control-Allow-Headers", "Cache-Control");
 
-            // ========== SSE SETUP FOR DATABASE PROCESSING ==========
-            // Check if client wants streaming updates
-            const enableSSE = req.body.enableSSE === true || req.headers.accept === 'text/event-stream';
-            let sendMessage: (msg: string) => void;
-
-            if (enableSSE) {
-                // Setup SSE headers
-                res.setHeader("Content-Type", "text/event-stream");
-                res.setHeader("Cache-Control", "no-cache");
-                res.setHeader("Connection", "keep-alive");
-                res.setHeader("Access-Control-Allow-Origin", "*");
-                res.setHeader("Access-Control-Allow-Headers", "Cache-Control");
-
-                sendMessage = (msg: string) => {
-                    if (!res.headersSent) {
-                        try {
-                            res.write(`data: ${JSON.stringify({
-                                message: msg,
-                                timestamp: new Date().toISOString(),
-                                processing_time: `${(performance.now() - startTime).toFixed(2)}ms`
-                            })}\n\n`);
-                        } catch (writeError) {
-                            console.error('❌ SSE write error:', writeError);
+                    sendMessage = (msg: string) => {
+                        if (!res.headersSent) {
+                            try {
+                                res.write(`data: ${JSON.stringify({
+                                    message: msg,
+                                    timestamp: new Date().toISOString(),
+                                    processing_time: `${(performance.now() - startTime).toFixed(2)}ms`
+                                })}\n\n`);
+                            } catch (writeError) {
+                                console.error('❌ SSE write error:', writeError);
+                            }
                         }
+                    };
+
+                    // Send initial processing message
+                    sendMessage("Analyzing your query...");
+                } else {
+                    // No-op function for non-SSE requests
+                    sendMessage = (msg: string) => {
+                        console.log(`📡 Progress: ${msg}`);
+                    };
+                }
+
+                // ========== STEP 2: INITIALIZE CONVERSATION SETUP ==========
+                // We need conversation context for better prompt analysis
+                let chatHistory: any[] = [];
+                
+                if (conversational) {
+                    try {
+                        // Initialize LangChain app and setup conversation session to get chat history
+                        const setupResult = await initializeLangChainAndConversation(organizationId, conversational, sessionId, res);
+                        if (!setupResult) {
+                            return; // Error response already sent by the service
+                        }
+                        chatHistory = setupResult.chatHistory || [];
+                    } catch (setupError) {
+                        console.warn('⚠️ Could not initialize conversation for prompt analysis, proceeding without history');
+                        chatHistory = [];
                     }
-                };
-
-                // Send initial processing message
-                sendMessage("Analyzing your query...");
-            } else {
-                // No-op function for non-SSE requests
-                sendMessage = (msg: string) => {
-                    console.log(`📡 Progress: ${msg}`);
-                };
-            }
-
-            // ========== CONTINUE WITH EXISTING DATABASE PROCESSING ==========
-            let rawAgentResponse = null;
-
-            let debugInfo = {
-                extractionAttempts: [] as string[],
-                sqlCorrections: [] as string[],
-                originalQueries: [] as string[],
-                // Add prompt analysis info to debug info
-                promptAnalysis: {
-                    isDatabaseRelated: true, // Will be overridden if analysis succeeded
-                    confidence: 0.5,
-                    category: 'database_query',
-                    reasoning: 'Proceeding with database processing',
-                    analysisSuccess: false
                 }
-                // No schema validations since we're trusting the sqlAgent
-            };
 
-            // Update debug info with actual analysis results if available
-            try {
-                const { query: userPrompt, organizationId } = req.body;
-                const promptAnalysisForDebug = await PromptAnalysisService.analyzePrompt(userPrompt, organizationId);
-                debugInfo.promptAnalysis = {
-                    isDatabaseRelated: promptAnalysisForDebug.isDatabaseRelated,
-                    confidence: promptAnalysisForDebug.confidence,
-                    category: promptAnalysisForDebug.category,
-                    reasoning: promptAnalysisForDebug.reasoning,
-                    analysisSuccess: promptAnalysisForDebug.success
+                // ========== STEP 3: PROMPT ANALYSIS WITH CONVERSATION CONTEXT ==========
+                console.log('🔍 Step 3: Analyzing user prompt intent with conversation context...');
+
+                let promptAnalysis: any;
+                try {
+                    // Analyze if the prompt is database-related or casual conversation
+                    promptAnalysis = await PromptAnalysisService.analyzePrompt(userPrompt, organizationId, chatHistory);
+
+                    console.log(`📊 Prompt Analysis Result: ${promptAnalysis.isDatabaseRelated ? 'DATABASE_QUERY' : 'CASUAL_CONVERSATION'} (confidence: ${promptAnalysis.confidence.toFixed(2)})`);
+
+                    // If not database-related, return casual response immediately
+                    if (!promptAnalysis.isDatabaseRelated && promptAnalysis.casualResponse) {
+                        console.log('💬 Handling as casual conversation - returning direct response');
+
+                        return res.json({
+                            success: true,
+                            type: 'casual_conversation',
+                            response: promptAnalysis.casualResponse,
+                            category: promptAnalysis.category,
+                            confidence: promptAnalysis.confidence,
+                            reasoning: promptAnalysis.reasoning,
+                            processing_time: `${(performance.now() - startTime).toFixed(2)}ms`,
+                            timestamp: new Date().toISOString(),
+                            // Include analysis debug info
+                            analysis_debug: {
+                                original_prompt: userPrompt,
+                                classified_as: promptAnalysis.category,
+                                ai_analysis: promptAnalysis.success ? 'used' : 'fallback',
+                                error: promptAnalysis.error || null,
+                                conversation_context_used: chatHistory.length > 0
+                            }
+                        });
+                    }
+
+                    console.log('🔄 Prompt classified as database-related - proceeding with database processing...');
+
+                } catch (promptAnalysisError: any) {
+                    console.error('❌ Error in prompt analysis layer:', promptAnalysisError.message);
+                    // Continue with database processing if analysis fails
+                    console.log('🔄 Continuing with database processing due to analysis error...');
+                    promptAnalysis = {
+                        isDatabaseRelated: true, // Default to database processing
+                        confidence: 0.5,
+                        category: 'database_query',
+                        reasoning: 'Analysis failed - defaulting to database processing',
+                        success: false,
+                        error: promptAnalysisError.message
+                    };
+                }
+
+                // ========== CONTINUE WITH EXISTING DATABASE PROCESSING ==========
+                let rawAgentResponse = null;
+
+                let debugInfo = {
+                    extractionAttempts: [] as string[],
+                    sqlCorrections: [] as string[],
+                    originalQueries: [] as string[],
+                    // Add prompt analysis info to debug info
+                    promptAnalysis: {
+                        isDatabaseRelated: promptAnalysis.isDatabaseRelated,
+                        confidence: promptAnalysis.confidence,
+                        category: promptAnalysis.category,
+                        reasoning: promptAnalysis.reasoning,
+                        analysisSuccess: promptAnalysis.success,
+                        conversationContextUsed: chatHistory.length > 0
+                    }
+                    // No schema validations since we're trusting the sqlAgent
                 };
-            } catch (debugAnalysisError) {
-                console.log('⚠️ Could not get analysis for debug info');
-            }
+
+                // ========== STEP 4: CONTINUE WITH DATABASE PROCESSING ==========
 
             // Declare tableSampleData at higher scope for reuse in restructured SQL
             let globalTableSampleData: { [table: string]: any[] } = {};
@@ -2742,11 +3053,20 @@ export function medicalRoutes(): Router {
                             // Debug: Check globalTableSampleData status before table analysis
                             console.log('🔍 globalTableSampleData before analysis:', Object.keys(globalTableSampleData).length, 'tables');
 
+                            // Debug: Check sessionId consistency and conversation history
+                            console.log('🔍 SessionId for table analysis:', sessionId);
+                            console.log('🔍 Conversational mode:', conversational);
+                            
+                            // Get conversation history for AI analysis
+                            const previousQueries = conversational && sessionId ? getQueryHistory(sessionId) : [];
+                            console.log('📜 Previous queries for context:', previousQueries);
+
                             // Get all database tables and columns with AI-generated purpose descriptions
                             const tableAnalysisResult = await getTableDescriptionsWithAI(
                                 organizationId,
                                 databaseType,
-                                query
+                                query,
+                                previousQueries // Pass array of previous queries for conversation context
                             );
 
                             if (!tableAnalysisResult.success) {
@@ -3151,11 +3471,48 @@ export function medicalRoutes(): Router {
             // Send final successful response (if we have one and no response sent yet)
             if (finalResult && !responseSent) {
                 console.log(`🎯 Sending final successful response after ${currentAttempt} attempt(s)`);
+                
+                // Save conversation to memory if in conversational mode (BEFORE sending response)
+                if (conversational && sessionId && finalResult) {
+                    console.log('💾 Saving conversation to BufferMemory BEFORE sending response...');
+                    console.log('🔍 SessionId for saving conversation:', sessionId);
+                    console.log('🔍 UserPrompt:', userPrompt?.substring(0, 100));
+                    try {
+                        // Extract the AI response text from the finalResult
+                        let aiResponse = '';
+                        if (finalResult.description) {
+                            aiResponse = finalResult.description;
+                        } else if (finalResult.sql_results?.rows) {
+                            aiResponse = `Query executed successfully. Found ${finalResult.sql_results.rows.length} results.`;
+                        } else {
+                            aiResponse = 'Query processed successfully.';
+                        }
+                        
+                        await saveConversationToMemory(sessionId, userPrompt, aiResponse);
+                        console.log('✅ Conversation successfully saved to memory before response');
+                    } catch (memoryError) {
+                        console.error('❌ Error saving conversation to memory:', memoryError);
+                        // Don't fail the response if memory saving fails
+                    }
+                }
+                
                 responseSent = true;
                 res.json({ ...finalResult, type: 'SqlAgent' });
             }
+        } catch (mainError: any) {
+            // Handle any errors that occur in the main try block
+            console.error('❌ Main error in query-sql-manual route:', mainError.message);
+            if (!res.headersSent) {
+                res.status(500).json({
+                    success: false,
+                    error: mainError.message,
+                    type: 'error',
+                    processing_time: `${(performance.now() - startTime).toFixed(2)}ms`,
+                    timestamp: new Date().toISOString()
+                });
+            }
         }
-    );
+    });
 
     // We're not using database schema information since we're relying on
     // sqlAgent's intelligence to handle database structure correctly

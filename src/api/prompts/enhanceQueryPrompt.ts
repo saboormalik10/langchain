@@ -768,25 +768,25 @@ Example 4: "Show recent lab tests from last 30 days"
 
 **TRADITIONAL COLUMN SELECTION EXAMPLES:**
 
-Example 1: "Find patients with the highest number of total medications and check if any of them are marked as Safe"
-- PRIMARY ENTITY: patients table
-- FOCUSED SQL: SELECT p.patient_name, p.age, m.safety_status, m.medication_name, m.total_count FROM patients p JOIN medications m ON p.patient_id = m.patient_id WHERE m.safety_status = 'Safe' ORDER BY m.total_count DESC
-- REASONING: Include only essential patient info (name, age), the condition column (safety_status), and relevant medication context (medication_name, total_count) to answer the specific question about safe medications and counts
+Example 1: "Find users with the highest number of total orders and check if any of them are marked as Safe"
+- PRIMARY ENTITY: users table
+- FOCUSED SQL: SELECT u.user_name, u.age, o.safety_status, o.order_name, o.total_count FROM users u JOIN orders o ON u.user_id = o.user_id WHERE o.safety_status = 'Safe' ORDER BY o.total_count DESC
+- REASONING: Include only essential user info (name, age), the condition column (safety_status), and relevant order context (order_name, total_count) to answer the specific question about safe orders and counts
 
-Example 2: "Show medications for diabetic patients"
-- PRIMARY ENTITY: medications table  
-- FOCUSED SQL: SELECT m.medication_name, m.dosage, m.frequency, p.diagnosis, p.patient_name FROM medications m JOIN patients p ON m.patient_id = p.patient_id WHERE p.diagnosis LIKE '%diabetes%'
-- REASONING: Include only essential medication info (name, dosage, frequency), the condition column (diagnosis), and minimal patient context (patient_name) to answer the specific question about diabetic patient medications
+Example 2: "Show orders for technology users"
+- PRIMARY ENTITY: orders table  
+- FOCUSED SQL: SELECT o.order_name, o.quantity, o.frequency, u.category, u.user_name FROM orders o JOIN users u ON o.user_id = u.user_id WHERE u.category LIKE '%technology%'
+- REASONING: Include only essential order info (name, quantity, frequency), the condition column (category), and minimal user context (user_name) to answer the specific question about technology user orders
 
-Example 3: "Find lab results where glucose levels are above 200"
-- PRIMARY ENTITY: lab_results table
-- FOCUSED SQL: SELECT lr.test_date, lr.glucose_level, p.patient_name, p.age FROM lab_results lr JOIN patients p ON lr.patient_id = p.patient_id WHERE lr.glucose_level > 200
-- REASONING: Include only essential lab info (test_date, glucose_level - the condition column), and minimal patient context (patient_name, age) to answer the specific question about high glucose levels
+Example 3: "Find test results where score levels are above 200"
+- PRIMARY ENTITY: test_results table
+- FOCUSED SQL: SELECT tr.test_date, tr.score_level, u.user_name, u.age FROM test_results tr JOIN users u ON tr.user_id = u.user_id WHERE tr.score_level > 200
+- REASONING: Include only essential test info (test_date, score_level - the condition column), and minimal user context (user_name, age) to answer the specific question about high score levels
 
-Example 4: "Show patients with moderate risk categories and their therapeutic classes"
-- PRIMARY ENTITY: patients table
-- FOCUSED SQL: SELECT p.patient_name, p.age, p.gender, rd.risk_category, GROUP_CONCAT(DISTINCT mr.therapeutic_class) AS therapeutic_classes FROM patients p JOIN risk_details rd ON p.patient_id = rd.record_id JOIN medication_report mr ON p.patient_id = mr.record_id WHERE rd.risk_category LIKE 'Moderate%' GROUP BY p.patient_id, p.patient_name, p.age, p.gender, rd.risk_category
-- REASONING: Include only essential patient info (name, age, gender), the condition column (risk_category), and the requested therapeutic classes aggregation to answer the specific question
+Example 4: "Show users with moderate priority categories and their product classes"
+- PRIMARY ENTITY: users table
+- FOCUSED SQL: SELECT u.user_name, u.age, u.gender, pd.priority_category, GROUP_CONCAT(DISTINCT pr.product_class) AS product_classes FROM users u JOIN priority_details pd ON u.user_id = pd.record_id JOIN product_report pr ON u.user_id = pr.record_id WHERE pd.priority_category LIKE 'Moderate%' GROUP BY u.user_id, u.user_name, u.age, u.gender, pd.priority_category
+- REASONING: Include only essential user info (name, age, gender), the condition column (priority_category), and the requested product classes aggregation to answer the specific question
 
 **CRITICAL: The goal is to return FOCUSED information that directly answers the user's question (selective columns explicitly listed) AND provide minimal necessary context about WHY these records were selected by including condition columns.**
 

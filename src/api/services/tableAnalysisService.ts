@@ -19,17 +19,22 @@ export interface TableAnalysisResult {
  * @param organizationId Organization identifier
  * @param databaseType Database type (mysql, postgresql, etc.)
  * @param query User query for context-aware analysis
+ * @param conversationHistory Array of previous conversation queries for context-aware relevance assessment
  * @returns Promise<TableAnalysisResult> Table analysis result
  */
 export async function getTableDescriptionsWithAI(
     organizationId: string,
     databaseType: string,
-    query: string
+    query: string,
+    conversationHistory: string[] = []
 ): Promise<TableAnalysisResult> {
     let tableDescriptions = '';
-    
+
     try {
         console.log('🔍 Getting all database tables and columns for AI analysis...');
+
+        // Use the provided conversation history directly
+        console.log(`📜 Using provided conversation history with ${conversationHistory.length} previous queries`);
 
         // Reset global sample data for fresh collection
         globalTableSampleData = {};
@@ -42,15 +47,15 @@ export async function getTableDescriptionsWithAI(
 
         if (allTables.length > 0) {
             const tableSchemaData: any = {};
-            
+
             // Use cached schema information - MAJOR PERFORMANCE IMPROVEMENT
             console.log(`� Using cached schema for ${allTables.length} tables - no database connections needed!`);
-            
+
             for (const tableName of allTables) {
                 try {
                     // Get column information from cache instead of database
                     const columns = schemaCache.tableColumns[tableName] || [];
-                    
+
                     // Convert cached column names to expected format for AI processing
                     const columnInfo = columns.map(columnName => ({
                         COLUMN_NAME: columnName,
@@ -117,25 +122,70 @@ export async function getTableDescriptionsWithAI(
 
                     const aiPrompt = `You are a database schema analyst helping an SQL agent choose the correct tables for a specific query. 
 
-User Query: "${query}"
+Current User Query: "${query}"
+
+${conversationHistory.length > 0 ? `Conversation History (Previous context):
+${conversationHistory.map((query, index) => `${index + 1}. User: ${query}`).join('\n')}
+
+🔍 **CRITICAL CONVERSATION CONTEXT ANALYSIS:**
+
+**STEP 1: Analyze Current Query in Context**
+- Is the current query "${query}" a follow-up to previous questions?
+- Does it contain pronouns (it, them, that), numbers (1, 5, first, etc.), or vague references that rely on previous context?
+- Does it reference previous results (e.g., "show me 1" after asking for "all patients")?
+
+**STEP 2: Identify Context Dependencies**
+- If current query is vague/contextual: Which entities from previous questions is it referring to?
+- If current query is completely new: Treat as independent query
+- Examples of contextual queries: "show me 1", "get the first one", "what about medications", "now give me details"
+- Examples of independent queries: "show me all doctors", "what medications exist"
+
+**STEP 3: Context-Aware Relevance Assignment**
+- **CONTEXTUAL QUERY**: If current query depends on previous context, prioritize tables from previous relevant queries
+- **INDEPENDENT QUERY**: If current query is self-contained, ignore conversation history for relevance
+
+**EXAMPLE SCENARIO:**
+Previous: "Give me all patients" → Current: "Now give me 1"
+Analysis: "1" refers to 1 patient from previous context
+Result: patients table = HIGH, unrelated tables = LOW
+
+` : 'No previous conversation history available - analyze query in isolation.'}
 
 Database Tables with Schema and Sample Data:
 ${schemaDescription}
 
-Based on the user's specific query "${query}", analyze each table's schema AND sample data to provide targeted descriptions that help the SQL agent understand which tables are most relevant for this specific query. 
+🎯 **SMART RELEVANCE ASSIGNMENT RULES:**
 
-Focus on:
-1. Which tables likely contain the data needed for this specific query (analyze both column names and sample data values)
-2. Which tables should be prioritized for this type of question based on the actual data content
-3. Which tables might be confused with each other and clarify the differences using sample data examples
-4. What patterns you see in the sample data that indicate the table's purpose
-5. How the sample data values relate to the user's query requirements
+${conversationHistory.length > 0 ? `
+**FOR CONTEXTUAL/FOLLOW-UP QUERIES:**
+- **HIGH**: Tables that were relevant in recent conversation AND match current contextual reference
+- **MEDIUM**: Tables that might provide additional context for the follow-up
+- **LOW**: Tables completely unrelated to conversation thread
+
+**FOR INDEPENDENT/NEW TOPIC QUERIES:**
+- **HIGH**: Tables directly needed for current query (ignore conversation history)
+- **MEDIUM**: Tables that might provide supporting information for current query
+- **LOW**: Tables unlikely to be useful for current query
+
+**DECISION PROCESS:**
+1. First determine: Is "${query}" contextual (referring to previous conversation) or independent?
+2. If contextual: What entity/table from previous questions does it reference?
+3. If independent: What tables does current query actually need?
+4. Assign relevance based on the analysis above
+` : `
+**FOR INDEPENDENT QUERIES:**
+- **HIGH**: Tables directly needed for current query
+- **MEDIUM**: Tables that might provide supporting information
+- **LOW**: Tables unlikely to be useful for current query
+`}
+
+**CRITICAL: Do NOT default all tables to HIGH relevance. Analyze the actual query context and be selective.**
 
 Provide descriptions in this format:
-**Table: table_name** - Relevance to query "${query}": [High/Medium/Low] - Brief description focusing on why this table is/isn't suitable for this specific query, mentioning key columns and sample data insights that support your assessment.
+**Table: table_name** - Relevance: **[HIGH/MEDIUM/LOW]** ${conversationHistory.length > 0 ? '(Context: [CONTEXTUAL/INDEPENDENT])' : ''} - Brief description explaining your relevance decision based on${conversationHistory.length > 0 ? ' conversation analysis and' : ''} actual query needs.
 
-Keep descriptions concise but informative (2-3 sentences) and focus on helping the SQL agent choose the RIGHT tables for this specific user query using both schema structure and actual data content.`;
-
+Keep descriptions concise (1-2 sentences) and focus on WHY each table got its relevance level based on the specific query context.`;
+                    console.log({ aiPrompt });
                     const aiResponse = await azureClient.chat.completions.create({
                         model: process.env.AZURE_OPENAI_DEPLOYMENT || "gpt-4.1",
                         messages: [{
@@ -215,7 +265,7 @@ ${Object.entries(tableSchemaData).map(([tableName, columns]: [string, any]) => {
         console.log('🔍 Final globalTableSampleData status:', {
             tableCount: Object.keys(globalTableSampleData).length,
             tables: Object.keys(globalTableSampleData),
-            recordCounts: Object.entries(globalTableSampleData).map(([table, data]) => 
+            recordCounts: Object.entries(globalTableSampleData).map(([table, data]) =>
                 `${table}: ${Array.isArray(data) ? data.length : 'unknown'} records`)
         });
 

@@ -87,6 +87,7 @@ export async function initializeLangChainAndConversation(
                 memory,
                 lastAccess: new Date()
             };
+            console.log("input", sessionId, sessionData)
             conversationSessions.set(sessionId, sessionData);
         } else {
             // Update last access time
@@ -131,6 +132,85 @@ export async function initializeLangChainAndConversation(
         sqlAgent,
         dbConfig
     };
+}
+
+/**
+ * Save conversation exchange to BufferMemory
+ * @param sessionId Session identifier
+ * @param userInput User's input/query
+ * @param aiOutput AI's response/output
+ */
+export async function saveConversationToMemory(sessionId: string, userInput: string, aiOutput: string): Promise<void> {
+    try {
+        const sessionData = conversationSessions.get(sessionId);
+        
+        if (!sessionData || !sessionData.memory) {
+            console.log(`⚠️ No conversation session found for sessionId: ${sessionId} - cannot save conversation`);
+            return;
+        }
+
+        // Save the conversation exchange to BufferMemory
+        await sessionData.memory.saveContext(
+            { input: userInput },
+            { output: aiOutput }
+        );
+
+        console.log(`💾 Saved conversation to memory for sessionId: ${sessionId}`);
+        console.log(`📝 User: ${userInput.substring(0, 100)}...`);
+        console.log(`🤖 AI: ${aiOutput.substring(0, 100)}...`);
+    } catch (error) {
+        console.error(`❌ Error saving conversation to memory for sessionId ${sessionId}:`, error);
+    }
+}
+
+/**
+ * Get conversation history for a specific session ID
+ * @param sessionId Session identifier
+ * @returns Array of conversation messages or empty array if no history found
+ */
+export async function getConversationHistoryBySessionId(sessionId: string): Promise<Array<{ role: string, content: string }>> {
+    try {
+        console.log(`🔍 Attempting to get conversation history for sessionId: ${sessionId}`);
+        const sessionData = conversationSessions.get(sessionId);
+
+        if (!sessionData || !sessionData.memory) {
+            console.log(`📭 No conversation session found for sessionId: ${sessionId}`);
+            console.log(`🔍 Available sessions: ${Array.from(conversationSessions.keys()).join(', ')}`);
+            return [];
+        }
+
+        console.log(`✅ Found session data for sessionId: ${sessionId}`);
+
+        // Retrieve conversation history from buffer memory
+        const memoryVariables = await sessionData.memory.loadMemoryVariables({});
+        const chatHistory = memoryVariables.chat_history || [];
+
+        console.log(`📜 Retrieved ${chatHistory.length} conversation messages for sessionId: ${sessionId}`);
+        
+        // Debug: Log raw chat history
+        if (chatHistory.length > 0) {
+            console.log(`🔍 Raw chat history:`, chatHistory.map((msg: any) => ({
+                type: msg._getType?.() || 'unknown',
+                content: (msg.content || msg.text || '').substring(0, 100)
+            })));
+        }
+
+        // Convert LangChain format to our expected format
+        const formattedHistory = chatHistory.map((message: any) => ({
+            role: message._getType() === 'human' ? 'user' : 'assistant',
+            content: message.content || message.text || ''
+        }));
+
+        console.log(`📝 Formatted history:`, formattedHistory.map((msg: { role: string, content: string }) => ({
+            role: msg.role,
+            content: msg.content.substring(0, 100)
+        })));
+
+        return formattedHistory;
+    } catch (error) {
+        console.error(`❌ Error retrieving conversation history for sessionId ${sessionId}:`, error);
+        return [];
+    }
 }
 
 // Export the conversation sessions map for external access if needed

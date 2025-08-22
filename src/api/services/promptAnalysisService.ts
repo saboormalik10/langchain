@@ -21,8 +21,15 @@ export class PromptAnalysisService {
     
     /**
      * Analyze user prompt to determine if it's database-related or casual conversation
+     * @param userPrompt - The current user message to analyze
+     * @param organizationId - Optional organization ID for context
+     * @param conversationHistory - Optional conversation history for context analysis
      */
-    static async analyzePrompt(userPrompt: string, organizationId?: string): Promise<PromptAnalysisResult> {
+    static async analyzePrompt(
+        userPrompt: string, 
+        organizationId?: string, 
+        conversationHistory?: Array<{ type: string; content: string }>
+    ): Promise<PromptAnalysisResult> {
         try {
             console.log('🔍 Analyzing user prompt for intent classification...');
             
@@ -59,7 +66,7 @@ export class PromptAnalysisService {
                         content: `You are an expert prompt classifier for a medical database system. Your job is to analyze user prompts and determine whether they require database operations or can be handled with direct conversational responses.
 
 🎯 CLASSIFICATION TASK:
-Analyze the user's input and classify it into one of these categories:
+Analyze the user's current input along with conversation history (if provided) and classify it into one of these categories:
 1. DATABASE_QUERY - Requires database access (medical data queries, patient information, reports, analytics)
 2. CASUAL_CONVERSATION - Can be handled directly (greetings, casual chat, general questions, general medical knowledge)
 
@@ -74,6 +81,8 @@ DATABASE_QUERY indicators:
 - "Show me", "Find patients with", "List all", "Count how many", "Get data for"
 - References to specific patient IDs, dates, or database records
 - Requests for historical data, trends, or comparisons from stored data
+- Follow-up questions that reference previously retrieved database results
+- Questions using pronouns like "them", "those", "it" that refer to database entities from conversation context
 
 CASUAL_CONVERSATION indicators:
 - Greetings and pleasantries
@@ -84,6 +93,14 @@ CASUAL_CONVERSATION indicators:
 - System capability questions ("What can you do?")
 - Help requests about using the system
 - Educational medical questions
+
+📜 CONVERSATION CONTEXT ANALYSIS:
+When conversation history is provided:
+- Analyze the flow of the conversation to understand context
+- Determine if current question is a follow-up to database queries
+- Identify pronouns and references that might relate to previously retrieved data
+- Consider if the user is continuing a data exploration workflow
+- Look for patterns indicating ongoing database analysis vs. casual chatting
 
 🔍 CONFIDENCE LEVELS:
 - 0.9-1.0: Very confident in classification
@@ -115,14 +132,19 @@ CRITICAL: Return only valid JSON that can be parsed by JSON.parse()`
                         role: "user",
                         content: `Analyze this user prompt and classify it:
 
-USER PROMPT: "${userPrompt}"
+${conversationHistory && conversationHistory.length > 0 ? 
+`📜 CONVERSATION HISTORY:
+${conversationHistory.map(msg => `${msg.type === 'human' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n')}
+
+` : ''}USER PROMPT: "${userPrompt}"
 
 🔍 ANALYSIS INSTRUCTIONS:
 1. Determine if this prompt requires database access or is casual conversation
-2. Consider the context of a medical database system
-3. Evaluate the confidence level of your classification
-4. Provide reasoning for your decision
-5. If it's casual conversation, provide an appropriate response in the casual_response field
+${conversationHistory && conversationHistory.length > 0 ? 
+'2. Consider the conversation history to understand context and identify follow-up database queries\n3. Look for pronouns or references that might relate to previously discussed database entities\n4. Consider if this is part of an ongoing data exploration workflow\n5. ' : '2. '}Consider the context of a medical database system
+${conversationHistory && conversationHistory.length > 0 ? '6. ' : '3. '}Evaluate the confidence level of your classification
+${conversationHistory && conversationHistory.length > 0 ? '7. ' : '4. '}Provide reasoning for your decision including how conversation context influenced your decision
+${conversationHistory && conversationHistory.length > 0 ? '8. ' : '5. '}If it's casual conversation, provide an appropriate response in the casual_response field
 
 Examples for context:
 
@@ -133,7 +155,11 @@ DATABASE_QUERY examples:
 - "Get lab results for patient ID 12345"
 - "Count total appointments scheduled today"
 - "Find patients with BMI over 30"
-
+${conversationHistory && conversationHistory.length > 0 ? `- "What medications are they taking?" (after previous query about patients)
+- "Show me more details about those results" (referring to previous database query)
+- "How many of them are over 65?" (follow-up to previous patient query)
+- "Update that record" (referring to previously discussed database entity)
+` : ''}
 CASUAL_CONVERSATION examples:
 - "Hello, how are you?"
 - "What can this system do?"
@@ -142,7 +168,9 @@ CASUAL_CONVERSATION examples:
 - "How does blood pressure medication work?"
 - "Can you help me understand this system?"
 
-Analyze the user prompt above and provide your classification with appropriate response if casual.`
+${conversationHistory && conversationHistory.length > 0 ? 
+'Analyze the conversation history and current user prompt to provide accurate classification.' : 
+'Analyze the user prompt above and provide your classification with appropriate response if casual.'}`
                     }
                 ],
                 temperature: 0.2, // Low temperature for consistent classification
