@@ -43,18 +43,17 @@ export async function generateQueryDescriptionAndExplanation(
 
             if (llm) {
                 // Generate query description
-                const queryDescriptionPrompt = `You are a medical database expert. Analyze this SQL query and provide a clear, professional explanation of what it does.
+                const queryDescriptionPrompt = `Medical database expert: Translate this SQL query into plain language that directly addresses the user's original question.
 
+Original Question: "${query}"
 SQL Query: ${finalSQL}
 
-Original User Question: ${query}
+In 2-3 concise sentences, explain:
+1. How this SQL query answers the user's specific question
+2. Exactly what data is being retrieved and filtered
+3. The medical relevance of this information
 
-Provide a concise explanation (2-3 sentences) of:
-1. What data this query retrieves
-2. What conditions/filters are applied
-3. How the results are organized
-
-Keep it professional and easy to understand for both technical and non-technical users.`;
+Be direct and precise. Avoid technical SQL terminology.`;
 
                 const queryDescResponse = await llm.invoke(queryDescriptionPrompt);
                 queryDescription = typeof queryDescResponse === 'string' ? queryDescResponse : queryDescResponse.content || '';
@@ -63,24 +62,24 @@ Keep it professional and easy to understand for both technical and non-technical
                 // Generate result explanation if we have results
                 if (Array.isArray(rows) && rows.length > 0) {
                     const resultSample = rows.slice(0, 3); // Show first 3 rows as sample
-                    const resultExplanationPrompt = `You are a medical data analyst. Analyze these SQL query results and return a professional HTML summary.
+                    const resultExplanationPrompt = `Medical data analyst: Interpret these results specifically in the context of the user's original question.
 
-Original Question: ${query}
-SQL Query: ${finalSQL}
-Total Results Found: ${rows.length}
+User Question: "${query}"
+Total Results: ${rows.length}
 Sample Results: ${JSON.stringify(resultSample, null, 2)}
 
-Generate a clear, high-level explanation using HTML markup. Format the response as follows:
-- A <h3> heading summarizing the result
-- A short <p> paragraph (2–4 sentences) explaining:
-  1. What was generally found in the data (without any individual-level detail)
-  2. Key patterns or trends
-  3. What this means in response to the user's question
+Provide HTML formatted insights that:
+<h3>Direct answer to the user's question</h3>
+<p>
+1. Directly address what the user wanted to know
+2. Highlight the most relevant patterns or findings
+3. Explain the medical significance of these results
+</p>
 
-Do NOT include any personal or sensitive data.
-Avoid technical SQL details.
-Keep the focus on medical/business relevance only.
-Return only valid, semantic HTML.`;
+Focus exclusively on answering the original question.
+No SQL terminology or technical details.
+No patient-identifying information.
+Be concise and clinically relevant.`;
 
                     const resultExpResponse = await llm.invoke(resultExplanationPrompt);
                     resultExplanation = typeof resultExpResponse === 'string' ? resultExpResponse : resultExpResponse.content || '';

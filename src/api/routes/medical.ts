@@ -1003,34 +1003,37 @@ RESTRUCTURING REQUIREMENTS:
 20. **FORBIDDEN COLUMN PATTERNS**: NEVER use columns ending in '_count', '_total', '_sum', '_avg' unless they physically exist in the sample data. Do NOT generate queries with aggregated column names that don't exist in the actual database schema.
 21. **SAMPLE DATA IS GROUND TRUTH**: The sample data shows you EXACTLY which columns exist. If a column is not in the sample data, it does NOT exist. Period. No exceptions. No assumptions. No guessing.
 22. **AGGREGATE FUNCTIONS ONLY**: If you need counts, sums, or calculations, use SQL aggregate functions like COUNT(*), SUM(existing_column), AVG(existing_column). Do NOT reference made-up column names to get these values.
-23. **MULTI-SHEET EXCEL FORMAT**: Generate results organized for multi-sheet Excel export where different record types are separated into different sheets. Structure the output as a JSON object with sheet names as keys and their corresponding data arrays as values. Each sheet should contain homogeneous records (same entity type) with consistent column structures. 
+23. **🚨 CRITICAL PATIENT TABLE RESTRICTION 🚨**: When querying the patient table (or any table named 'patients'), ONLY include the 'gender' column in query responses unless other specific patient columns are explicitly requested in the user prompt. This restriction applies to ALL patient table columns except 'gender' - do NOT include patient_id, patient_name, dob, city, state, or any other patient columns unless the user specifically asks for them by name.
+24. **MULTI-SHEET EXCEL FORMAT**: Generate results organized for multi-sheet Excel export where different record types are separated into different sheets. Structure the output as a JSON object with sheet names as keys and their corresponding data arrays as values. Each sheet should contain homogeneous records (same entity type) with consistent column structures. 
 
-24. **MAIN ENTITY COUNT AND IDENTIFIER**: ALWAYS include metadata about the main entity being queried. Add a "metadata" section in the response that includes:
+25. **MAIN ENTITY COUNT AND IDENTIFIER**: ALWAYS include metadata about the main entity being queried. Add a "metadata" section in the response that includes:
 - "main_entity": The name of the primary entity type (e.g., "patients", "medications", "appointments")
 - "main_entity_count": The total count of unique main entities using COUNT(*) or COUNT(DISTINCT main_entity_id)
 - "main_entity_identifier": The primary key field name used to identify the main entity (e.g., "patient_id", "medication_id", "appointment_id")
 
-25. **🚨 CRITICAL: ALL COLUMNS FROM ALL TABLES REQUIREMENT 🚨**
+26. **🚨 CRITICAL: ALL COLUMNS FROM ALL TABLES REQUIREMENT 🚨**
 - **MANDATORY**: Include ALL columns from ALL tables involved in the query - this is non-negotiable
+- **⚠️ EXCEPTION - PATIENT TABLE RESTRICTION**: For patient tables, ONLY include the 'gender' column unless other specific patient columns are explicitly mentioned in the user prompt
 - **UNION ALL STRUCTURE**: Use UNION ALL to create separate result sets for each table instead of traditional JOINs
-- **COMPLETE COLUMN SET**: The final result must contain ALL columns from ALL queried tables
+- **COMPLETE COLUMN SET**: The final result must contain ALL columns from ALL queried tables (except restricted patient columns)
 - **NULL PLACEHOLDERS**: Use CAST(NULL AS appropriate_data_type) AS column_name for columns that don't exist in specific tables
 - **EXACT COLUMN COUNT**: All SELECT statements in UNION ALL must have the EXACT same number of columns in the EXACT same order
-- **ALL TABLE REPRESENTATION**: Every table that contains relevant data must be represented with ALL its columns
+- **ALL TABLE REPRESENTATION**: Every table that contains relevant data must be represented with ALL its columns (except restricted patient columns)
 
 **UNION ALL EXAMPLE FOR COMPLETE COLUMN COVERAGE:**
 Example structure for including ALL columns from patients and medications tables:
-- First SELECT: Get ALL patient columns + NULL placeholders for medication columns
-- Second SELECT: Get ALL medication columns + NULL placeholders for patient columns
+- First SELECT: Get ONLY 'gender' column from patient table (restricted) + NULL placeholders for medication columns
+- Second SELECT: Get ALL medication columns + NULL placeholder for patient gender column
 - Both SELECT statements must have identical column count and order
 - Use proper CAST(NULL AS data_type) for missing columns in each table
 - Add source_table column to identify which table each record came from
+- **PATIENT TABLE EXCEPTION**: Only include 'gender' column from patient table unless user explicitly requests other patient columns
 
 **CRITICAL STRUCTURING REQUIREMENTS FOR MULTI-SHEET EXCEL:**
 - MANDATORY ARRAY WRAPPER: The response MUST ALWAYS be wrapped in an array with a single object: [{ metadata: {...}, patients: [...], medications: [...] }]
 - Organize results by entity type: patients, medications, appointments, diagnoses, etc. into separate logical sheets within the single array object.
 - Return EXACTLY this structure: [{"metadata": {"main_entity": "patients", "main_entity_count": 25, "main_entity_identifier": "patient_id"}, "patients": [patient_records], "medications": [medication_records], "appointments": [appointment_records]}]
-- **🚨 CRITICAL**: Each sheet must contain ALL columns from the respective table plus NULL placeholders for columns from other tables
+- **🚨 CRITICAL PATIENT RESTRICTION**: For patient records, include ONLY the 'gender' column unless other specific patient columns are explicitly requested in the user prompt
 - Each sheet (array) should contain flat, denormalized records with consistent column structures.
 - Within each sheet, ensure all rows have the same column structure for proper Excel formatting.
 - Use descriptive sheet names that clearly identify the record type (e.g., "patients", "medications", "appointments", "lab_results").
@@ -1112,9 +1115,8 @@ CRITICAL: The generated SQL should produce results that can be transformed into 
       {
         "patient_id": "WHP-1584821",
         "sheet_type": "patient",
-        "dob": "2019-07-23",
-        "city": "Fort Salmaside",
         "gender": "Male",
+        // ONLY gender column from patient table unless explicitly requested
         "medications": "Fresh Concrete Chair (62MG), Bespoke Steel Shoes (23MG), ...",
         // all patient fields as separate columns
       }
@@ -1159,10 +1161,7 @@ SELECT
   COUNT(DISTINCT patient_id) as main_entity_count,
   'patient_id' as main_entity_identifier,
   CAST(NULL as VARCHAR(50)) as patient_id,
-  CAST(NULL as VARCHAR(100)) as patient_name,
-  CAST(NULL as DATE) as dob,
   CAST(NULL as VARCHAR(50)) as gender,
-  CAST(NULL as VARCHAR(100)) as city,
   CAST(NULL as VARCHAR(100)) as medication_name,
   CAST(NULL as VARCHAR(50)) as medication_status,
   CAST(NULL as VARCHAR(20)) as dosage
@@ -1174,10 +1173,7 @@ SELECT
   CAST(NULL as INTEGER) as main_entity_count,
   CAST(NULL as VARCHAR(50)) as main_entity_identifier,
   patient_id,
-  patient_name,
-  dob,
-  gender,
-  city,
+  gender, -- ONLY gender column from patient table unless explicitly requested
   CAST(NULL as VARCHAR(100)) as medication_name,
   CAST(NULL as VARCHAR(50)) as medication_status,
   CAST(NULL as VARCHAR(20)) as dosage
@@ -1189,10 +1185,7 @@ SELECT
   CAST(NULL as INTEGER) as main_entity_count,
   CAST(NULL as VARCHAR(50)) as main_entity_identifier,
   patient_id,
-  CAST(NULL as VARCHAR(100)) as patient_name,
-  CAST(NULL as DATE) as dob,
   CAST(NULL as VARCHAR(50)) as gender,
-  CAST(NULL as VARCHAR(100)) as city,
   medication_name,
   medication_status,
   dosage
@@ -1261,25 +1254,25 @@ BEFORE FINALIZING THE QUERY:
 5. **USE SAMPLE DATA COLUMNS**: If sample data is available, use only columns that appear in the sample data
 6. **NO INVENTED COLUMNS**: Never create or assume column names. Use ONLY columns from the original SQL and available sample data
 7. **NO AGGREGATED COLUMN ASSUMPTIONS**: NEVER use columns like 'medication_count', 'patient_count', 'total_*', '*_sum', '*_avg' unless they physically exist. If you need counts, use COUNT(*) or COUNT(existing_column)
-8. **VALIDATE HAVING CLAUSE**: If using HAVING clause, ensure all referenced columns either appear in GROUP BY or are aggregate functions
-9. **UNION ALL VALIDATION**: If using UNION ALL for multi-sheet format, ensure ALL SELECT statements have the EXACT same number of columns in the EXACT same order with proper CAST(NULL as DATA_TYPE) for missing columns
-10. **UNION COLUMN CONSISTENCY**: Verify all UNION statements use consistent data types and column names to prevent "each UNION query must have the same number of columns" errors
-11. **SQL STRUCTURE VALIDATION**: Ensure the generated SQL will produce results that include sheet_type fields for organizing into different Excel sheets
-11. **SQL STRUCTURE VALIDATION**: Ensure the generated SQL will produce results that include sheet_type fields for organizing into different Excel sheets
-12. **METADATA SECTION VALIDATION**: Ensure the response includes a metadata section with main_entity, main_entity_count (calculated using COUNT(*) or COUNT(DISTINCT)), and main_entity_identifier fields
-13. **SHEET_TYPE FIELD VALIDATION**: Verify that the generated SQL includes a "sheet_type" field in the SELECT clause to identify record categories
-14. **MULTI-SHEET STRUCTURE VALIDATION**: Ensure the query result can be properly organized into separate sheets by entity type (patients, medications, appointments, etc.)
-15. **FLAT STRUCTURE CHECK**: Verify that each record within an entity type is completely flat with no nested objects or arrays
-16. **SHEET CONSISTENCY**: Ensure all records of the same entity type have identical column structures for proper Excel sheet formatting
-17. **FOREIGN KEY RELATIONSHIPS**: Verify that relationships between entities are maintained through foreign key references (patient_id, appointment_id, etc.) rather than nesting
-18. **NO HIERARCHICAL NESTING**: Eliminate any JSON aggregation or array structures that would create nested data within records
-19. **ENTITY SEPARATION**: Ensure different entity types (patients vs medications vs appointments) can be clearly separated into different result sets or sheets
-20. Check that all JOIN conditions are logical and will maintain data relationships
-21. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
-22. Double-check all parentheses, commas, and syntax elements
-23. Verify ORDER BY clause uses either full expressions or positional references, not aliases
-24. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
-25. **MULTI-SHEET EXPORT READY**: Confirm the result structure is suitable for creating multiple Excel sheets with consistent, flat data in each sheet
+8. **🚨 PATIENT TABLE COLUMN RESTRICTION**: When querying patient table, ONLY include the 'gender' column unless other specific patient columns are explicitly requested in the user prompt. Do NOT include patient_id, patient_name, dob, city, state, or any other patient columns unless explicitly mentioned by the user.
+9. **VALIDATE HAVING CLAUSE**: If using HAVING clause, ensure all referenced columns either appear in GROUP BY or are aggregate functions
+10. **UNION ALL VALIDATION**: If using UNION ALL for multi-sheet format, ensure ALL SELECT statements have the EXACT same number of columns in the EXACT same order with proper CAST(NULL as DATA_TYPE) for missing columns
+11. **UNION COLUMN CONSISTENCY**: Verify all UNION statements use consistent data types and column names to prevent "each UNION query must have the same number of columns" errors
+12. **SQL STRUCTURE VALIDATION**: Ensure the generated SQL will produce results that include sheet_type fields for organizing into different Excel sheets
+13. **METADATA SECTION VALIDATION**: Ensure the response includes a metadata section with main_entity, main_entity_count (calculated using COUNT(*) or COUNT(DISTINCT)), and main_entity_identifier fields
+14. **SHEET_TYPE FIELD VALIDATION**: Verify that the generated SQL includes a "sheet_type" field in the SELECT clause to identify record categories
+15. **MULTI-SHEET STRUCTURE VALIDATION**: Ensure the query result can be properly organized into separate sheets by entity type (patients, medications, appointments, etc.)
+16. **FLAT STRUCTURE CHECK**: Verify that each record within an entity type is completely flat with no nested objects or arrays
+17. **SHEET CONSISTENCY**: Ensure all records of the same entity type have identical column structures for proper Excel sheet formatting
+18. **FOREIGN KEY RELATIONSHIPS**: Verify that relationships between entities are maintained through foreign key references (patient_id, appointment_id, etc.) rather than nesting
+19. **NO HIERARCHICAL NESTING**: Eliminate any JSON aggregation or array structures that would create nested data within records
+20. **ENTITY SEPARATION**: Ensure different entity types (patients vs medications vs appointments) can be clearly separated into different result sets or sheets
+21. Check that all JOIN conditions are logical and will maintain data relationships
+22. Verify compatibility with ${dbType.toUpperCase()} ${dbVersion}
+23. Double-check all parentheses, commas, and syntax elements
+24. Verify ORDER BY clause uses either full expressions or positional references, not aliases
+25. Confirm that any aggregated values used in ORDER BY are properly repeated in the SELECT clause
+26. **MULTI-SHEET EXPORT READY**: Confirm the result structure is suitable for creating multiple Excel sheets with consistent, flat data in each sheet
 
 DO NOT INCLUDE ANY EXPERIMENTAL OR UNTESTED SYNTAX. Only use proven, standard SQL constructs that are guaranteed to work with ${dbType.toUpperCase()} ${dbVersion}.
 
