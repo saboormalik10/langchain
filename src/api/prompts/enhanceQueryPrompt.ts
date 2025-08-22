@@ -76,12 +76,12 @@ ${
 **INCORRECT PATTERN (WILL FAIL):**
 ❌ SELECT column1, column2, COUNT(*) FROM table GROUP BY column1; (missing column2 in GROUP BY)
 ❌ SELECT column1, AVG(column2) FROM table; (missing GROUP BY when using aggregation)
-❌ SELECT column1, column2, risk_score FROM table GROUP BY column1, column2, patient_id HAVING AVG(risk_score) > 2; (risk_score not aggregated but not in GROUP BY)
+❌ SELECT column1, column2, score_value FROM table GROUP BY column1, column2, record_id HAVING AVG(score_value) > 2; (score_value not aggregated but not in GROUP BY)
 
 **FIX STRATEGY:**
 - If using aggregation: Either aggregate ALL columns (COUNT, MAX, MIN, etc.) OR include them in GROUP BY
 - If NOT using aggregation: Remove GROUP BY entirely
-- Example fix: SELECT column1, column2, AVG(risk_score) FROM table GROUP BY column1, column2 HAVING AVG(risk_score) > 2;
+- Example fix: SELECT column1, column2, AVG(score_value) FROM table GROUP BY column1, column2 HAVING AVG(score_value) > 2;
 
 **MYSQL sql_mode=only_full_group_by COMPLIANCE IS ABSOLUTELY MANDATORY**`
     : databaseType.toLowerCase() === "mysql"
@@ -144,16 +144,16 @@ ${versionSpecificInstructions}
 - **ENFORCEMENT**: Use INNER JOINs by default instead of LEFT JOINs to ensure only matching records are returned
 - **RULE**: If Table1 joins with Table2 and results only match from Table1 but NOT from Table2, return ONLY the matching records from Table1 with actual data from Table2
 - **PRINCIPLE**: Only return records where there is meaningful, non-NULL data from ALL joined tables
-- **EXAMPLE**: If joining patients with medications and only some patients have medications, return ONLY patients who HAVE medications (not patients with NULL medication data)
+- **EXAMPLE**: If joining users with orders and only some users have orders, return ONLY users who HAVE orders (not users with NULL order data)
 - **AVOID LEFT JOINs**: Unless user specifically asks to see records with no matches, use INNER JOINs to get only actual matching data
 - **QUALITY CONTROL**: The result set should contain complete, meaningful data from all joined tables - no incomplete or NULL-heavy records
 
 **MATCHING RECORDS EXAMPLES:**
-✅ **CORRECT**: INNER JOIN medications ON patients.id = medications.patient_id (returns only patients who HAVE medications with actual medication data)
-❌ **WRONG**: LEFT JOIN medications ON patients.id = medications.patient_id (includes patients WITHOUT medications showing NULL values)
+✅ **CORRECT**: INNER JOIN orders ON users.id = orders.user_id (returns only users who HAVE orders with actual order data)
+❌ **WRONG**: LEFT JOIN orders ON users.id = orders.user_id (includes users WITHOUT orders showing NULL values)
 
-✅ **CORRECT**: INNER JOIN appointments ON patients.id = appointments.patient_id (returns only patients who HAVE appointments with actual appointment data)  
-❌ **WRONG**: LEFT JOIN appointments ON patients.id = appointments.patient_id (includes patients WITHOUT appointments showing NULL appointment data)
+✅ **CORRECT**: INNER JOIN bookings ON users.id = bookings.user_id (returns only users who HAVE bookings with actual booking data)  
+❌ **WRONG**: LEFT JOIN bookings ON users.id = bookings.user_id (includes users WITHOUT bookings showing NULL booking data)
 
 **CRITICAL PRINCIPLE**: The user wants to see meaningful relationships and actual data connections, not records padded with NULL values from tables where no matches exist.
 
@@ -165,17 +165,17 @@ ${versionSpecificInstructions}
 - **ENFORCEMENT**: Combine conditions from multiple tables with OR to cast a wider search net and find matches in any of the joined tables
 
 **OR CONDITION EXAMPLES:**
-✅ **CORRECT**: User asks "find John" with patients and doctors joined:
-   WHERE patients.name LIKE '%John%' OR doctors.name LIKE '%John%'
+✅ **CORRECT**: User asks "find John" with users and employees joined:
+   WHERE users.name LIKE '%John%' OR employees.name LIKE '%John%'
 
-✅ **CORRECT**: User asks "show records for diabetes" with patients and conditions tables:
-   WHERE patients.diagnosis LIKE '%diabetes%' OR conditions.condition_name LIKE '%diabetes%'
+✅ **CORRECT**: User asks "show records for technology" with products and categories tables:
+   WHERE products.category LIKE '%technology%' OR categories.category_name LIKE '%technology%'
 
-✅ **CORRECT**: User asks "find high risk" with risk_details and assessments tables:
-   WHERE risk_details.risk_category = 'High' OR assessments.risk_level = 'High'
+✅ **CORRECT**: User asks "find high priority" with tasks and priorities tables:
+   WHERE tasks.priority_level = 'High' OR priorities.level = 'High'
 
-✅ **CORRECT**: User asks "medications containing aspirin" with medications and prescriptions:
-   WHERE medications.medication_name LIKE '%aspirin%' OR prescriptions.drug_name LIKE '%aspirin%'
+✅ **CORRECT**: User asks "items containing laptop" with products and inventory:
+   WHERE products.product_name LIKE '%laptop%' OR inventory.item_name LIKE '%laptop%'
 
 **OR CONDITION ANALYSIS PROCESS:**
 1. **IDENTIFY USER SEARCH CRITERIA**: Extract key search terms, values, or conditions from the user query
@@ -193,14 +193,14 @@ ${versionSpecificInstructions}
 - **COMPREHENSIVE SEARCH**: Ensure search criteria are applied across ALL relevant columns in ALL High/Medium relevance tables using OR operators
 
 **HIGH/MEDIUM RELEVANCE OR CONDITION EXAMPLES:**
-✅ **CORRECT**: User asks "find diabetes records" with patients (High) and medical_history (Medium) tables joined:
-   WHERE patients.diagnosis LIKE '%diabetes%' OR medical_history.condition_name LIKE '%diabetes%' OR medical_history.notes LIKE '%diabetes%'
+✅ **CORRECT**: User asks "find technology records" with products (High) and product_history (Medium) tables joined:
+   WHERE products.category LIKE '%technology%' OR product_history.category_name LIKE '%technology%' OR product_history.notes LIKE '%technology%'
 
-✅ **CORRECT**: User asks "show John's records" with patients (High) and doctors (Medium) tables joined:
-   WHERE patients.patient_name LIKE '%John%' OR patients.first_name LIKE '%John%' OR doctors.doctor_name LIKE '%John%'
+✅ **CORRECT**: User asks "show John's records" with users (High) and employees (Medium) tables joined:
+   WHERE users.user_name LIKE '%John%' OR users.first_name LIKE '%John%' OR employees.employee_name LIKE '%John%'
 
-✅ **CORRECT**: User asks "high priority cases" with cases (High) and priorities (Medium) tables joined:
-   WHERE cases.priority = 'High' OR priorities.priority_level = 'High' OR priorities.urgency = 'High'
+✅ **CORRECT**: User asks "high priority cases" with tasks (High) and priorities (Medium) tables joined:
+   WHERE tasks.priority = 'High' OR priorities.priority_level = 'High' OR priorities.urgency = 'High'
 
 **HIGH/MEDIUM RELEVANCE ANALYSIS STEPS:**
 1. **IDENTIFY JOINED TABLES**: List all tables marked as High or Medium relevance that are being joined
@@ -274,7 +274,7 @@ WHERE table2.classification = 'X';
 
 **STEP 2: EXAMINE RELEVANT SCHEMAS** 
 - Use sql_db_schema("table_name") for tables that might contain data for the user's query
-- Focus on tables that match the user's question topic (patients, medications, lab results, etc.)
+- Focus on tables that match the user's question topic (users, products, orders, etc.)
 
 **STEP 3: GENERATE VERSION-COMPATIBLE SQL**
 - Create a SQL query compatible with ${databaseType?.toUpperCase()} ${databaseVersionString}
@@ -290,16 +290,16 @@ ${
   databaseVersionInfo &&
   databaseVersionInfo.hasOnlyFullGroupBy
     ? `
-- ✅ For "patients with count": SELECT patient_id, gender, COUNT(*) FROM patients GROUP BY patient_id, gender;
-- ✅ For "average risk score by gender": SELECT gender, AVG(risk_score) FROM patients GROUP BY gender;
-- ✅ For "high risk patients": SELECT patient_id, risk_category FROM risk_details WHERE risk_category = 'High';
-- ❌ AVOID: SELECT patient_id, gender, COUNT(*) FROM patients GROUP BY patient_id; (missing gender in GROUP BY)
-- ❌ AVOID: SELECT risk_score, patient_name FROM risk_details GROUP BY patient_id; (columns not in GROUP BY)
+- ✅ For "users with count": SELECT user_id, category, COUNT(*) FROM users GROUP BY user_id, category;
+- ✅ For "average score by category": SELECT category, AVG(score_value) FROM users GROUP BY category;
+- ✅ For "high priority items": SELECT record_id, priority_level FROM priority_details WHERE priority_level = 'High';
+- ❌ AVOID: SELECT user_id, category, COUNT(*) FROM users GROUP BY user_id; (missing category in GROUP BY)
+- ❌ AVOID: SELECT score_value, user_name FROM score_details GROUP BY user_id; (columns not in GROUP BY)
 `
     : `
-- For "show patients": SELECT patient_id, gender, dob, state, city FROM patients LIMIT 10;
-- For "medications": SELECT patient_id, medications FROM patients WHERE medications IS NOT NULL LIMIT 10;
-- For "high risk": SELECT record_id, risk_category, risk_score FROM risk_details WHERE risk_category LIKE '%High%' LIMIT 10;
+- For "show users": SELECT user_id, category, created_date, status, location FROM users LIMIT 10;
+- For "orders": SELECT user_id, order_items FROM users WHERE order_items IS NOT NULL LIMIT 10;
+- For "high priority": SELECT record_id, priority_level, priority_score FROM priority_details WHERE priority_level LIKE '%High%' LIMIT 10;
 `
 }
 
@@ -371,14 +371,14 @@ ${
 - **USE INNER JOINS**: Use INNER JOINs by default to ensure only matching records are returned - avoid LEFT JOINs unless specifically requested
 - **NO NULL PADDING**: Do NOT return records with NULL values from tables where no matches exist
 - **QUALITY ASSURANCE**: Every returned record should have meaningful, non-NULL data from ALL joined tables
-- **EXAMPLE**: If joining patients with medications, return ONLY patients who HAVE medications with actual medication data
-- **FORBIDDEN**: Including patients WITHOUT medications showing NULL medication values
+- **EXAMPLE**: If joining users with orders, return ONLY users who HAVE orders with actual order data
+- **FORBIDDEN**: Including users WITHOUT orders showing NULL order values
 
 **🚨 CRITICAL OR CONDITION ENFORCEMENT FOR MULTI-TABLE SEARCHES 🚨**
 **MANDATORY: APPLY USER SEARCH CRITERIA ACROSS ALL JOINED TABLES**
 - **CRITICAL RULE**: When joining multiple tables, analyze user query for search conditions that could apply to similar columns in different joined tables
 - **USE OR OPERATORS**: Combine search conditions across tables with OR to search comprehensively across all joined tables
-- **SEARCH STRATEGY**: If user asks for "John", search ALL name-related columns: WHERE patients.name LIKE '%John%' OR doctors.name LIKE '%John%'
+- **SEARCH STRATEGY**: If user asks for "John", search ALL name-related columns: WHERE users.name LIKE '%John%' OR employees.name LIKE '%John%'
 - **CONDITION MAPPING**: Map user search terms to similar columns across ALL joined tables (names, descriptions, categories, statuses, etc.)
 - **COMPREHENSIVE SEARCH**: Never limit search conditions to just one table - extend search criteria to ALL relevant joined tables using OR operators
 
@@ -454,7 +454,7 @@ STEP 1: LIST ALL TABLES
 
 STEP 2: IDENTIFY RELEVANT TABLES WITH STRICT ENTITY FOCUS
 - Based on the user query, identify which tables are likely to contain the requested information
-- **CRITICAL: Identify the PRIMARY ENTITY** that the user is asking about (e.g., patients, medications, diagnoses)
+- **CRITICAL: Identify the PRIMARY ENTITY** that the user is asking about (e.g., users, orders, categories)
 - **CRITICAL: The PRIMARY ENTITY table should return COMPLETE records (all non-ID columns)**
 - **CRITICAL: Related tables should provide columns used in filtering/conditions AND relevant context**
 - For each potentially relevant table, explicitly state why you believe it's needed
@@ -463,8 +463,8 @@ STEP 2: IDENTIFY RELEVANT TABLES WITH STRICT ENTITY FOCUS
   * **If multiple tables have similar or overlapping meanings/purposes, ALWAYS choose the table that contains the CONDITION COLUMNS from the user query**
   * **PRIORITIZE tables where the user's WHERE/HAVING/filtering conditions can be applied**
   * **Only go to those tables where the user query condition lies - avoid tables that don't have the filtering criteria**
-  * **Example: If user asks "patients with high glucose", choose the table that has glucose columns, not just patient demographics**
-  * **Example: If user asks "medications with dosage > 100mg", choose the table that has dosage columns, not just medication names**
+  * **Example: If user asks "users with high score", choose the table that has score columns, not just user demographics**
+  * **Example: If user asks "orders with quantity > 100mg", choose the table that has quantity columns, not just order names**
 - EXPERT TABLE SELECTION RULES:
   * If multiple tables seem related to the same medical concept (e.g., multiple patient tables, test tables, etc.), analyze the query context carefully
   * Choose tables based on QUERY SPECIFICITY: More specific user requirements should guide you to more specialized tables
