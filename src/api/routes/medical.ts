@@ -16,7 +16,6 @@ import {
     generateComprehensiveDatabaseAnalystPrompt,
 } from "../prompts/enhanceQueryPrompt";
 import { testOrganizationDatabaseConnection } from "../services/connectionTestService";
-import { initializeLangChainAndConversation, conversationSessions, saveConversationToMemory } from "../services/conversationService";
 import { detectDatabaseVersion } from "../services/databaseVersionService";
 import { executeChainLogic } from "../services/chainExecutionService";
 import { processChainSql } from "../services/chainSqlProcessingService";
@@ -59,6 +58,12 @@ function addQueryToHistory(sessionId: string, query: string): void {
     
     history.queries.push(query);
     history.timestamp = new Date();
+    
+    // Keep only last 3 questions to prevent prompt explosion
+    if (history.queries.length > 3) {
+        history.queries = history.queries.slice(-3);
+    }
+    
     simpleConversationHistory.set(sessionId, history);
     
     console.log(`📝 Added query to history for session ${sessionId}: "${query}"`);
@@ -856,22 +861,22 @@ export function getAzureOpenAIClient(): AzureOpenAI | null {
  * @returns Promise with bar chart analysis and parameters
  */
 
-// Cleanup function for expired conversations (runs every hour)
+// Cleanup function for expired simple conversation sessions (runs every hour)
 const CONVERSATION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 setInterval(() => {
     const now = new Date();
     let expiredCount = 0;
 
-    conversationSessions.forEach((session, sessionId) => {
-        const timeDiff = now.getTime() - session.lastAccess.getTime();
+    simpleConversationHistory.forEach((session, sessionId) => {
+        const timeDiff = now.getTime() - session.timestamp.getTime();
         if (timeDiff > CONVERSATION_TIMEOUT_MS) {
-            conversationSessions.delete(sessionId);
+            simpleConversationHistory.delete(sessionId);
             expiredCount++;
         }
     });
 
     if (expiredCount > 0) {
-        console.log(`🧹 Cleaned up ${expiredCount} expired conversation sessions`);
+        console.log(`🧹 Cleaned up ${expiredCount} expired simple conversation sessions`);
     }
 }, 60 * 60 * 1000); // Check every hour
 
@@ -1787,22 +1792,8 @@ export function medicalRoutes(): Router {
                 }
 
                 // ========== STEP 2: INITIALIZE CONVERSATION SETUP ==========
-                // We need conversation context for better prompt analysis
-                let chatHistory: any[] = [];
-                
-                if (conversational) {
-                    try {
-                        // Initialize LangChain app and setup conversation session to get chat history
-                        const setupResult = await initializeLangChainAndConversation(organizationId, conversational, sessionId, res);
-                        if (!setupResult) {
-                            return; // Error response already sent by the service
-                        }
-                        chatHistory = setupResult.chatHistory || [];
-                    } catch (setupError) {
-                        console.warn('⚠️ Could not initialize conversation for prompt analysis, proceeding without history');
-                        chatHistory = [];
-                    }
-                }
+                // Simple conversation history for context - no complex LangChain setup needed
+                const previousQuestions = conversational && sessionId ? getQueryHistory(sessionId) : [];
 
                 // ========== STEP 3: PROMPT ANALYSIS WITH CONVERSATION CONTEXT ==========
                 console.log('🔍 Step 3: Analyzing user prompt intent with conversation context...');
@@ -1810,7 +1801,7 @@ export function medicalRoutes(): Router {
                 let promptAnalysis: any;
                 try {
                     // Analyze if the prompt is database-related or casual conversation
-                    promptAnalysis = await PromptAnalysisService.analyzePrompt(userPrompt, organizationId, chatHistory);
+                    promptAnalysis = await PromptAnalysisService.analyzePrompt(userPrompt, organizationId, []);
 
                     console.log(`📊 Prompt Analysis Result: ${promptAnalysis.isDatabaseRelated ? 'DATABASE_QUERY' : 'CASUAL_CONVERSATION'} (confidence: ${promptAnalysis.confidence.toFixed(2)})`);
 
@@ -1833,7 +1824,7 @@ export function medicalRoutes(): Router {
                                 classified_as: promptAnalysis.category,
                                 ai_analysis: promptAnalysis.success ? 'used' : 'fallback',
                                 error: promptAnalysis.error || null,
-                                conversation_context_used: chatHistory.length > 0
+                                conversation_context_used: false
                             }
                         });
                     }
@@ -1868,7 +1859,7 @@ export function medicalRoutes(): Router {
                         category: promptAnalysis.category,
                         reasoning: promptAnalysis.reasoning,
                         analysisSuccess: promptAnalysis.success,
-                        conversationContextUsed: chatHistory.length > 0
+                        conversationContextUsed: false
                     }
                     // No schema validations since we're trusting the sqlAgent
                 };
@@ -1946,17 +1937,10 @@ export function medicalRoutes(): Router {
                     }
                     // sendMessage("✅ Connected to database");
 
-                    // Initialize LangChain app and setup conversation session
-                    const setupResult = await initializeLangChainAndConversation(organizationId, conversational, sessionId, res);
-                    if (!setupResult) {
-                        return; // Error response already sent by the service
-                    }
-
-                    const { langchainApp, sessionData, chatHistory, sqlAgent, dbConfig } = setupResult;
-
-                    // Get minimal database information to guide the agent
-                    // const schemaResult = await getMinimalDatabaseSchema(organizationId, dbConfig, debugInfo);
-                    // const tables = schemaResult.tables;
+                    // Get database config and minimal LangChain setup for SQL Agent
+                    const dbConfig = await databaseService.getOrganizationDatabaseConnection(organizationId);
+                    const langchainApp = await multiTenantLangChainService.getOrganizationLangChainApp(organizationId);
+                    const sqlAgent = (langchainApp as any).sqlAgent;
 
                     // ========== DATABASE VERSION DETECTION ==========
                     const versionResult = await detectDatabaseVersion(organizationId, dbConfig);
@@ -1976,7 +1960,7 @@ export function medicalRoutes(): Router {
                         mysqlVersionInfo,
                         mySQLVersionString,
                         conversational,
-                        sessionData
+                        { sessionId } // Simplified session data
                     );
 
                     let chainSQLGenerated = chainResult.chainSQLGenerated;
@@ -2017,12 +2001,14 @@ export function medicalRoutes(): Router {
                             });
                             console.log({ versionSpecificInstructions })
 
-                            // Add conversation context if in conversational mode
-                            let conversationalContext = '';
-                            if (conversational && Array.isArray(chatHistory) && chatHistory.length > 0) {
-                                conversationalContext = '\n\nPrevious conversation:\n' + chatHistory
-                                    .map((msg: any) => `${msg.type === 'human' ? 'User' : 'Assistant'}: ${msg.content}`)
-                                    .join('\n') + '\n\n';
+                            // Add previous questions context if available
+                            let previousQuestionsContext = '';
+                            if (conversational && sessionId) {
+                                const previousQueries = getQueryHistory(sessionId);
+                                if (previousQueries.length > 0) {
+                                    previousQuestionsContext = '\n\nPrevious questions in this session:\n' + 
+                                        previousQueries.map((q, i) => `${i + 1}. ${q}`).join('\n') + '\n\n';
+                                }
                             }
 
                             // Debug: Check globalTableSampleData status before table analysis
@@ -2031,17 +2017,14 @@ export function medicalRoutes(): Router {
                             // Debug: Check sessionId consistency and conversation history
                             console.log('🔍 SessionId for table analysis:', sessionId);
                             console.log('🔍 Conversational mode:', conversational);
-                            
-                            // Get conversation history for AI analysis
-                            const previousQueries = conversational && sessionId ? getQueryHistory(sessionId) : [];
-                            console.log('📜 Previous queries for context:', previousQueries);
+                            console.log('📜 Previous queries for context:', conversational && sessionId ? getQueryHistory(sessionId) : []);
 
                             // Get all database tables and columns with AI-generated purpose descriptions
                             const tableAnalysisResult = await getTableDescriptionsWithAI(
                                 organizationId,
                                 databaseType,
                                 query,
-                                previousQueries // Pass array of previous queries for conversation context
+                                conversational && sessionId ? getQueryHistory(sessionId) : [] // Pass array of previous queries for conversation context
                             );
 
                             if (!tableAnalysisResult.success) {
@@ -2067,7 +2050,7 @@ export function medicalRoutes(): Router {
                                 query,
                                 databaseVersionInfo,
                                 tableDescriptions,
-                                conversationalContext,
+                                conversationalContext: previousQuestionsContext,
                                 currentAttempt,
                                 previousAttemptError: previousAttemptError || undefined,
                             });
@@ -2284,14 +2267,6 @@ export function medicalRoutes(): Router {
                                 }
                             } : {}),
 
-                            // Add conversation information if in conversational mode
-                            ...(conversational ? {
-                                conversation: {
-                                    sessionId: sessionId,
-                                    historyLength: Array.isArray(chatHistory) ? chatHistory.length : 0,
-                                    mode: useChains ? 'conversational_with_chains' : 'conversational'
-                                }
-                            } : {}),
                             captured_queries: capturedSQLQueries,
                             intermediate_steps: intermediateSteps,
                             debug_info: debugInfo,
@@ -2401,7 +2376,7 @@ export function medicalRoutes(): Router {
                             debugInfo,
                             generateDescription,
                             conversational,
-                            sessionData,
+                            sessionData: { sessionId },
                             currentAttempt,
                             maxRetryAttempts,
                             agentResult,
@@ -2411,7 +2386,7 @@ export function medicalRoutes(): Router {
                             mysqlVersionInfo,
                             startTime,
                             sessionId,
-                            chatHistory,
+                            chatHistory: [],
                             responseSent,
                             res
                         });
@@ -2455,26 +2430,6 @@ export function medicalRoutes(): Router {
                 
                 // Save conversation to memory if in conversational mode (BEFORE sending response)
                 if (conversational && sessionId && finalResult) {
-                    console.log('💾 Saving conversation to BufferMemory BEFORE sending response...');
-                    console.log('🔍 SessionId for saving conversation:', sessionId);
-                    console.log('🔍 UserPrompt:', userPrompt?.substring(0, 100));
-                    try {
-                        // Extract the AI response text from the finalResult
-                        let aiResponse = '';
-                        if (finalResult.description) {
-                            aiResponse = finalResult.description;
-                        } else if (finalResult.sql_results?.rows) {
-                            aiResponse = `Query executed successfully. Found ${finalResult.sql_results.rows.length} results.`;
-                        } else {
-                            aiResponse = 'Query processed successfully.';
-                        }
-                        
-                        await saveConversationToMemory(sessionId, userPrompt, aiResponse);
-                        console.log('✅ Conversation successfully saved to memory before response');
-                    } catch (memoryError) {
-                        console.error('❌ Error saving conversation to memory:', memoryError);
-                        // Don't fail the response if memory saving fails
-                    }
                 }
                 
                 responseSent = true;

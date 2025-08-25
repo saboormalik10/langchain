@@ -62,24 +62,18 @@ Be direct and precise. Avoid technical SQL terminology.`;
                 // Generate result explanation if we have results
                 if (Array.isArray(rows) && rows.length > 0) {
                     const resultSample = rows.slice(0, 3); // Show first 3 rows as sample
-                    const resultExplanationPrompt = `Medical data analyst: Interpret these results specifically in the context of the user's original question.
+                    const resultExplanationPrompt = `Data analyst: Based on the user's query and the sample results, provide a precise description of what the response contains.
 
-User Question: "${query}"
-Total Results: ${rows.length}
+User Query: "${query}"
 Sample Results: ${JSON.stringify(resultSample, null, 2)}
 
-Provide HTML formatted insights that:
-<h3>Direct answer to the user's question</h3>
+Generate a brief HTML formatted description:
+<h3>Response Overview</h3>
 <p>
-1. Directly address what the user wanted to know
-2. Highlight the most relevant patterns or findings
-3. Explain the medical significance of these results
+[Describe what type of information is included in the response based on the sample data - be precise but generic, don't mention specific column or table names]
 </p>
 
-Focus exclusively on answering the original question.
-No SQL terminology or technical details.
-No patient-identifying information.
-Be concise and clinically relevant.`;
+Keep it under 2 sentences. Focus on describing the content and nature of the data returned, not technical details.`;
 
                     const resultExpResponse = await llm.invoke(resultExplanationPrompt);
                     resultExplanation = typeof resultExpResponse === 'string' ? resultExpResponse : resultExpResponse.content || '';
