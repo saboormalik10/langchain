@@ -2258,7 +2258,7 @@ export function medicalRoutes(): Router {
                             sql_final: finalSQL,
                             sql_results: {
                                 resultExplanation,
-                                data: groupAndCleanData(parseRows(rows)),
+                                sql_final: groupAndCleanData(parseRows(rows)),
                                 processing_time: `${(processingTime || 0).toFixed(2)}ms`,
                                 // Add graph data to sql_results if available
                                 // ...(graphData ? { graph_data: graphData } : {})
@@ -2333,16 +2333,34 @@ export function medicalRoutes(): Router {
                         // we use the results directly without separate restructuring
                         const updatedResponse = {
                             success: true,
-                            data: groupAndCleanData(parseRows(rows || [])),
-                            sql: finalSQL,
-                            total_records: rows ? rows.length : 0,
-                            is_restructured: true,
-                            restructure_method: 'integrated_sql_agent',
-                            database_type: 'mysql',
-                            database_version: mySQLVersionString,
-                            ...(debugInfo && Object.keys(debugInfo).length > 0 ? {
-                                debug_info: debugInfo
-                            } : {}),
+                            query_processed: query,
+                            sql_extracted: extractedSQL,
+                            sql_final: finalSQL,
+                            sql_results: {
+                                resultExplanation,
+                                sql_final: groupAndCleanData(parseRows(rows || [])),
+                                processing_time: `${(performance.now() - startTime).toFixed(2)}ms`,
+                            },
+                            result_count: Array.isArray(rows) ? rows.length : 0,
+                            field_info: fields ? fields.map((field: any) => ({
+                                name: field.name,
+                                type: field.type,
+                                table: field.table
+                            })) : [],
+                            processing_time: `${(performance.now() - startTime).toFixed(2)}ms`,
+                            query_description: queryDescription,
+                            captured_queries: capturedSQLQueries,
+                            intermediate_steps: intermediateSteps,
+                            debug_info: debugInfo,
+                            database_info: {
+                                organization_id: organizationId,
+                                host: (await databaseService.getOrganizationDatabaseConnection(organizationId)).host,
+                                database: (await databaseService.getOrganizationDatabaseConnection(organizationId)).database,
+                                port: (await databaseService.getOrganizationDatabaseConnection(organizationId)).port,
+                                mysql_version: mySQLVersionString,
+                                version_details: mysqlVersionInfo,
+                                query_adapted_to_version: !!mysqlVersionInfo
+                            },
                             timestamp: new Date().toISOString()
                         };
 
@@ -2460,7 +2478,14 @@ export function medicalRoutes(): Router {
                 }
                 
                 responseSent = true;
-                res.json({ ...finalResult, type: 'SqlAgent' });
+                
+                // Keep the full response format but clean out restructure_info from sql_results
+                const cleanedFinalResult = { ...finalResult };
+                if (cleanedFinalResult.sql_results?.restructure_info) {
+                    delete cleanedFinalResult.sql_results.restructure_info;
+                }
+                
+                res.json({ ...cleanedFinalResult, type: 'SqlAgent' });
             }
         } catch (mainError: any) {
             // Handle any errors that occur in the main try block
