@@ -951,15 +951,21 @@ ${versionSpecificInstructions}
 - When the user query requires data from multiple related tables, DON'T choose just one table - JOIN all relevant tables
 - Look for foreign key relationships (columns ending in _id) to identify how tables connect
 - **🚨🚨🚨 CRITICAL: Use AI table descriptions to guide JOIN decisions 🚨🚨🚨**
-  - **🚨 MANDATORY RULE: JOIN ALL tables marked with "Relevance to query: High" and "Relevance to query: Medium" in the AI analysis**
-  - **🚨 ZERO TOLERANCE: DO NOT IGNORE MEDIUM RELEVANCE TABLES** - They often contain crucial supplementary data
-  - **🚨 ENFORCEMENT: When multiple tables have "High" and "Medium" relevance, they MUST ALL be JOINed together to provide complete information**
-  - **🚨 COMPLIANCE CHECK: Before writing SQL, verify ALL High AND Medium relevance tables are included**
-  - Review the AI-generated table descriptions to understand which tables contain complementary data for the query
+  - **🚨 MANDATORY RULE: ALWAYS JOIN ALL tables marked with "Relevance to query: High" in the AI analysis**
+  - **🚨 CONDITIONAL RULE: JOIN tables marked with "Relevance to query: Medium" ONLY IF they have the same context within the query**
+    - **Medium Priority Context Check**: Analyze if Medium relevance tables contain data that directly relates to the same medical domain, patient context, or time period as the query
+    - **Medium Priority Examples**: 
+      - ✅ JOIN if query asks about "patient medications" and Medium table contains "patient allergies" (same patient context)
+      - ✅ JOIN if query asks about "lab results" and Medium table contains "test metadata" (same testing context)  
+      - ❌ SKIP if query asks about "patient demographics" and Medium table contains "billing information" (different context)
+      - ❌ SKIP if query asks about "recent lab results" and Medium table contains "historical appointment data" (different time context)
+  - **🚨 ENFORCEMENT: Always JOIN High relevance tables, conditionally JOIN Medium relevance tables based on contextual alignment**
+  - **🚨 COMPLIANCE CHECK: Before writing SQL, verify ALL High relevance tables are included and Medium tables are evaluated for contextual relevance**
+  - Review the AI-generated table descriptions to understand which tables contain complementary data within the same query context
 - Use sample data to identify foreign key connections and table relationships
 - Always include necessary JOIN conditions to get complete information for the user's query
-- **🚨 CRITICAL REMINDER: Medium relevance tables are REQUIRED, not optional - they provide essential context and completeness**
-- **🚨 FINAL VERIFICATION: Double-check that your SQL includes EVERY High AND Medium relevance table identified by AI analysis**
+- **🚨 CRITICAL REMINDER: High relevance tables are MANDATORY, Medium relevance tables are CONDITIONAL based on query context alignment**
+- **🚨 FINAL VERIFICATION: Double-check that your SQL includes EVERY High relevance table and contextually relevant Medium relevance tables**
 
 # CRITICAL JOIN CONDITION RULES - MANDATORY COMPLIANCE
 
@@ -1369,9 +1375,10 @@ CRITICAL CONSISTENCY RULES:
 - **ABSOLUTE RULE: Be selective - don't include all available columns, focus on what answers the user's question**
 - **ABSOLUTE RULE: NEVER use SQL features not supported by ${databaseType.toUpperCase()} ${databaseVersionString}**
 - **ABSOLUTE RULE: Strictly adhere to the version-specific GROUP BY rules**
-- **🚨🚨🚨 ABSOLUTE RULE #1 PRIORITY: JOIN ALL tables marked with "Relevance to query: High" and "Relevance to query: Medium" in AI analysis 🚨🚨🚨**
-- **🚨🚨🚨 ABSOLUTE RULE: DO NOT choose just one table when multiple have High relevance and Medium relevance - JOIN ALL OF THEM 🚨🚨🚨**
-- **🚨🚨🚨 MEDIUM RELEVANCE IS REQUIRED: Tables marked with "Medium" relevance are NOT optional - they MUST be included in the query 🚨🚨🚨**
+- **🚨🚨🚨 ABSOLUTE RULE #1 PRIORITY: ALWAYS JOIN ALL tables marked with "Relevance to query: High" in AI analysis 🚨🚨🚨**
+- **🚨🚨🚨 ABSOLUTE RULE #2 PRIORITY: JOIN tables marked with "Relevance to query: Medium" ONLY IF they have the same context within the query 🚨🚨🚨**
+- **🚨🚨🚨 HIGH RELEVANCE IS MANDATORY: Tables marked with "High" relevance are REQUIRED and MUST be included in every query 🚨🚨🚨**
+- **🚨🚨🚨 MEDIUM RELEVANCE IS CONDITIONAL: Tables marked with "Medium" relevance are CONDITIONAL - include only if contextually aligned with query domain 🚨🚨🚨**
 - **🚨🚨🚨 ABSOLUTE RULE: Use AI table descriptions to identify which tables MUST be JOINed together for complete answers 🚨🚨🚨**
 - NEVER skip any of the 6 steps above
 - ALWAYS document your findings at each step
@@ -1500,6 +1507,247 @@ Before writing your SQL query, MUST perform this verification:
 10. ✅ Am I maximizing the value of each join by including relevant data from each table?
 
 **🚨 RULE ENFORCEMENT: If you cannot answer YES to all 10 verification questions, REVISE your query to include relevant information from ALL joined tables in the SELECT clause.**
+
+🎯 **CRITICAL MULTI-SHEET EXCEL RESTRUCTURING REQUIREMENTS** 🎯
+
+**MANDATORY: Your SQL query MUST generate results that can be transformed into Excel multi-sheet format**
+
+**RESTRUCTURING REQUIREMENTS (MANDATORY - NOT OPTIONAL):**
+1. **🚨 MANDATORY ONE SHEET PER TABLE 🚨**: EVERY table involved in the query MUST have its own separate SELECT statement with unique sheet_type in the UNION ALL structure. No exceptions - each table gets its own sheet.
+2. **🚨 MANDATORY UNION ALL WITH ALL COLUMNS 🚨**: Use UNION ALL structure to include ALL columns from ALL tables involved in the query. Each SELECT statement must include every column from every table, using CAST(NULL AS data_type) for missing columns.
+3. **ELIMINATE REDUNDANCY**: Use appropriate grouping to group related entities (e.g., patients, medications, lab tests)
+4. **MAINTAIN DATA INTEGRITY**: Don't lose any information from the original query intent
+5. **BE LOGICAL**: Structure should make business sense for the data domain
+6. **USE APPROPRIATE GROUPING**: Identify the main entity and group related data under it
+7. **PREVENT DUPLICATE DATA**: Ensure no duplicate records appear in any field of the response - each record should be unique
+8. **AVOID IDENTICAL/REPETITIVE DATA**: Do NOT generate queries that return identical values across multiple rows or columns. Use DISTINCT, proper GROUP BY, and appropriate aggregation to eliminate repetitive data patterns.
+9. **MYSQL GROUP BY STRICT COMPLIANCE**: For MySQL, ensure every non-aggregated column in SELECT appears in GROUP BY clause (sql_mode=only_full_group_by)
+10. **VERSION COMPATIBILITY**: Ensure the generated SQL is compatible with ${databaseType.toUpperCase()} ${databaseVersionString}
+11. **SCHEMA ACCURACY**: Use ONLY validated table and column names from the database schema
+12. **EXACT COLUMN NAMES**: Do NOT assume, guess, or make up column names. Use ONLY the exact column names provided in the validated schema.
+13. **STRICT COLUMN VALIDATION**: Before using any column, verify it exists in the validated columns list for that table.
+14. **SAMPLE DATA VERIFICATION**: Use the provided sample data to VERIFY that columns actually exist and contain the expected data types.
+15. **NO COLUMN ASSUMPTIONS**: Never assume standard column names. Use ONLY the exact column names shown in the sample data and schema.
+16. **NEVER INVENT COLUMN NAMES**: CRITICAL - Do NOT create imaginary columns like 'medication_count', 'patient_count', 'summary_id', 'total_medications', 'risk_score', etc. If you need to count something, use COUNT(*) or COUNT(existing_column_name).
+17. **🚨 METADATA SINGLE RECORD RULE 🚨**: Metadata sheet must return exactly 1 record with summary count of only matched records that satisfy query conditions.
+18. **🚨 MATCHED RECORDS ONLY RULE 🚨**: Each table sheet must include only records that satisfy the query conditions - do NOT include unmatched records.
+19. **🚨 CRITICAL PATIENT TABLE RESTRICTION 🚨**: When querying the patient table (or any table named 'patients'), ONLY include the 'gender' column in query responses unless other specific patient columns are explicitly requested in the user prompt.
+20. **MULTI-SHEET EXCEL FORMAT**: Generate results organized for multi-sheet Excel export where different record types are separated into different sheets.
+
+**🚨🚨🚨 CRITICAL UNION SYNTAX RULES - PREVENT "syntax error at or near UNION" ERRORS 🚨🚨🚨**
+
+**🚫 ABSOLUTE PROHIBITION: NEVER PLACE LIMIT OR ORDER BY INSIDE UNION STATEMENTS 🚫**
+
+**❌ FORBIDDEN PATTERNS THAT CAUSE SYNTAX ERRORS:**
+\`\`\`
+-- WRONG! ORDER BY in middle of UNION causes syntax error
+SELECT col1, col2 FROM table1 ORDER BY col1 LIMIT 1 UNION ALL 
+SELECT col1, col2 FROM table2
+
+-- WRONG! LIMIT in middle of UNION causes syntax error  
+SELECT col1, col2 FROM table1 LIMIT 1 UNION ALL
+SELECT col1, col2 FROM table2
+
+-- WRONG! Multiple ORDER BY/LIMIT between UNION statements
+SELECT col1 FROM table1 ORDER BY col1 UNION ALL
+SELECT col2 FROM table2 ORDER BY col2 UNION ALL
+SELECT col3 FROM table3 LIMIT 10
+\`\`\`
+
+**✅ CORRECT PATTERNS THAT WORK:**
+
+**Option 1: LIMIT/ORDER BY at the very end ONLY (applies to entire result)**
+\`\`\`
+SELECT col1, col2 FROM table1 
+UNION ALL 
+SELECT col1, col2 FROM table2 
+UNION ALL
+SELECT col1, col2 FROM table3
+ORDER BY col1 
+LIMIT 10;
+\`\`\`
+
+**Option 2: Wrap individual SELECT in subqueries if needed**
+\`\`\`
+SELECT * FROM (SELECT col1, col2 FROM table1 ORDER BY col1 LIMIT 1) AS sub1
+UNION ALL
+SELECT * FROM (SELECT col1, col2 FROM table2 ORDER BY col2 LIMIT 1) AS sub2;
+\`\`\`
+
+**🚨 MANDATORY UNION VALIDATION CHECKLIST:**
+- ✅ **ZERO TOLERANCE**: No LIMIT clauses appear between SELECT and UNION keywords
+- ✅ **ZERO TOLERANCE**: No ORDER BY clauses appear in individual SELECT statements within UNION
+- ✅ **ABSOLUTE RULE**: Only place LIMIT and ORDER BY at the very end of the entire UNION statement  
+- ✅ **ALTERNATIVE**: If limiting individual SELECT statements, wrap each in a derived table with alias
+- ✅ **CRITICAL**: All SELECT statements in UNION must have EXACT same number of columns in EXACT same order
+- ✅ **CRITICAL**: Use CAST(NULL AS data_type) for missing columns to maintain column consistency
+
+**🚨🚨🚨 MANDATORY MULTI-SHEET EXCEL STRUCTURE REQUIREMENTS 🚨🚨🚨**
+
+**ABSOLUTE REQUIREMENT: ALWAYS GENERATE DIFFERENT SHEETS FOR EACH TABLE**
+
+**🚨 CRITICAL RULE: ONE SHEET PER TABLE INVOLVED IN QUERY 🚨**
+- **MANDATORY**: Each table involved in the query MUST have its own separate sheet in the UNION ALL structure
+- **NO EXCEPTIONS**: Even if only one record exists, create a separate sheet for each table
+- **COMPLETE COVERAGE**: Every table that contributes data to the query MUST appear as a distinct sheet_type
+
+**MULTI-SHEET STRUCTURE REQUIREMENTS:**
+- **MANDATORY ARRAY WRAPPER**: The response MUST be transformable into: [{ metadata: {...}, patients: [...], medications: [...], lab_results: [...], genetic_data: [...] }]
+- **SHEET_TYPE FIELD**: Every record must include a "sheet_type" field that corresponds to the source table name
+- **TABLE-TO-SHEET MAPPING**: Each table gets its own sheet_type (e.g., "patients" → "patient", "medication_histories" → "medication_history", "genetic_summaries" → "genetic_summary")
+- **METADATA SECTION**: Always include a "metadata" sheet with main_entity, main_entity_count, and main_entity_identifier
+- **FLAT RECORDS**: Each record within a sheet should be flat with no nested objects
+- **CONSISTENT STRUCTURE**: All records within the same sheet must have identical column structures
+- **FOREIGN KEY RELATIONSHIPS**: Use foreign keys (patient_id, record_id, etc.) to maintain relationships between sheets
+
+**🚨🚨🚨 METADATA AGGREGATION ANTI-PATTERNS - AVOID THESE MISTAKES 🚨🚨🚨**
+
+**❌ WRONG METADATA PATTERNS THAT CREATE MULTIPLE METADATA RECORDS:**
+\`\`\`
+-- WRONG! This creates separate metadata record for each patient
+SELECT 'metadata' as sheet_type, 'patients' as main_entity, 
+       CAST(COUNT(p.patient_id) AS VARCHAR(255)) as main_entity_count
+FROM patients p 
+WHERE [conditions]
+GROUP BY p.patient_id  -- WRONG! This creates multiple metadata records
+
+-- WRONG! This joins and creates duplicated metadata
+SELECT 'metadata' as sheet_type, 'patients' as main_entity,
+       CAST(1 AS VARCHAR(255)) as main_entity_count  
+FROM patients p JOIN other_table t ON p.id = t.patient_id
+WHERE [conditions]  -- WRONG! Creates one record per join match
+\`\`\`
+
+**✅ CORRECT METADATA PATTERN - SINGLE AGGREGATED RECORD:**
+\`\`\`
+-- CORRECT! This creates exactly 1 metadata record with total count
+SELECT 'metadata' as sheet_type, 'patients' as main_entity,
+       CAST(COUNT(DISTINCT p.patient_id) AS VARCHAR(255)) as main_entity_count,
+       'patient_id' as main_entity_identifier,
+       CAST(NULL AS VARCHAR(255)) as [other columns...]
+FROM patients p 
+WHERE [conditions]
+-- NO GROUP BY - ensures single aggregated record with total count
+\`\`\`
+
+**🚨 MANDATORY TABLE-TO-SHEET GENERATION PATTERN 🚨**
+
+**STEP 1: Always start with METADATA sheet (SINGLE SUMMARY RECORD ONLY)**
+\`\`\`
+SELECT 'metadata' as sheet_type, 
+       'main_entity_name' as main_entity,
+       CAST(COUNT(DISTINCT main_table.primary_key) AS VARCHAR(255)) as main_entity_count,
+       'primary_key_name' as main_entity_identifier,
+       CAST(NULL AS VARCHAR(255)) for all other columns
+FROM main_table 
+WHERE [apply SAME query conditions as other sheets]
+-- NO GROUP BY - This should return exactly 1 aggregated record with total count
+\`\`\`
+
+**🚨 CRITICAL METADATA REQUIREMENTS 🚨**
+- **SINGLE AGGREGATED RECORD**: Metadata sheet must return exactly 1 record that aggregates ALL matched entities
+- **TOTAL COUNT**: main_entity_count should be the TOTAL number of matched records (e.g., if 2 patients match, show count=2 in ONE record)
+- **NO MULTIPLE RECORDS**: Do NOT create separate metadata records for each matched entity
+- **PROPER AGGREGATION**: Use COUNT(DISTINCT) without GROUP BY to get single summary count
+- **EXAMPLE**: If 2 patients match conditions, return 1 metadata record with main_entity_count=2, NOT 2 separate metadata records
+- **CONDITION ALIGNMENT**: Apply the SAME WHERE conditions to metadata count as applied to data sheets
+
+**STEP 2: Generate ONE SELECT statement for EACH table involved (MATCHED RECORDS ONLY)**
+- patients table → 'patient' sheet_type
+- medication_histories table → 'medication_history' sheet_type  
+- genetic_summaries table → 'genetic_summary' sheet_type
+- medication_report table → 'medication_report' sheet_type
+- lab_results table → 'lab_result' sheet_type
+- clinical_history table → 'clinical_history' sheet_type
+- risk_details table → 'risk_detail' sheet_type
+- And so on for EVERY table
+
+**🚨 CRITICAL RECORD FILTERING REQUIREMENTS 🚨**
+- **MATCHED RECORDS ONLY**: Each table's SELECT statement must include WHERE conditions that match the user's query requirements
+- **NO UNMATCHED RECORDS**: Do not include records that don't satisfy the query conditions  
+- **CONSISTENT FILTERING**: Apply the same logical filtering conditions across all table sheets
+- **CONDITIONAL JOIN RESULTS**: Only include records where the JOIN conditions and WHERE clauses are satisfied
+
+**STEP 3: Use UNION ALL to combine ALL sheet SELECT statements**
+
+**EXAMPLE UNION ALL STRUCTURE FOR MULTI-SHEET:**
+\`\`\`sql
+-- METADATA SHEET: Single aggregated record with TOTAL count of ALL matched records
+SELECT 
+  'metadata' as sheet_type,
+  'patients' as main_entity,
+  CAST(COUNT(DISTINCT p.patient_id) AS VARCHAR(255)) as main_entity_count,
+  'patient_id' as main_entity_identifier,
+  CAST(NULL as VARCHAR(255)) as patient_id,
+  CAST(NULL as VARCHAR(255)) as gender,
+  -- Add ALL columns from ALL tables with proper CAST(NULL AS data_type)
+FROM patients p
+WHERE [apply SAME conditions as used in data sheets]
+-- CRITICAL: NO GROUP BY clause - this ensures exactly 1 summary record with total count
+-- If 2 patients match: this returns 1 record with main_entity_count=2
+-- If 5 patients match: this returns 1 record with main_entity_count=5
+UNION ALL
+
+-- PATIENT SHEET: Only patients that match query conditions  
+SELECT 
+  'patient' as sheet_type,
+  CAST(NULL as VARCHAR(255)) as main_entity,
+  CAST(NULL as VARCHAR(255)) as main_entity_count,
+  CAST(NULL as VARCHAR(255)) as main_entity_identifier,
+  CAST(p.patient_id AS VARCHAR(255)) as patient_id,
+  CAST(p.gender AS VARCHAR(255)) as gender,  -- ONLY gender from patients unless explicitly requested
+  -- Add ALL columns with proper casting
+FROM patients p
+WHERE [apply query conditions - only include matched records]
+UNION ALL
+
+-- CONTINUE for all other tables with proper WHERE conditions
+-- Each table sheet should only include records that satisfy query conditions
+\`\`\`
+
+**🚨 CRITICAL TYPE COMPATIBILITY FOR UNION ALL** 🚨
+**MANDATORY TYPE CASTING RULES:**
+- **STRING COLUMNS**: Use CAST(NULL AS VARCHAR(255)) or CAST(value AS VARCHAR(255)) for text data
+- **INTEGER COLUMNS**: Use CAST(NULL AS INTEGER) or CAST(value AS INTEGER) for numeric data  
+- **DATE COLUMNS**: Use CAST(NULL AS DATE) or CAST(value AS DATE) for date data
+- **UNIVERSAL TYPE STRATEGY**: When in doubt, cast ALL columns to VARCHAR(255) to ensure compatibility
+
+**🚨 FINAL RESTRUCTURING VALIDATION** 🚨
+Before generating your SQL, verify:
+✅ Query uses UNION ALL structure for multi-sheet format
+✅ All SELECT statements have EXACT same number of columns in EXACT same order
+✅ All columns properly cast to consistent data types
+✅ Sheet_type field included in every SELECT statement
+✅ Metadata section included with main entity information
+✅ Patient table restricted to gender column only (unless explicitly requested)
+✅ **SYNTAX ERROR PREVENTION**: No LIMIT clauses between SELECT and UNION keywords
+✅ **SYNTAX ERROR PREVENTION**: No ORDER BY clauses in individual SELECT statements within UNION
+✅ **SYNTAX ERROR PREVENTION**: Only place LIMIT and ORDER BY at the very end of entire UNION statement
+✅ All column names verified against schema and sample data
+✅ No invented/assumed column names used
+✅ **MULTI-SHEET REQUIREMENT**: Each table involved in query has its own separate sheet_type in UNION structure
+✅ **TABLE COVERAGE**: Every table referenced in the query appears as a distinct SELECT statement with unique sheet_type
+✅ **SHEET NAMING**: Sheet_type names properly map to table names (e.g., patients → 'patient', medication_histories → 'medication_history')
+✅ **MANDATORY SHEETS**: At minimum, query contains 'metadata' sheet + one sheet per table involved
+✅ **METADATA SINGLE AGGREGATED RECORD**: Metadata sheet returns exactly 1 record with TOTAL count of ALL matched records (no GROUP BY in metadata query)
+✅ **NO MULTIPLE METADATA RECORDS**: Avoid creating separate metadata records for each entity - use COUNT(DISTINCT) without GROUP BY
+✅ **MATCHED RECORDS ONLY**: Each table sheet includes only records that satisfy the query conditions
+✅ **CONSISTENT CONDITIONS**: Same WHERE conditions applied across metadata count and data sheets
+✅ **NO UNMATCHED RECORDS**: Exclude records that don't meet query criteria from all sheets
+
+**CRITICAL: Generate SQL that produces multi-sheet Excel ready results with proper UNION ALL structure, consistent data types, and all required fields for Excel export transformation.**
+
+**🚨 FINAL SYNTAX ERROR PREVENTION REMINDER 🚨**
+**BEFORE SUBMITTING YOUR SQL QUERY:**
+1. **SCAN for any LIMIT or ORDER BY clauses in the middle of UNION statements**
+2. **VERIFY that LIMIT and ORDER BY only appear at the very end**  
+3. **CONFIRM no "LIMIT 1 UNION ALL" patterns exist - these ALWAYS cause syntax errors**
+4. **Double-check that each SELECT statement ends cleanly before UNION ALL**
+5. **VALIDATE that EVERY table involved in the query has its own separate SELECT statement with unique sheet_type**
+6. **ENSURE that you have created one sheet per table (e.g., 'patient', 'medication_history', 'genetic_summary', etc.)**
+7. **VERIFY that metadata sheet returns exactly 1 aggregated summary record with TOTAL count of ALL matched records (use COUNT(DISTINCT) without GROUP BY)**
+8. **CONFIRM that all table sheets include only records matching the query conditions (no unmatched records)**
+9. **ENSURE no multiple metadata records are created - metadata should aggregate all matched entities into single count**
 
 USER QUERY: ${query}
 `;
